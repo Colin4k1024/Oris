@@ -2,6 +2,9 @@
 // This demonstrates the Hybrid RAG implementation with query enhancement, retrieval validation, and answer validation
 
 #[cfg(feature = "postgres")]
+use std::sync::Arc;
+
+#[cfg(feature = "postgres")]
 use oris_runtime::{
     embedding::openai::openai_embedder::OpenAiEmbedder,
     llm::openai::{OpenAI, OpenAIModel},
