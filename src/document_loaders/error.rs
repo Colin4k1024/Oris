@@ -1,0 +1,68 @@
+use std::{io, string::FromUtf8Error};
+
+use thiserror::Error;
+
+use crate::text_splitter::TextSplitterError;
+
+#[derive(Error, Debug)]
+pub enum LoaderError {
+    #[error("Error loading document: {0}")]
+    LoadDocumentError(String),
+
+    #[error("{0}")]
+    TextSplitterError(#[from] TextSplitterError),
+
+    #[error(transparent)]
+    IOError(#[from] io::Error),
+
+    #[error(transparent)]
+    FromUtf8Error(#[from] FromUtf8Error),
+
+    #[error(transparent)]
+    CSVError(#[from] csv::Error),
+
+    #[error(transparent)]
+    JsonError(#[from] serde_json::Error),
+
+    #[cfg(feature = "yaml")]
+    #[error(transparent)]
+    YamlError(#[from] serde_yaml::Error),
+
+    #[cfg(feature = "toml")]
+    #[error(transparent)]
+    TomlError(#[from] toml::de::Error),
+
+    #[cfg(feature = "xml")]
+    #[error("XML parsing error: {0}")]
+    XmlError(String),
+
+    #[cfg(feature = "excel")]
+    #[error("Excel parsing error: {0}")]
+    ExcelError(String),
+
+    #[cfg(any(feature = "lopdf"))]
+    #[cfg(not(feature = "pdf-extract"))]
+    #[error(transparent)]
+    LoPdfError(#[from] lopdf::Error),
+
+    #[cfg(feature = "pdf-extract")]
+    #[error(transparent)]
+    PdfExtractError(#[from] pdf_extract::Error),
+
+    #[cfg(feature = "pdf-extract")]
+    #[error(transparent)]
+    PdfExtractOutputError(#[from] pdf_extract::OutputError),
+
+    #[error(transparent)]
+    ReadabilityError(#[from] readability::error::Error),
+
+    #[error(transparent)]
+    JoinError(#[from] tokio::task::JoinError),
+
+    #[cfg(feature = "git")]
+    #[error(transparent)]
+    DiscoveryError(#[from] gix::discover::Error),
+
+    #[error("Error: {0}")]
+    OtherError(String),
+}
