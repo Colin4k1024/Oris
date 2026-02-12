@@ -38,6 +38,16 @@ jobs:
             echo "git tag version (${{ env.TAG_VERSION }}) does not match oris-runtime Cargo.toml version (v${{ env.CARGO_VERSION }})"
             exit 1
           fi
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
       - name: install pandoc
         run: sudo apt-get install pandoc
       - name: Install Rust
@@ -47,7 +57,9 @@ jobs:
           override: true
           profile: minimal
           components: rustfmt, clippy
-      # - uses: swatinem/rust-cache@v2.7.3
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-build"
       - name: Rust fmt
         uses: actions-rs/cargo@v1
         with:
