@@ -406,7 +406,10 @@ mod tests {
         let latest = saver.get("thread-sqlite", None).await.unwrap();
         assert!(latest.is_some());
         assert_eq!(latest.as_ref().unwrap().thread_id(), "thread-sqlite");
-        assert_eq!(latest.unwrap().config.checkpoint_id.as_deref(), Some(id1.as_str()));
+        assert_eq!(
+            latest.unwrap().config.checkpoint_id.as_deref(),
+            Some(id1.as_str())
+        );
 
         let by_id = saver.get("thread-sqlite", Some(&id1)).await.unwrap();
         assert!(by_id.is_some());
@@ -446,7 +449,11 @@ mod tests {
         let latest = saver.get("thread-multi", None).await.unwrap().unwrap();
         assert_eq!(latest.config.checkpoint_id.as_deref(), Some(id2.as_str()));
 
-        let first = saver.get("thread-multi", Some(&id1)).await.unwrap().unwrap();
+        let first = saver
+            .get("thread-multi", Some(&id1))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(first.values.messages.len(), 1);
     }
 }

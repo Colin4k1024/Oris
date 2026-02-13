@@ -16,10 +16,7 @@ pub enum GraphStepOnceResult<S: State> {
         next_node: String,
     },
     /// Interrupt reached (e.g. human-in-the-loop).
-    Interrupt {
-        state: S,
-        value: Value,
-    },
+    Interrupt { state: S, value: Value },
     /// Graph reached END.
     Complete { state: S },
 }

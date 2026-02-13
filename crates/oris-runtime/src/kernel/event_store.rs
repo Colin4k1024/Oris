@@ -35,11 +35,21 @@ impl Default for InMemoryEventStore {
 impl EventStore for InMemoryEventStore {
     fn append(&self, run_id: &RunId, events: &[Event]) -> Result<Seq, KernelError> {
         if events.is_empty() {
-            let logs = self.logs.read().map_err(|e| KernelError::EventStore(e.to_string()))?;
-            let last = logs.get(run_id).and_then(|l| l.last()).map(|e| e.seq).unwrap_or(0);
+            let logs = self
+                .logs
+                .read()
+                .map_err(|e| KernelError::EventStore(e.to_string()))?;
+            let last = logs
+                .get(run_id)
+                .and_then(|l| l.last())
+                .map(|e| e.seq)
+                .unwrap_or(0);
             return Ok(last);
         }
-        let mut logs = self.logs.write().map_err(|e| KernelError::EventStore(e.to_string()))?;
+        let mut logs = self
+            .logs
+            .write()
+            .map_err(|e| KernelError::EventStore(e.to_string()))?;
         let log = logs.entry(run_id.clone()).or_default();
         let start_seq = Self::next_seq(log);
         for (i, event) in events.iter().cloned().enumerate() {
@@ -52,7 +62,10 @@ impl EventStore for InMemoryEventStore {
     }
 
     fn scan(&self, run_id: &RunId, from: Seq) -> Result<Vec<SequencedEvent>, KernelError> {
-        let logs = self.logs.read().map_err(|e| KernelError::EventStore(e.to_string()))?;
+        let logs = self
+            .logs
+            .read()
+            .map_err(|e| KernelError::EventStore(e.to_string()))?;
         let log = match logs.get(run_id) {
             Some(l) => l,
             None => return Ok(Vec::new()),
@@ -61,7 +74,10 @@ impl EventStore for InMemoryEventStore {
     }
 
     fn head(&self, run_id: &RunId) -> Result<Seq, KernelError> {
-        let logs = self.logs.read().map_err(|e| KernelError::EventStore(e.to_string()))?;
+        let logs = self
+            .logs
+            .read()
+            .map_err(|e| KernelError::EventStore(e.to_string()))?;
         Ok(logs
             .get(run_id)
             .and_then(|l| l.last())

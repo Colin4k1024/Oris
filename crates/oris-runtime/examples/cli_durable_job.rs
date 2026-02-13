@@ -72,7 +72,9 @@ fn build_graph_and_compiled(
         let mut update = HashMap::new();
         update.insert(
             "messages".to_string(),
-            serde_json::to_value(vec![Message::new_ai_message("Approval step (no interrupt in run)")])?,
+            serde_json::to_value(vec![Message::new_ai_message(
+                "Approval step (no interrupt in run)",
+            )])?,
         );
         Ok(update)
     });
@@ -93,7 +95,8 @@ fn build_graph_and_compiled(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let db_path = std::env::var("ORIS_SQLITE_DB").unwrap_or_else(|_| "oris_cli_checkpoints.db".into());
+    let db_path =
+        std::env::var("ORIS_SQLITE_DB").unwrap_or_else(|_| "oris_cli_checkpoints.db".into());
 
     let (cmd, thread_id, checkpoint_id) = match parse_args(&args) {
         Some(t) => t,
@@ -115,14 +118,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cmd.as_str() {
         "run" => {
-            let initial =
-                MessagesState::with_messages(vec![Message::new_human_message("CLI run")]);
+            let initial = MessagesState::with_messages(vec![Message::new_human_message("CLI run")]);
             let state = compiled.invoke_with_config(Some(initial), &config).await?;
             println!("Run completed. Messages: {}", state.messages.len());
         }
         "list" => {
             let history = compiled.get_state_history(&config).await?;
-            println!("Checkpoints for thread_id '{}': {}", thread_id, history.len());
+            println!(
+                "Checkpoints for thread_id '{}': {}",
+                thread_id,
+                history.len()
+            );
             for (i, snap) in history.iter().enumerate() {
                 println!(
                     "  {}  checkpoint_id={:?}  created_at={}",

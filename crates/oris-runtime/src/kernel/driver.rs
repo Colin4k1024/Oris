@@ -35,7 +35,10 @@ pub struct BlockedInfo {
 #[derive(Clone, Debug)]
 pub enum Signal {
     Resume(serde_json::Value),
-    Signal { name: String, value: serde_json::Value },
+    Signal {
+        name: String,
+        value: serde_json::Value,
+    },
 }
 
 /// Kernel: event store, optional snapshot store, reducer, executor, step fn, policy.
@@ -71,8 +74,7 @@ impl<S: KernelState> Kernel<S> {
             Signal::Resume(v) => v.clone(),
             Signal::Signal { value, .. } => value.clone(),
         };
-        self.events
-            .append(run_id, &[Event::Resumed { value }])?;
+        self.events.append(run_id, &[Event::Resumed { value }])?;
         self.run_loop(run_id, initial_state)
     }
 
@@ -99,7 +101,8 @@ impl<S: KernelState> Kernel<S> {
                     }
                 }
                 Next::Do(action) => {
-                    self.policy.authorize(run_id, &action, &PolicyCtx::default())?;
+                    self.policy
+                        .authorize(run_id, &action, &PolicyCtx::default())?;
                     let before = self.events.head(run_id)?;
                     let action_id = format!("{}-{}", run_id, before + 1);
                     let payload = serde_json::to_value(&action)
@@ -123,13 +126,8 @@ impl<S: KernelState> Kernel<S> {
                             )?;
                         }
                         Ok(ActionResult::Failure(error)) => {
-                            self.events.append(
-                                run_id,
-                                &[Event::ActionFailed {
-                                    action_id,
-                                    error,
-                                }],
-                            )?;
+                            self.events
+                                .append(run_id, &[Event::ActionFailed { action_id, error }])?;
                         }
                         Err(mut e) => {
                             let mut attempt = 0u32;
@@ -218,11 +216,7 @@ impl<S: KernelState> Kernel<S> {
     /// If `snaps` is set and `load_latest(run_id)` returns a snapshot, state starts at
     /// `snap.state` and only events with seq > snap.at_seq are applied; otherwise
     /// starts at `initial_state` and replays from seq 1.
-    pub fn replay_from_snapshot(
-        &self,
-        run_id: &RunId,
-        initial_state: S,
-    ) -> Result<S, KernelError> {
+    pub fn replay_from_snapshot(&self, run_id: &RunId, initial_state: S) -> Result<S, KernelError> {
         let from_snap = self
             .snaps
             .as_ref()
@@ -338,7 +332,9 @@ mod tests {
             step: Box::new(InterruptOnceStep(true)),
             policy: Box::new(AllowAllPolicy),
         };
-        let status2 = k2.resume(&run_id, TestState(0), Signal::Resume(serde_json::json!(1))).unwrap();
+        let status2 = k2
+            .resume(&run_id, TestState(0), Signal::Resume(serde_json::json!(1)))
+            .unwrap();
         assert!(matches!(status2, RunStatus::Completed));
     }
 
@@ -369,7 +365,11 @@ mod tests {
             policy: Box::new(AllowAllPolicy),
         };
         let _ = k.replay(&run_id, TestState(0)).unwrap();
-        assert_eq!(exec_count.load(Ordering::SeqCst), 0, "replay must not call executor");
+        assert_eq!(
+            exec_count.load(Ordering::SeqCst),
+            0,
+            "replay must not call executor"
+        );
     }
 
     /// Same event log and initial state must yield identical state on multiple replays.
@@ -427,9 +427,16 @@ mod tests {
             "default policy says Fail so recoverable should be false"
         );
         let events = store.scan(&run_id, 1).unwrap();
-        let has_requested = events.iter().any(|e| matches!(e.event, Event::ActionRequested { .. }));
-        let has_failed = events.iter().any(|e| matches!(e.event, Event::ActionFailed { .. }));
-        assert!(has_requested && has_failed, "event log must contain ActionRequested and ActionFailed for the same action");
+        let has_requested = events
+            .iter()
+            .any(|e| matches!(e.event, Event::ActionRequested { .. }));
+        let has_failed = events
+            .iter()
+            .any(|e| matches!(e.event, Event::ActionFailed { .. }));
+        assert!(
+            has_requested && has_failed,
+            "event log must contain ActionRequested and ActionFailed for the same action"
+        );
     }
 
     /// Step that returns Next::Do once so the driver executes one action.
@@ -487,9 +494,7 @@ mod tests {
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
         };
-        let state = k
-            .replay_from_snapshot(&run_id, TestState(0))
-            .unwrap();
+        let state = k.replay_from_snapshot(&run_id, TestState(0)).unwrap();
         assert_eq!(state.0, 30, "only events after at_seq=2 (seq 3) applied");
     }
 }

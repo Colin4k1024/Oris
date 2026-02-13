@@ -114,10 +114,7 @@ mod tests {
                 let mut msgs = msgs;
                 msgs.push(Message::new_ai_message("done"));
                 let mut update = std::collections::HashMap::new();
-                update.insert(
-                    "messages".to_string(),
-                    serde_json::to_value(msgs).unwrap(),
-                );
+                update.insert("messages".to_string(), serde_json::to_value(msgs).unwrap());
                 Ok(update)
             }
         });

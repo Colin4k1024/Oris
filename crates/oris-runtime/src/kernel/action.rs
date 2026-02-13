@@ -23,7 +23,9 @@ pub enum Action {
         millis: u64,
     },
     /// Human-in-the-loop or external signal.
-    WaitSignal { name: String },
+    WaitSignal {
+        name: String,
+    },
 }
 
 /// Result of executing an action (must be turned into events by the driver).

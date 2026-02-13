@@ -29,15 +29,9 @@ pub enum Event {
         payload: Value,
     },
     /// The action completed successfully; output is stored for replay.
-    ActionSucceeded {
-        action_id: String,
-        output: Value,
-    },
+    ActionSucceeded { action_id: String, output: Value },
     /// The action failed; error is stored for audit and retry policy.
-    ActionFailed {
-        action_id: String,
-        error: String,
-    },
+    ActionFailed { action_id: String, error: String },
     /// Execution was interrupted (e.g. human-in-the-loop).
     Interrupted { value: Value },
     /// Execution was resumed with a value after an interrupt.

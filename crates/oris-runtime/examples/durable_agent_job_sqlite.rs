@@ -69,7 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let compiled = graph.compile_with_persistence(Some(checkpointer.clone()), None)?;
     let config = RunnableConfig::with_thread_id(THREAD_ID);
 
-    println!("Phase 1: Start job (will stop at approval). DB: {}", db_path);
+    println!(
+        "Phase 1: Start job (will stop at approval). DB: {}",
+        db_path
+    );
     let initial_state =
         MessagesState::with_messages(vec![Message::new_human_message("Start durable job")]);
     let result = compiled
@@ -77,7 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     if let Some(interrupts) = &result.interrupt {
-        println!("  -> Interrupted for approval ({} interrupt(s))", interrupts.len());
+        println!(
+            "  -> Interrupted for approval ({} interrupt(s))",
+            interrupts.len()
+        );
         for (i, v) in interrupts.iter().enumerate() {
             println!("     [{}] {}", i + 1, v.value);
         }

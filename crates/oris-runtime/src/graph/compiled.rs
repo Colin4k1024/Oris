@@ -16,7 +16,6 @@ use super::{
     interrupts::{
         set_interrupt_context, Interrupt, InterruptContext, InvokeResult, StateOrCommand,
     },
-    trace::TraceEvent,
     node::Node,
     persistence::{
         checkpointer::CheckpointerBox,
@@ -31,6 +30,7 @@ use super::{
         metadata::{MessageChunk, MessageMetadata},
         mode::StreamMode,
     },
+    trace::TraceEvent,
 };
 
 /// CompiledGraph - an executable graph ready for execution
@@ -304,11 +304,14 @@ impl<S: State + 'static> CompiledGraph<S> {
         let store = self.store.clone();
 
         let node_to_run = if current_node.is_empty() || current_node == START {
-            let edges = self.adjacency.get(START).ok_or_else(|| {
-                GraphError::ExecutionError("No edges from START".to_string())
-            })?;
+            let edges = self
+                .adjacency
+                .get(START)
+                .ok_or_else(|| GraphError::ExecutionError("No edges from START".to_string()))?;
             if edges.is_empty() {
-                return Err(GraphError::ExecutionError("No edges from START".to_string()));
+                return Err(GraphError::ExecutionError(
+                    "No edges from START".to_string(),
+                ));
             }
             if edges.len() != 1 {
                 return Err(GraphError::ExecutionError(
@@ -335,13 +338,12 @@ impl<S: State + 'static> CompiledGraph<S> {
             GraphError::ExecutionError(format!("No edges from node: {}", node_to_run))
         })?;
 
-        let node = self.nodes.get(&node_to_run).ok_or_else(|| {
-            GraphError::NodeNotFound(node_to_run.clone())
-        })?;
+        let node = self
+            .nodes
+            .get(&node_to_run)
+            .ok_or_else(|| GraphError::NodeNotFound(node_to_run.clone()))?;
 
-        let update_result = node
-            .invoke_with_context(current_state, config, store)
-            .await;
+        let update_result = node.invoke_with_context(current_state, config, store).await;
 
         match update_result {
             Ok(update) => {
@@ -1461,10 +1463,7 @@ impl<S: State + 'static> CompiledGraph<S> {
                         .get(thread_id, Some(checkpoint_id))
                         .await
                         .map_err(|e| {
-                            GraphError::ExecutionError(format!(
-                                "Failed to load checkpoint: {}",
-                                e
-                            ))
+                            GraphError::ExecutionError(format!("Failed to load checkpoint: {}", e))
                         })?
                         .ok_or_else(|| {
                             GraphError::ExecutionError(format!(

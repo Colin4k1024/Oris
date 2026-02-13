@@ -45,11 +45,7 @@ pub trait Policy: Send + Sync {
     ) -> Result<(), KernelError>;
 
     /// Whether to retry after an error (and optionally after a delay).
-    fn retry_strategy(
-        &self,
-        err: &dyn std::fmt::Display,
-        _action: &Action,
-    ) -> RetryDecision {
+    fn retry_strategy(&self, err: &dyn std::fmt::Display, _action: &Action) -> RetryDecision {
         let _ = err;
         RetryDecision::Fail
     }
@@ -126,7 +122,10 @@ impl Policy for AllowListPolicy {
                 if self.allowed_providers.contains(provider) {
                     Ok(())
                 } else {
-                    Err(KernelError::Policy(format!("provider not allowed: {}", provider)))
+                    Err(KernelError::Policy(format!(
+                        "provider not allowed: {}",
+                        provider
+                    )))
                 }
             }
             Action::Sleep { .. } | Action::WaitSignal { .. } => Ok(()),
@@ -152,7 +151,12 @@ impl<P: Policy> RetryWithBackoffPolicy<P> {
 }
 
 impl<P: Policy> Policy for RetryWithBackoffPolicy<P> {
-    fn authorize(&self, run_id: &RunId, action: &Action, ctx: &PolicyCtx) -> Result<(), KernelError> {
+    fn authorize(
+        &self,
+        run_id: &RunId,
+        action: &Action,
+        ctx: &PolicyCtx,
+    ) -> Result<(), KernelError> {
         self.inner.authorize(run_id, action, ctx)
     }
 

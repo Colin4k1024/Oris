@@ -37,11 +37,7 @@ mod time_travel_tests {
 
         // First run: execute to completion (creates checkpoints)
         let first = compiled
-            .invoke_with_config_and_mode(
-                Some(initial_state.clone()),
-                &config,
-                DurabilityMode::Sync,
-            )
+            .invoke_with_config_and_mode(Some(initial_state.clone()), &config, DurabilityMode::Sync)
             .await
             .unwrap();
         assert!(!first.messages.is_empty());

@@ -71,9 +71,11 @@ impl<S: State + KernelState + 'static> StepFn<GraphStepState<S>> for GraphStepFn
             )
         })?;
         let config = self.config.as_ref();
-        let result = handle.block_on(
-            self.graph.step_once(&state.graph_state, &state.current_node, config),
-        );
+        let result = handle.block_on(self.graph.step_once(
+            &state.graph_state,
+            &state.current_node,
+            config,
+        ));
         match result.map_err(|e| KernelError::Driver(e.to_string()))? {
             GraphStepOnceResult::Emit {
                 executed_node,
@@ -91,9 +93,9 @@ impl<S: State + KernelState + 'static> StepFn<GraphStepState<S>> for GraphStepFn
                     payload,
                 }]))
             }
-            GraphStepOnceResult::Interrupt { value, .. } => Ok(Next::Interrupt(InterruptInfo {
-                value,
-            })),
+            GraphStepOnceResult::Interrupt { value, .. } => {
+                Ok(Next::Interrupt(InterruptInfo { value }))
+            }
             GraphStepOnceResult::Complete { .. } => Ok(Next::Complete),
         }
     }
@@ -199,6 +201,9 @@ mod tests {
         let compiled = graph.compile().unwrap();
         let state = MessagesState::new();
         let r = compiled.step_once(&state, START, None).await.unwrap();
-        assert!(matches!(r, GraphStepOnceResult::Complete { .. }), "START -> node1 -> END: one step runs node1 and reaches END");
+        assert!(
+            matches!(r, GraphStepOnceResult::Complete { .. }),
+            "START -> node1 -> END: one step runs node1 and reaches END"
+        );
     }
 }
