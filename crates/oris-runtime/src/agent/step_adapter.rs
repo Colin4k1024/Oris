@@ -56,6 +56,8 @@ impl AgentStepFnAdapter {
 }
 
 impl StepFn<AgentStepState> for AgentStepFnAdapter {
+    /// Callers must invoke the kernel from a thread that has an entered Tokio runtime;
+    /// do not call from inside an async task (to avoid blocking the runtime).
     fn next(&self, state: &AgentStepState) -> Result<Next, KernelError> {
         let agent = Arc::clone(&self.agent);
         let config = self.config.clone();

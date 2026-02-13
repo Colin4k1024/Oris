@@ -10,6 +10,8 @@ use crate::graph::state::State;
 pub enum GraphStepOnceResult<S: State> {
     /// Node produced state update; run next node (may be END).
     Emit {
+        /// Node that was just executed (for audit / step_id).
+        executed_node: String,
         new_state: S,
         next_node: String,
     },

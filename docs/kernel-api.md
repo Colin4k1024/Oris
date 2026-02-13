@@ -129,7 +129,12 @@ Execution is **event-first**: the event log is the single source of truth; state
    A snapshot stores `state` and `at_seq` (the seq up to which that state was built). Rebuild = load snapshot state, then replay events with seq > at_seq. Snapshots are an optimization; correctness depends only on the event stream.
 
 4. **Failure and retry**  
-   On executor error the driver appends **ActionFailed** (so the log stays consistent), then consults Policy `retry_strategy`. If the policy returns **Fail**, the run returns `RunStatus::Failed { recoverable }`; otherwise the driver may retry (with optional backoff) up to a limit, then fail.
+   On executor error the driver appends **ActionFailed** (so the log stays consistent), then consults Policy `retry_strategy_attempt`. If the policy returns **Fail**, the run returns `RunStatus::Failed { recoverable }`; otherwise the driver retries (with optional backoff). The policy is responsible for eventually returning Fail so the loop terminates.
+
+### 10.1 Event field semantics
+
+- **StateUpdated.step_id** — The step/node that produced this update (e.g. the graph node that just ran). For the graph adapter, the next node to run (cursor) is carried in the payload under `next_node` when present (envelope format).
+- **ActionRequested / ActionSucceeded / ActionFailed** — One ActionRequested is appended per logical action. On executor retries the driver does not append another Requested; after retries complete, a single ActionFailed is appended (no duplicate Requested).
 
 ---
 

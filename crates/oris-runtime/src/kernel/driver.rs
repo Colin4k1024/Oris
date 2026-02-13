@@ -12,8 +12,6 @@ use crate::kernel::state::KernelState;
 use crate::kernel::step::{InterruptInfo, Next, StepFn};
 use crate::kernel::KernelError;
 
-const MAX_RETRIES: u32 = 10;
-
 /// Standardized status of a run after run_until_blocked or resume.
 #[derive(Clone, Debug)]
 pub enum RunStatus {
@@ -153,16 +151,6 @@ impl<S: KernelState> Kernel<S> {
                                     RetryDecision::RetryAfterMs(ms) => {
                                         std::thread::sleep(Duration::from_millis(ms));
                                     }
-                                }
-                                if attempt >= MAX_RETRIES {
-                                    self.events.append(
-                                        run_id,
-                                        &[Event::ActionFailed {
-                                            action_id: action_id.clone(),
-                                            error: e.to_string(),
-                                        }],
-                                    )?;
-                                    return Ok(RunStatus::Failed { recoverable: true });
                                 }
                                 attempt += 1;
                                 match self.exec.execute(run_id, &action) {

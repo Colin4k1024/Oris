@@ -62,17 +62,27 @@ impl<S: State + KernelState + 'static> GraphStepFnAdapter<S> {
 }
 
 impl<S: State + KernelState + 'static> StepFn<GraphStepState<S>> for GraphStepFnAdapter<S> {
+    /// Callers must invoke the kernel from a thread that has an entered Tokio runtime;
+    /// do not call from inside an async task (to avoid blocking the runtime).
     fn next(&self, state: &GraphStepState<S>) -> Result<Next, KernelError> {
         let config = self.config.as_ref();
         let result = tokio::runtime::Handle::current().block_on(
             self.graph.step_once(&state.graph_state, &state.current_node, config),
         );
         match result.map_err(|e| KernelError::Driver(e.to_string()))? {
-            GraphStepOnceResult::Emit { new_state, next_node } => {
-                let payload = serde_json::to_value(&new_state)
+            GraphStepOnceResult::Emit {
+                executed_node,
+                new_state,
+                next_node,
+            } => {
+                let graph_state = serde_json::to_value(&new_state)
                     .map_err(|e| KernelError::Driver(e.to_string()))?;
+                let payload = serde_json::json!({
+                    "graph_state": graph_state,
+                    "next_node": next_node,
+                });
                 Ok(Next::Emit(vec![Event::StateUpdated {
-                    step_id: Some(next_node),
+                    step_id: Some(executed_node),
                     payload,
                 }]))
             }
@@ -84,7 +94,8 @@ impl<S: State + KernelState + 'static> StepFn<GraphStepState<S>> for GraphStepFn
     }
 }
 
-/// Reducer that applies events to GraphStepState: StateUpdated sets graph_state from payload and current_node from step_id.
+/// Reducer that applies events to GraphStepState.
+/// Supports envelope payload (`graph_state` + `next_node`) or legacy (payload = state, step_id = cursor).
 #[derive(Debug, Clone, Default)]
 pub struct GraphStepReducer;
 
@@ -98,10 +109,19 @@ where
         event: &crate::kernel::event::SequencedEvent,
     ) -> Result<(), KernelError> {
         if let Event::StateUpdated { step_id, payload } = &event.event {
-            state.graph_state = serde_json::from_value(payload.clone())
-                .map_err(|e| KernelError::EventStore(e.to_string()))?;
-            if let Some(ref next) = step_id {
-                state.current_node = next.clone();
+            if let (Some(gs), Some(nn)) = (
+                payload.get("graph_state"),
+                payload.get("next_node").and_then(|v| v.as_str()),
+            ) {
+                state.graph_state = serde_json::from_value(gs.clone())
+                    .map_err(|e| KernelError::EventStore(e.to_string()))?;
+                state.current_node = nn.to_string();
+            } else {
+                state.graph_state = serde_json::from_value(payload.clone())
+                    .map_err(|e| KernelError::EventStore(e.to_string()))?;
+                if let Some(ref next) = step_id {
+                    state.current_node = next.clone();
+                }
             }
         }
         Ok(())

@@ -289,6 +289,9 @@ impl<S: State + 'static> CompiledGraph<S> {
 
     /// Execute a single graph step from (current_state, current_node).
     /// Does not append events; used by GraphStepFnAdapter for kernel-driven execution.
+    ///
+    /// Currently requires exactly one outgoing edge from START and from each node;
+    /// multi-exit / conditional routing is not supported and will return an error.
     pub async fn step_once(
         &self,
         current_state: &S,
@@ -303,6 +306,11 @@ impl<S: State + 'static> CompiledGraph<S> {
             })?;
             if edges.is_empty() {
                 return Err(GraphError::ExecutionError("No edges from START".to_string()));
+            }
+            if edges.len() != 1 {
+                return Err(GraphError::ExecutionError(
+                    "step_once requires exactly one outgoing edge from START".to_string(),
+                ));
             }
             let edge = &edges[0];
             edge.get_target(current_state).await?
@@ -338,12 +346,18 @@ impl<S: State + 'static> CompiledGraph<S> {
                 if edges.is_empty() {
                     return Ok(GraphStepOnceResult::Complete { state: new_state });
                 }
+                if edges.len() != 1 {
+                    return Err(GraphError::ExecutionError(
+                        "step_once requires exactly one outgoing edge per node".to_string(),
+                    ));
+                }
                 let edge = &edges[0];
                 let next_node = edge.get_target(&new_state).await?;
                 if next_node == END {
                     Ok(GraphStepOnceResult::Complete { state: new_state })
                 } else {
                     Ok(GraphStepOnceResult::Emit {
+                        executed_node: node_to_run.clone(),
                         new_state,
                         next_node,
                     })

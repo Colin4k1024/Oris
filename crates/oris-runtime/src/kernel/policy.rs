@@ -1,6 +1,10 @@
 //! Policy: governance layer (authorize, retry, budget).
 //!
 //! Must exist even as a minimal implementation so Oris is not a "run any tool" demo.
+//!
+//! **Retry loop:** The driver calls `retry_strategy_attempt` on executor `Err` and only stops when
+//! the policy returns `Fail`. Implementations must eventually return `Fail` or the loop would not
+//! terminate; `RetryWithBackoffPolicy` does so after `max_retries` attempts.
 
 use std::collections::HashSet;
 
@@ -51,6 +55,7 @@ pub trait Policy: Send + Sync {
     }
 
     /// Retry strategy with attempt count (0-based). Default delegates to retry_strategy.
+    /// Applies only to executor `Err` (infrastructure failure). `ActionResult::Failure` is not retried.
     fn retry_strategy_attempt(
         &self,
         err: &dyn std::fmt::Display,
@@ -68,7 +73,8 @@ pub trait Policy: Send + Sync {
 }
 
 /// Policy that allows only actions whose tool/provider is in the given sets.
-/// Empty set means none allowed for that category; Sleep and WaitSignal are allowed by default.
+/// **Empty set = no tools or providers allowed** for that category. Sleep and WaitSignal are
+/// always allowed. To allow all tools/providers use `AllowAllPolicy`, or populate the sets explicitly.
 pub struct AllowListPolicy {
     pub allowed_tools: HashSet<String>,
     pub allowed_providers: HashSet<String>,
