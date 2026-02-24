@@ -78,4 +78,7 @@ pub enum KernelError {
     Policy(String),
     #[error("Driver error: {0}")]
     Driver(String),
+    /// Executor returned a structured action error (for policy retry decisions).
+    #[error("Executor: {0}")]
+    Executor(crate::kernel::action::ActionError),
 }

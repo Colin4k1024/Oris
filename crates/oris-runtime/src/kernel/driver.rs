@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::kernel::action::{ActionExecutor, ActionResult};
+use crate::kernel::action::{ActionError, ActionExecutor, ActionResult};
 use crate::kernel::event::{Event, EventStore};
 use crate::kernel::identity::{RunId, Seq};
 use crate::kernel::policy::{Policy, PolicyCtx, RetryDecision};
@@ -10,6 +10,7 @@ use crate::kernel::reducer::Reducer;
 use crate::kernel::snapshot::{Snapshot, SnapshotStore};
 use crate::kernel::state::KernelState;
 use crate::kernel::step::{InterruptInfo, Next, StepFn};
+use crate::kernel::timeline;
 use crate::kernel::KernelError;
 
 /// Standardized status of a run after run_until_blocked or resume.
@@ -132,8 +133,9 @@ impl<S: KernelState> Kernel<S> {
                         Err(mut e) => {
                             let mut attempt = 0u32;
                             loop {
+                                let action_err = ActionError::from_kernel_error(&e);
                                 let decision =
-                                    self.policy.retry_strategy_attempt(&e, &action, attempt);
+                                    self.policy.retry_strategy_attempt(&action_err, &action, attempt);
                                 match decision {
                                     RetryDecision::Fail => {
                                         self.events.append(
@@ -241,6 +243,14 @@ impl<S: KernelState> Kernel<S> {
         }
         Ok(state)
     }
+
+    /// Builds a run timeline (event list + final status) for audit/debugging. Serialize to JSON for UI/CLI.
+    pub fn run_timeline(
+        &self,
+        run_id: &RunId,
+    ) -> Result<timeline::RunTimeline, KernelError> {
+        timeline::run_timeline(self.events.as_ref(), run_id)
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +303,30 @@ mod tests {
         let run_id = "run-complete".to_string();
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(matches!(status, RunStatus::Completed));
+    }
+
+    #[test]
+    fn run_timeline_after_complete_has_events_and_json() {
+        let store = InMemoryEventStore::new();
+        let k = Kernel::<TestState> {
+            events: Box::new(store),
+            snaps: None,
+            reducer: Box::new(StateUpdatedOnlyReducer),
+            exec: Box::new(NoopActionExecutor),
+            step: Box::new(NoopStepFn),
+            policy: Box::new(AllowAllPolicy),
+        };
+        let run_id = "timeline-run".to_string();
+        let _ = k.run_until_blocked(&run_id, TestState(0)).unwrap();
+        let tl = k.run_timeline(&run_id).unwrap();
+        assert_eq!(tl.run_id, run_id);
+        let kinds: Vec<&str> = tl.events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"Completed"),
+            "timeline should contain Completed"
+        );
+        let json = serde_json::to_string(&tl).unwrap();
+        assert!(json.contains("Completed"));
     }
 
     struct InterruptOnceStep(bool);
@@ -408,6 +442,58 @@ mod tests {
         assert_eq!(s1.0, 20);
     }
 
+    /// Executor that fails with Transient up to N times then succeeds (for retry integration test).
+    struct TransientThenSuccessExecutor {
+        fail_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail_up_to: usize,
+    }
+    impl TransientThenSuccessExecutor {
+        fn new(fail_up_to: usize) -> Self {
+            Self {
+                fail_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                fail_up_to,
+            }
+        }
+    }
+    impl ActionExecutor for TransientThenSuccessExecutor {
+        fn execute(&self, _run_id: &RunId, _action: &Action) -> Result<ActionResult, KernelError> {
+            let n = self.fail_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_up_to {
+                Err(KernelError::Executor(ActionError::transient("transient")))
+            } else {
+                Ok(ActionResult::Success(serde_json::json!("ok")))
+            }
+        }
+    }
+
+    #[test]
+    fn run_until_blocked_retry_then_success() {
+        use crate::kernel::policy::RetryWithBackoffPolicy;
+        let store = Arc::new(InMemoryEventStore::new());
+        let run_id = "run-retry-ok".to_string();
+        let k = Kernel::<TestState> {
+            events: Box::new(SharedEventStore(Arc::clone(&store))),
+            snaps: None,
+            reducer: Box::new(StateUpdatedOnlyReducer),
+            exec: Box::new(TransientThenSuccessExecutor::new(2)),
+            step: Box::new(DoOnceThenCompleteStep::new()),
+            policy: Box::new(RetryWithBackoffPolicy::new(AllowAllPolicy, 3, 0)),
+        };
+        let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
+        assert!(matches!(status, RunStatus::Completed));
+        let events = store.scan(&run_id, 1).unwrap();
+        let succeeded = events
+            .iter()
+            .filter(|e| matches!(e.event, Event::ActionSucceeded { .. }))
+            .count();
+        let failed = events
+            .iter()
+            .filter(|e| matches!(e.event, Event::ActionFailed { .. }))
+            .count();
+        assert_eq!(succeeded, 1, "exactly one ActionSucceeded after retries");
+        assert_eq!(failed, 0, "no ActionFailed when retries eventually succeed");
+    }
+
     /// Failure path: executor returns Err → RunStatus::Failed and event log has ActionFailed for that action_id.
     #[test]
     fn run_until_blocked_failure_recovery() {
@@ -418,9 +504,9 @@ mod tests {
             snaps: None,
             reducer: Box::new(StateUpdatedOnlyReducer),
             exec: Box::new(CountingActionExecutor::new(Arc::new(AtomicUsize::new(0)))),
-            step: Box::new(DoOnceStep),
-            policy: Box::new(AllowAllPolicy),
-        };
+        step: Box::new(DoOnceThenCompleteStep::new()),
+        policy: Box::new(AllowAllPolicy),
+    };
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(
             matches!(status, RunStatus::Failed { recoverable } if !recoverable),
@@ -439,14 +525,28 @@ mod tests {
         );
     }
 
-    /// Step that returns Next::Do once so the driver executes one action.
-    struct DoOnceStep;
-    impl StepFn<TestState> for DoOnceStep {
+    /// Step that returns Next::Do once then Next::Complete so the driver executes one action then finishes.
+    struct DoOnceThenCompleteStep {
+        called: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl DoOnceThenCompleteStep {
+        fn new() -> Self {
+            Self {
+                called: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+    impl StepFn<TestState> for DoOnceThenCompleteStep {
         fn next(&self, _state: &TestState) -> Result<Next, KernelError> {
-            Ok(Next::Do(Action::CallTool {
-                tool: "dummy".into(),
-                input: serde_json::json!(null),
-            }))
+            let n = self.called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Ok(Next::Do(Action::CallTool {
+                    tool: "dummy".into(),
+                    input: serde_json::json!(null),
+                }))
+            } else {
+                Ok(Next::Complete)
+            }
         }
     }
 

@@ -11,12 +11,14 @@ pub mod event_store;
 pub mod identity;
 pub mod policy;
 pub mod reducer;
+pub mod runner;
 pub mod snapshot;
 pub mod state;
 pub mod step;
+pub mod timeline;
 pub mod stubs;
 
-pub use action::{Action, ActionExecutor, ActionResult};
+pub use action::{Action, ActionError, ActionErrorKind, ActionExecutor, ActionResult};
 pub use driver::{BlockedInfo, Kernel, RunStatus, Signal};
 pub use event::{Event, EventStore, KernelError, SequencedEvent};
 pub use event_store::{InMemoryEventStore, SharedEventStore};
@@ -25,7 +27,9 @@ pub use policy::{
     AllowListPolicy, BudgetRules, Policy, PolicyCtx, RetryDecision, RetryWithBackoffPolicy,
 };
 pub use reducer::{Reducer, StateUpdatedOnlyReducer};
+pub use runner::KernelRunner;
 pub use snapshot::{InMemorySnapshotStore, Snapshot, SnapshotStore};
 pub use state::KernelState;
 pub use step::{InterruptInfo, Next, StepFn};
+pub use timeline::{run_timeline, RunTimeline, RunStatusSummary, TimelineEntry};
 pub use stubs::{AllowAllPolicy, NoopActionExecutor, NoopStepFn};

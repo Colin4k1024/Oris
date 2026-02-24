@@ -44,6 +44,9 @@ pub struct CompiledGraph<S: State> {
     store: Option<StoreBox>,
     /// Optional kernel EventStore for event-first execution (2.0 pilot).
     event_store: Option<Arc<dyn EventStore>>,
+    /// When true (default), step_once is allowed. When false, step_once returns an error unless
+    /// config has allow_non_pure_step_once set—used to guard deterministic replay (nodes must not do I/O).
+    pure_graph: bool,
 }
 
 impl<S: State + 'static> CompiledGraph<S> {
@@ -86,6 +89,7 @@ impl<S: State + 'static> CompiledGraph<S> {
             checkpointer: None,
             store: None,
             event_store: None,
+            pure_graph: true,
         })
     }
 
@@ -102,7 +106,18 @@ impl<S: State + 'static> CompiledGraph<S> {
             checkpointer,
             store,
             event_store: None,
+            pure_graph: true,
         })
+    }
+
+    /// Mark this graph as non-pure (nodes may perform I/O). step_once will then error unless
+    /// RunnableConfig has allow_non_pure_step_once set. Use for graphs that call LLM/tools inside nodes
+    /// until they are refactored to emit Actions; keeps deterministic replay safe by default.
+    pub fn with_pure_guard(self, pure: bool) -> Self {
+        Self {
+            pure_graph: pure,
+            ..self
+        }
     }
 
     /// Attach a kernel EventStore for event-first execution (2.0 pilot).
@@ -301,6 +316,17 @@ impl<S: State + 'static> CompiledGraph<S> {
         current_node: &str,
         config: Option<&RunnableConfig>,
     ) -> Result<GraphStepOnceResult<S>, GraphError> {
+        if !self.pure_graph {
+            let allow = config.map_or(false, |c| c.allow_non_pure_step_once());
+            if !allow {
+                return Err(GraphError::ExecutionError(
+                    "step_once requires a pure graph (no I/O in nodes); use Actions instead, or set \
+                     configurable.allow_non_pure_step_once to true for compatibility."
+                        .to_string(),
+                ));
+            }
+        }
+
         let store = self.store.clone();
 
         let node_to_run = if current_node.is_empty() || current_node == START {
@@ -1830,5 +1856,73 @@ mod tests {
 
         // Should have at least NodeStart, NodeEnd, and GraphEnd events
         assert!(events.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn step_once_pure_graph_default_succeeds() {
+        let mut graph = StateGraph::<MessagesState>::new();
+        graph
+            .add_node(
+                "node1",
+                function_node("node1", |_s: &MessagesState| async move {
+                    Ok(std::collections::HashMap::new())
+                }),
+            )
+            .unwrap();
+        graph.add_edge(START, "node1");
+        graph.add_edge("node1", END);
+        let compiled = graph.compile().unwrap();
+        let state = MessagesState::new();
+        let r = compiled.step_once(&state, START, None).await.unwrap();
+        assert!(matches!(r, GraphStepOnceResult::Complete { .. }));
+    }
+
+    #[tokio::test]
+    async fn step_once_non_pure_without_allow_errors() {
+        let mut graph = StateGraph::<MessagesState>::new();
+        graph
+            .add_node(
+                "node1",
+                function_node("node1", |_s: &MessagesState| async move {
+                    Ok(std::collections::HashMap::new())
+                }),
+            )
+            .unwrap();
+        graph.add_edge(START, "node1");
+        graph.add_edge("node1", END);
+        let compiled = graph
+            .compile()
+            .unwrap()
+            .with_pure_guard(false);
+        let state = MessagesState::new();
+        let r = compiled.step_once(&state, START, None).await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().to_string().contains("pure graph"));
+    }
+
+    #[tokio::test]
+    async fn step_once_non_pure_with_allow_succeeds() {
+        let mut graph = StateGraph::<MessagesState>::new();
+        graph
+            .add_node(
+                "node1",
+                function_node("node1", |_s: &MessagesState| async move {
+                    Ok(std::collections::HashMap::new())
+                }),
+            )
+            .unwrap();
+        graph.add_edge(START, "node1");
+        graph.add_edge("node1", END);
+        let compiled = graph
+            .compile()
+            .unwrap()
+            .with_pure_guard(false);
+        let config = RunnableConfig::new().with_allow_non_pure_step_once(true);
+        let state = MessagesState::new();
+        let r = compiled
+            .step_once(&state, START, Some(&config))
+            .await
+            .unwrap();
+        assert!(matches!(r, GraphStepOnceResult::Complete { .. }));
     }
 }

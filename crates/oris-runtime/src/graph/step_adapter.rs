@@ -143,18 +143,13 @@ mod tests {
     use crate::graph::{function_node, StateGraph, END, START};
     use crate::kernel::driver::{Kernel, RunStatus};
     use crate::kernel::event_store::InMemoryEventStore;
+    use crate::kernel::runner::KernelRunner;
     use crate::kernel::stubs::{AllowAllPolicy, NoopActionExecutor};
     use std::sync::Arc;
 
-    /// Full kernel + adapter test. Requires a thread with an active Tokio runtime
-    /// (adapter uses block_on). Run with: cargo test graph_step_adapter_runs_to_complete -- --ignored
+    /// Full kernel + adapter test using KernelRunner (no manual runtime/block_in_place).
     #[test]
-    #[ignore = "requires Tokio runtime thread; run with --ignored"]
     fn graph_step_adapter_runs_to_complete() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
         let mut graph = StateGraph::<MessagesState>::new();
         graph
             .add_node(
@@ -176,12 +171,10 @@ mod tests {
             step: Box::new(adapter),
             policy: Box::new(AllowAllPolicy),
         };
+        let runner = KernelRunner::new(kernel);
         let run_id = "graph-step-test".to_string();
         let initial = GraphStepState::new(MessagesState::new());
-        let status = rt.block_on(async {
-            tokio::task::block_in_place(|| kernel.run_until_blocked(&run_id, initial))
-        });
-        let status = status.unwrap();
+        let status = runner.run_until_blocked_sync(&run_id, initial).unwrap();
         assert!(matches!(status, RunStatus::Completed));
     }
 

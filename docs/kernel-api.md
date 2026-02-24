@@ -72,6 +72,8 @@ For replay to stay deterministic and side-effect-free, **nodes executed via `ste
 
 ---
 
+**Guard (default strict):** A compiled graph is assumed pure unless marked with `with_pure_guard(false)`. If the graph is marked non-pure, `step_once` returns an error unless `RunnableConfig::allow_non_pure_step_once()` is true. This keeps deterministic replay safe by default.
+
 ## 5. Policy (governance)
 
 - The kernel must have a **Policy** layer (even if a minimal implementation).
@@ -92,6 +94,15 @@ For replay to stay deterministic and side-effect-free, **nodes executed via `ste
 
 When using **GraphStepFnAdapter** or **AgentStepFnAdapter**, the kernel’s sync `run_until_blocked` must run on a thread that has an **entered** Tokio runtime (the adapters use `block_on` internally). If there is no runtime, the adapters return a `Driver` error instead of panicking.
 
+**Recommended:** Use **`KernelRunner`** so you do not have to manage the runtime yourself:
+
+- **From sync code:** `KernelRunner::new(kernel).run_until_blocked_sync(run_id, initial_state)` — the runner runs the kernel on a dedicated thread with an internal runtime.
+- **From async code:** `KernelRunner::new(kernel).run_until_blocked_async(run_id, initial_state).await` — the runner uses `spawn_blocking` so the async reactor is not blocked.
+
+Examples: `kernel_runner_sync`, `kernel_runner_async`.
+
+**Advanced (manual runtime):** If you call `kernel.run_until_blocked(...)` directly:
+
 - **From sync code:** Create a runtime (e.g. `Runtime::new()`), enter it (e.g. `rt.enter()`), then call `kernel.run_until_blocked(...)` on that thread.
 - **From async code:** Use **`tokio::task::block_in_place(|| kernel.run_until_blocked(...))`** or run the kernel on a **dedicated blocking thread** (e.g. `spawn_blocking` with a runtime created inside that thread). Do **not** call `run_until_blocked` directly from an async task without one of these patterns, or you may block the runtime or deadlock.
 
@@ -103,6 +114,7 @@ When using **GraphStepFnAdapter** or **AgentStepFnAdapter**, the kernel’s sync
 - **Interrupt / resume** — Map to events Interrupted / Resumed; StepFn returns Next::Interrupt; driver exposes resume(run_id, signal).
 - **RunStatus** — Standardized status: `Completed`, `Blocked(BlockedInfo)` (interrupt or WaitSignal), `Running` (optional), `Failed { recoverable: bool }` (optional).
 - **Trace (TraceEvent)** — Current trace events (StepCompleted, InterruptReached, ResumeReceived) are a subset of kernel Event types; kernel Event covers also StateUpdated, ActionRequested/Succeeded/Failed, Completed.
+- **Run timeline (observability)** — `kernel.run_timeline(run_id)` returns a `RunTimeline` (ordered events per seq + final_status). Serialize with `serde_json::to_string(&timeline)` for JSON export; use for audit, debugging, or feeding a UI/CLI.
 
 ---
 

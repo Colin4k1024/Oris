@@ -69,6 +69,24 @@ impl RunnableConfig {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
     }
+
+    /// When true, allows step_once to run on a graph marked non-pure (with_pure_guard(false)).
+    /// Default is false; set to true only for compatibility when nodes perform I/O until refactored to Actions.
+    pub fn allow_non_pure_step_once(&self) -> bool {
+        self.configurable
+            .get("allow_non_pure_step_once")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Set allow_non_pure_step_once for step_once guard compatibility.
+    pub fn with_allow_non_pure_step_once(mut self, allow: bool) -> Self {
+        self.configurable.insert(
+            "allow_non_pure_step_once".to_string(),
+            Value::Bool(allow),
+        );
+        self
+    }
 }
 
 /// Checkpoint configuration
