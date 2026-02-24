@@ -135,8 +135,11 @@ impl<S: KernelState> Kernel<S> {
                             let mut attempt = 0u32;
                             loop {
                                 let action_err = ActionError::from_kernel_error(&e);
-                                let decision =
-                                    self.policy.retry_strategy_attempt(&action_err, &action, attempt);
+                                let decision = self.policy.retry_strategy_attempt(
+                                    &action_err,
+                                    &action,
+                                    attempt,
+                                );
                                 match decision {
                                     RetryDecision::Fail => {
                                         self.events.append(
@@ -246,10 +249,7 @@ impl<S: KernelState> Kernel<S> {
     }
 
     /// Builds a run timeline (event list + final status) for audit/debugging. Serialize to JSON for UI/CLI.
-    pub fn run_timeline(
-        &self,
-        run_id: &RunId,
-    ) -> Result<timeline::RunTimeline, KernelError> {
+    pub fn run_timeline(&self, run_id: &RunId) -> Result<timeline::RunTimeline, KernelError> {
         timeline::run_timeline(self.events.as_ref(), run_id)
     }
 }
@@ -459,7 +459,9 @@ mod tests {
     }
     impl ActionExecutor for TransientThenSuccessExecutor {
         fn execute(&self, _run_id: &RunId, _action: &Action) -> Result<ActionResult, KernelError> {
-            let n = self.fail_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = self
+                .fail_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_up_to {
                 Err(KernelError::Executor(ActionError::transient("transient")))
             } else {
@@ -506,9 +508,9 @@ mod tests {
             snaps: None,
             reducer: Box::new(StateUpdatedOnlyReducer),
             exec: Box::new(CountingActionExecutor::new(Arc::new(AtomicUsize::new(0)))),
-        step: Box::new(DoOnceThenCompleteStep::new()),
-        policy: Box::new(AllowAllPolicy),
-    };
+            step: Box::new(DoOnceThenCompleteStep::new()),
+            policy: Box::new(AllowAllPolicy),
+        };
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(
             matches!(status, RunStatus::Failed { recoverable } if !recoverable),
@@ -540,7 +542,9 @@ mod tests {
     }
     impl StepFn<TestState> for DoOnceThenCompleteStep {
         fn next(&self, _state: &TestState) -> Result<Next, KernelError> {
-            let n = self.called.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let n = self
+                .called
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n == 0 {
                 Ok(Next::Do(Action::CallTool {
                     tool: "dummy".into(),

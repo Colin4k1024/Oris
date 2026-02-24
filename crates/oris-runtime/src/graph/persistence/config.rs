@@ -81,10 +81,8 @@ impl RunnableConfig {
 
     /// Set allow_non_pure_step_once for step_once guard compatibility.
     pub fn with_allow_non_pure_step_once(mut self, allow: bool) -> Self {
-        self.configurable.insert(
-            "allow_non_pure_step_once".to_string(),
-            Value::Bool(allow),
-        );
+        self.configurable
+            .insert("allow_non_pure_step_once".to_string(), Value::Bool(allow));
         self
     }
 }

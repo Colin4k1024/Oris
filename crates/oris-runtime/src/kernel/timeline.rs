@@ -37,13 +37,9 @@ pub enum RunStatusSummary {
     Failed { recoverable: bool },
 }
 
-
 /// Build a RunTimeline from an event store by scanning all events for the run
 /// and deriving final status from the last event(s).
-pub fn run_timeline(
-    events: &dyn EventStore,
-    run_id: &RunId,
-) -> Result<RunTimeline, KernelError> {
+pub fn run_timeline(events: &dyn EventStore, run_id: &RunId) -> Result<RunTimeline, KernelError> {
     const FROM_SEQ: Seq = 1;
     let sequenced = events.scan(run_id, FROM_SEQ)?;
     let mut entries = Vec::new();
@@ -61,9 +57,7 @@ pub fn run_timeline(
                 ("ActionSucceeded".to_string(), None, Some(action_id.clone()))
             }
             Event::ActionFailed { action_id, .. } => {
-                final_status = RunStatusSummary::Failed {
-                    recoverable: false,
-                };
+                final_status = RunStatusSummary::Failed { recoverable: false };
                 ("ActionFailed".to_string(), None, Some(action_id.clone()))
             }
             Event::Interrupted { .. } => {

@@ -1890,10 +1890,7 @@ mod tests {
             .unwrap();
         graph.add_edge(START, "node1");
         graph.add_edge("node1", END);
-        let compiled = graph
-            .compile()
-            .unwrap()
-            .with_pure_guard(false);
+        let compiled = graph.compile().unwrap().with_pure_guard(false);
         let state = MessagesState::new();
         let r = compiled.step_once(&state, START, None).await;
         assert!(r.is_err());
@@ -1913,10 +1910,7 @@ mod tests {
             .unwrap();
         graph.add_edge(START, "node1");
         graph.add_edge("node1", END);
-        let compiled = graph
-            .compile()
-            .unwrap()
-            .with_pure_guard(false);
+        let compiled = graph.compile().unwrap().with_pure_guard(false);
         let config = RunnableConfig::new().with_allow_non_pure_step_once(true);
         let state = MessagesState::new();
         let r = compiled

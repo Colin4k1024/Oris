@@ -56,7 +56,8 @@ impl<S: KernelState> KernelRunner<S> {
             let result = kernel.run_until_blocked(&run_id, initial_state);
             let _ = tx.send(result);
         });
-        rx.recv().map_err(|_| KernelError::Driver("runner thread panicked or dropped".into()))?
+        rx.recv()
+            .map_err(|_| KernelError::Driver("runner thread panicked or dropped".into()))?
     }
 
     /// Async entry: runs the kernel inside `spawn_blocking` so the async reactor
@@ -105,7 +106,8 @@ impl<S: KernelState> KernelRunner<S> {
             let result = kernel.resume(&run_id, initial_state, signal);
             let _ = tx.send(result);
         });
-        rx.recv().map_err(|_| KernelError::Driver("runner thread panicked or dropped".into()))?
+        rx.recv()
+            .map_err(|_| KernelError::Driver("runner thread panicked or dropped".into()))?
     }
 
     /// Async resume: same as run_until_blocked_async but after appending a resume event.
@@ -160,7 +162,9 @@ mod tests {
         };
         let runner = KernelRunner::new(kernel);
         let run_id = "runner-sync-test".to_string();
-        let status = runner.run_until_blocked_sync(&run_id, TestState(0)).unwrap();
+        let status = runner
+            .run_until_blocked_sync(&run_id, TestState(0))
+            .unwrap();
         assert!(matches!(status, RunStatus::Completed));
     }
 
@@ -223,7 +227,10 @@ mod tests {
             runner.run_until_blocked_async(&"timeout-test".to_string(), TestState(0)),
         )
         .await;
-        assert!(result.is_ok(), "run_until_blocked_async should complete within 5s (no deadlock)");
+        assert!(
+            result.is_ok(),
+            "run_until_blocked_async should complete within 5s (no deadlock)"
+        );
         let status = result.unwrap().unwrap();
         assert!(matches!(status, RunStatus::Completed));
     }

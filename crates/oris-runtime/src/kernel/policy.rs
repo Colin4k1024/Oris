@@ -188,7 +188,9 @@ impl<P: Policy> RetryWithBackoffPolicy<P> {
         if matches!(err.kind, ActionErrorKind::RateLimited) && err.retry_after_ms.is_some() {
             return err.retry_after_ms.unwrap();
         }
-        let exp = self.backoff_base_ms.saturating_mul(2_u64.saturating_pow(attempt));
+        let exp = self
+            .backoff_base_ms
+            .saturating_mul(2_u64.saturating_pow(attempt));
         let capped = match self.backoff_cap_ms {
             Some(cap) => std::cmp::min(exp, cap),
             None => exp,
@@ -291,9 +293,7 @@ mod tests {
     #[test]
     fn retry_with_backoff_exponential_increases() {
         let inner = AllowListPolicy::tools_only(std::iter::once("t1".to_string()));
-        let policy = RetryWithBackoffPolicy::with_exponential_backoff(
-            inner, 5, 50, Some(500), 0.0,
-        );
+        let policy = RetryWithBackoffPolicy::with_exponential_backoff(inner, 5, 50, Some(500), 0.0);
         let err = ActionError::transient("timeout");
         let action = Action::CallTool {
             tool: "t1".into(),

@@ -15,8 +15,8 @@ pub mod runner;
 pub mod snapshot;
 pub mod state;
 pub mod step;
-pub mod timeline;
 pub mod stubs;
+pub mod timeline;
 
 pub use action::{Action, ActionError, ActionErrorKind, ActionExecutor, ActionResult};
 pub use driver::{BlockedInfo, Kernel, RunStatus, Signal};
@@ -31,5 +31,5 @@ pub use runner::KernelRunner;
 pub use snapshot::{InMemorySnapshotStore, Snapshot, SnapshotStore};
 pub use state::KernelState;
 pub use step::{InterruptInfo, Next, StepFn};
-pub use timeline::{run_timeline, RunTimeline, RunStatusSummary, TimelineEntry};
 pub use stubs::{AllowAllPolicy, NoopActionExecutor, NoopStepFn};
+pub use timeline::{run_timeline, RunStatusSummary, RunTimeline, TimelineEntry};
