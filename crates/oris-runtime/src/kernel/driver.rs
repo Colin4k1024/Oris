@@ -667,7 +667,7 @@ mod tests {
             exec: Box::new(ScriptedActionExecutor::new(vec![Ok(
                 ActionResult::Failure("boom".into()),
             )])),
-            step: Box::new(DoOnceStep),
+            step: Box::new(DoThenCompleteStep::new()),
             policy: Box::new(AllowAllPolicy),
         };
 

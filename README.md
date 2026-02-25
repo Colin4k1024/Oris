@@ -212,6 +212,7 @@ Common environment variables:
 - [Streaming](crates/oris-runtime/examples/graph_streaming.rs)
 - [Persistence](crates/oris-runtime/examples/graph_persistence_basic.rs)
 - [Deep agent (planning + filesystem)](crates/oris-runtime/examples/deep_agent_basic.rs)
+- [Oris v1 OS architecture (single-tenant)](docs/oris-v1-os-architecture.md)
 
 [API documentation](https://docs.rs/oris-runtime) · [Examples directory](crates/oris-runtime/examples/)
 

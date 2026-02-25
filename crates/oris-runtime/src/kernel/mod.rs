@@ -10,8 +10,11 @@ pub mod event;
 pub mod event_store;
 pub mod identity;
 pub mod policy;
+#[cfg(feature = "kernel-postgres")]
+pub mod postgres_store;
 pub mod reducer;
 pub mod runner;
+pub mod runtime;
 pub mod snapshot;
 pub mod state;
 pub mod step;
@@ -26,8 +29,15 @@ pub use identity::{RunId, Seq, StepId};
 pub use policy::{
     AllowListPolicy, BudgetRules, Policy, PolicyCtx, RetryDecision, RetryWithBackoffPolicy,
 };
+#[cfg(feature = "kernel-postgres")]
+pub use postgres_store::{PostgresEventStore, PostgresSnapshotStore};
 pub use reducer::{Reducer, StateUpdatedOnlyReducer};
 pub use runner::KernelRunner;
+pub use runtime::{
+    AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseConfig, LeaseManager,
+    LeaseRecord, LeaseTickResult, RepositoryLeaseManager, RunRecord, RunRuntimeStatus,
+    RuntimeRepository, SchedulerDecision, SkeletonScheduler,
+};
 pub use snapshot::{InMemorySnapshotStore, Snapshot, SnapshotStore};
 pub use state::KernelState;
 pub use step::{InterruptInfo, Next, StepFn};
