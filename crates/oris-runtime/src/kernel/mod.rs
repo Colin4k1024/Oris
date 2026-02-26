@@ -33,11 +33,24 @@ pub use policy::{
 pub use postgres_store::{PostgresEventStore, PostgresSnapshotStore};
 pub use reducer::{Reducer, StateUpdatedOnlyReducer};
 pub use runner::KernelRunner;
+#[cfg(feature = "execution-server")]
+pub use runtime::{
+    build_router, ApiEnvelope, ApiError, ApiMeta, CancelJobRequest, CancelJobResponse,
+    CheckpointInspectResponse, ExecutionApiState, InterruptDetailResponse, InterruptListResponse,
+    JobDetailResponse, JobHistoryItem, JobHistoryResponse, JobStateResponse, JobTimelineItem,
+    JobTimelineResponse, ListJobsResponse, RejectInterruptRequest, ReplayJobRequest,
+    ResumeInterruptRequest, ResumeJobRequest, RunJobRequest, RunJobResponse,
+    TimelineExportResponse, WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest,
+    WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse,
+    WorkerReportStepRequest,
+};
 pub use runtime::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseConfig, LeaseManager,
     LeaseRecord, LeaseTickResult, RepositoryLeaseManager, RunRecord, RunRuntimeStatus,
     RuntimeRepository, SchedulerDecision, SkeletonScheduler,
 };
+#[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
+pub use runtime::{IdempotencyRecord, SqliteIdempotencyStore, SqliteRuntimeRepository};
 pub use snapshot::{InMemorySnapshotStore, Snapshot, SnapshotStore};
 pub use state::KernelState;
 pub use step::{InterruptInfo, Next, StepFn};

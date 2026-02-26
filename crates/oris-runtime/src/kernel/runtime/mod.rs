@@ -3,11 +3,37 @@
 //! These modules define compile-safe interfaces for scheduler/lease/repository
 //! without changing existing kernel behavior.
 
+#[cfg(feature = "execution-server")]
+pub mod api_errors;
+#[cfg(feature = "execution-server")]
+pub mod api_handlers;
+#[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
+pub mod api_idempotency;
+#[cfg(feature = "execution-server")]
+pub mod api_models;
 pub mod lease;
 pub mod models;
 pub mod repository;
 pub mod scheduler;
+#[cfg(feature = "sqlite-persistence")]
+pub mod sqlite_runtime_repository;
 
+#[cfg(feature = "execution-server")]
+pub use api_errors::ApiError;
+#[cfg(feature = "execution-server")]
+pub use api_handlers::{build_router, ExecutionApiState};
+#[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
+pub use api_idempotency::{IdempotencyRecord, SqliteIdempotencyStore};
+#[cfg(feature = "execution-server")]
+pub use api_models::{
+    ApiEnvelope, ApiMeta, CancelJobRequest, CancelJobResponse, CheckpointInspectResponse,
+    InterruptDetailResponse, InterruptListResponse, JobDetailResponse, JobHistoryItem,
+    JobHistoryResponse, JobStateResponse, JobTimelineItem, JobTimelineResponse, ListJobsResponse,
+    RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest,
+    RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest, WorkerAckResponse,
+    WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest,
+    WorkerPollResponse, WorkerReportStepRequest,
+};
 pub use lease::{LeaseConfig, LeaseManager, LeaseTickResult, RepositoryLeaseManager};
 pub use models::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, RunRecord,
@@ -15,3 +41,5 @@ pub use models::{
 };
 pub use repository::RuntimeRepository;
 pub use scheduler::{SchedulerDecision, SkeletonScheduler};
+#[cfg(feature = "sqlite-persistence")]
+pub use sqlite_runtime_repository::SqliteRuntimeRepository;

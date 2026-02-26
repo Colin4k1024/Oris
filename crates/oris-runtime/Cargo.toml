@@ -75,6 +75,7 @@ thiserror = "2.0.0"
 futures-util = "0.3.30"
 async-stream = "0.3.5"
 tokio-stream = "0.1.15"
+axum = { version = "0.7", optional = true }
 schemars = { version = "0.8", features = ["derive"] }
 jsonschema = "0.17"
 secrecy = { version = "0.10.3", features = ["serde"] }
@@ -176,6 +177,7 @@ excel = ["calamine"]
 aws-s3 = ["aws-sdk-s3", "aws-config"]
 github = ["octocrab", "dep:base64"]
 browser-use = ["dep:headless_chrome"]
+execution-server = ["dep:axum", "dep:uuid"]
 # Retriever features
 wikipedia = []
 arxiv = []
@@ -194,6 +196,7 @@ llmlingua = []
 [dev-dependencies]
 base64 = "0.22.1"
 tokio-test = "0.4.4"
+tower = { version = "0.5", features = ["util"] }
 testcontainers = "0.23"
 env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }

@@ -38,8 +38,16 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
         };
 
         let lease_expires_at = now + chrono::Duration::seconds(30);
-        self.repository
-            .upsert_lease(&candidate.attempt_id, worker_id, lease_expires_at)?;
+        if let Err(e) = self
+            .repository
+            .upsert_lease(&candidate.attempt_id, worker_id, lease_expires_at)
+        {
+            let msg = e.to_string();
+            if msg.contains("active lease already exists") || msg.contains("not dispatchable") {
+                return Ok(SchedulerDecision::Noop);
+            }
+            return Err(e);
+        }
 
         // TODO(phase1.1): update attempt status in same transaction as lease write
         // and enforce queue ordering/fairness/backpressure policy.
