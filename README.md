@@ -207,12 +207,92 @@ Common environment variables:
 - [Hello World graph](crates/oris-runtime/examples/graph_hello_world.rs)
 - [Durable agent job](crates/oris-runtime/examples/durable_agent_job.rs) — interrupt, restart, resume with same `thread_id`; state is checkpointed so it survives process restarts.
 - [Durable agent job with SQLite](crates/oris-runtime/examples/durable_agent_job_sqlite.rs) — same flow with SQLite persistence (run with `--features sqlite-persistence`).
-- [CLI durable job](crates/oris-runtime/examples/cli_durable_job.rs) — minimal operator CLI: `run`, `list`, `resume` (requires `--features sqlite-persistence`).
+- [CLI durable job](crates/oris-runtime/examples/cli_durable_job.rs) — minimal operator CLI: `run`, `list`, `inspect`, `resume`, `replay`, `cancel` (requires `--features sqlite-persistence`).
+- [Execution server API](crates/oris-runtime/examples/execution_server.rs) — runtime-bin HTTP API for `run/list/inspect/resume/replay/cancel` (run with `--features "sqlite-persistence,execution-server"`).
 - [Agent with tools](crates/oris-runtime/examples/agent.rs)
 - [Streaming](crates/oris-runtime/examples/graph_streaming.rs)
 - [Persistence](crates/oris-runtime/examples/graph_persistence_basic.rs)
 - [Deep agent (planning + filesystem)](crates/oris-runtime/examples/deep_agent_basic.rs)
 - [Oris v1 OS architecture (single-tenant)](docs/oris-v1-os-architecture.md)
+
+Start the execution server:
+
+```bash
+cargo run -p oris-runtime --example execution_server --features "sqlite-persistence,execution-server"
+```
+
+Default address: `127.0.0.1:8080` (`ORIS_SERVER_ADDR` to override)  
+Default SQLite db path: `oris_execution_server.db` (`ORIS_SQLITE_DB` to override)
+
+Execution server endpoints (v1 runtime-bin):
+
+- `POST /v1/jobs/run`
+- `GET /v1/jobs` — list jobs (query: `status`, `limit`, `offset`)
+- `GET /v1/jobs/:thread_id`
+- `GET /v1/jobs/:thread_id/detail` — run drill-down (status, attempts, checkpoint, pending interrupt)
+- `GET /v1/jobs/:thread_id/timeline/export` — export timeline as JSON for audit
+- `GET /v1/jobs/:thread_id/history`
+- `GET /v1/jobs/:thread_id/timeline`
+- `GET /v1/jobs/:thread_id/checkpoints/:checkpoint_id`
+- `POST /v1/jobs/:thread_id/resume`
+- `POST /v1/jobs/:thread_id/replay`
+- `POST /v1/jobs/:thread_id/cancel`
+
+Interrupt API (Phase 4):
+
+- `GET /v1/interrupts` — list pending interrupts (query: `status`, `run_id`, `limit`)
+- `GET /v1/interrupts/:interrupt_id` — get interrupt detail
+- `POST /v1/interrupts/:interrupt_id/resume` — resume with value (delegates to job resume)
+- `POST /v1/interrupts/:interrupt_id/reject` — reject/cancel interrupt (marks run cancelled)
+
+Worker endpoints (Phase 3 baseline):
+
+- `POST /v1/workers/poll`
+- `POST /v1/workers/:worker_id/heartbeat`
+- `POST /v1/workers/:worker_id/extend-lease`
+- `POST /v1/workers/:worker_id/report-step`
+- `POST /v1/workers/:worker_id/ack`
+
+Lease/failover/backpressure baseline behavior:
+
+- `poll` first runs a lease-expiry tick (`expire_leases_and_requeue`) before dispatching.
+- `poll` enforces per-worker active-lease guardrail via `max_active_leases` (request) or server default.
+- `poll` returns `decision` as `dispatched`, `noop`, or `backpressure`.
+- `heartbeat` / `extend-lease` enforce lease ownership (`worker_id` must match lease owner), otherwise `409 conflict`.
+- Expired leases are requeued automatically and become dispatchable again on subsequent polls.
+- `ack` marks terminal attempt status (`completed` / `failed` / `cancelled`) with idempotent update semantics.
+
+Run idempotency contract (`POST /v1/jobs/run`):
+
+- Send optional `idempotency_key`.
+- Same `idempotency_key` + same payload returns the stored semantic result with `data.idempotent_replay=true`.
+- Same `idempotency_key` + different payload returns `409 conflict`.
+
+Execution API error contract:
+
+- Error shape:
+  - `request_id`: correlation id (propagates `x-request-id` when provided)
+  - `error.code`: stable machine code (`invalid_argument`, `not_found`, `conflict`, `internal`)
+  - `error.message`: human-readable summary
+  - `error.details`: optional structured context
+
+Example:
+
+```json
+{
+  "request_id": "req-123",
+  "error": {
+    "code": "invalid_argument",
+    "message": "thread_id must not be empty",
+    "details": null
+  }
+}
+```
+
+Compatibility notes:
+
+- Existing `request_id` and `data` fields in successful responses are preserved.
+- Success envelopes now include `meta` (`status`, `api_version`) as additive fields.
 
 [API documentation](https://docs.rs/oris-runtime) · [Examples directory](crates/oris-runtime/examples/)
 
