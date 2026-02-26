@@ -257,7 +257,7 @@ impl<S: KernelState> Kernel<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::action::{Action, ActionExecutor, ActionResult};
+    use crate::kernel::action::{Action, ActionError, ActionExecutor, ActionResult};
     use crate::kernel::event::Event;
     use crate::kernel::event_store::{InMemoryEventStore, SharedEventStore};
     use crate::kernel::policy::RetryWithBackoffPolicy;
@@ -708,8 +708,12 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let run_id = "run-retry-success".to_string();
         let exec = Arc::new(ScriptedActionExecutor::new(vec![
-            Err(KernelError::Driver("transient-1".into())),
-            Err(KernelError::Driver("transient-2".into())),
+            Err(KernelError::Executor(ActionError::transient(
+                "transient-1",
+            ))),
+            Err(KernelError::Executor(ActionError::transient(
+                "transient-2",
+            ))),
             Ok(ActionResult::Success(serde_json::json!("ok"))),
         ]));
         let k = Kernel::<TestState> {
@@ -754,9 +758,15 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let run_id = "run-retry-fail".to_string();
         let exec = Arc::new(ScriptedActionExecutor::new(vec![
-            Err(KernelError::Driver("transient-1".into())),
-            Err(KernelError::Driver("transient-2".into())),
-            Err(KernelError::Driver("transient-3".into())),
+            Err(KernelError::Executor(ActionError::transient(
+                "transient-1",
+            ))),
+            Err(KernelError::Executor(ActionError::transient(
+                "transient-2",
+            ))),
+            Err(KernelError::Executor(ActionError::transient(
+                "transient-3",
+            ))),
         ]));
         let k = Kernel::<TestState> {
             events: Box::new(SharedEventStore(Arc::clone(&store))),
