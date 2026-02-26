@@ -708,12 +708,8 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let run_id = "run-retry-success".to_string();
         let exec = Arc::new(ScriptedActionExecutor::new(vec![
-            Err(KernelError::Executor(ActionError::transient(
-                "transient-1",
-            ))),
-            Err(KernelError::Executor(ActionError::transient(
-                "transient-2",
-            ))),
+            Err(KernelError::Executor(ActionError::transient("transient-1"))),
+            Err(KernelError::Executor(ActionError::transient("transient-2"))),
             Ok(ActionResult::Success(serde_json::json!("ok"))),
         ]));
         let k = Kernel::<TestState> {
@@ -758,15 +754,9 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let run_id = "run-retry-fail".to_string();
         let exec = Arc::new(ScriptedActionExecutor::new(vec![
-            Err(KernelError::Executor(ActionError::transient(
-                "transient-1",
-            ))),
-            Err(KernelError::Executor(ActionError::transient(
-                "transient-2",
-            ))),
-            Err(KernelError::Executor(ActionError::transient(
-                "transient-3",
-            ))),
+            Err(KernelError::Executor(ActionError::transient("transient-1"))),
+            Err(KernelError::Executor(ActionError::transient("transient-2"))),
+            Err(KernelError::Executor(ActionError::transient("transient-3"))),
         ]));
         let k = Kernel::<TestState> {
             events: Box::new(SharedEventStore(Arc::clone(&store))),
