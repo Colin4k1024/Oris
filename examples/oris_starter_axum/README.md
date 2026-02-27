@@ -21,6 +21,8 @@ Optional environment variables:
 
 - `ORIS_SERVER_ADDR` (default: `127.0.0.1:8080`)
 - `ORIS_SQLITE_DB` (default: `oris_starter.db`)
+- `ORIS_API_AUTH_BEARER_TOKEN` (optional; when set, requests must send `Authorization: Bearer <token>`)
+- `ORIS_API_AUTH_API_KEY` (optional; when set, requests may send `x-api-key: <key>`)
 
 ## Quick API smoke test
 
@@ -29,6 +31,7 @@ Create a run:
 ```bash
 curl -s -X POST http://127.0.0.1:8080/v1/jobs \
   -H 'content-type: application/json' \
+  -H 'Authorization: Bearer <token-if-enabled>' \
   -d '{"thread_id":"starter-1","input":"hello from starter","idempotency_key":"starter-key-1"}'
 ```
 
@@ -47,7 +50,7 @@ curl -s http://127.0.0.1:8080/v1/jobs
 ## Where to go next
 
 - Add your own graph nodes and tool calls.
-- Integrate auth middleware for operator APIs.
+- Integrate JWT/API-key verification backend (replace static env secrets).
 - Emit traces/metrics to your observability backend.
 - Replace SQLite with your production persistence strategy as needed.
 

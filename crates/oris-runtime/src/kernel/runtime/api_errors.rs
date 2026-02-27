@@ -16,6 +16,7 @@ pub struct ErrorBody {
 #[derive(Debug)]
 pub enum ApiError {
     BadRequest(ErrorState),
+    Unauthorized(ErrorState),
     NotFound(ErrorState),
     Conflict(ErrorState),
     Internal(ErrorState),
@@ -53,6 +54,10 @@ impl ApiError {
         Self::NotFound(ErrorState::new(message))
     }
 
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::Unauthorized(ErrorState::new(message))
+    }
+
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::Conflict(ErrorState::new(message))
     }
@@ -64,18 +69,22 @@ impl ApiError {
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         let request_id = Some(request_id.into());
         match &mut self {
-            Self::BadRequest(s) | Self::NotFound(s) | Self::Conflict(s) | Self::Internal(s) => {
-                s.request_id = request_id
-            }
+            Self::BadRequest(s)
+            | Self::Unauthorized(s)
+            | Self::NotFound(s)
+            | Self::Conflict(s)
+            | Self::Internal(s) => s.request_id = request_id,
         }
         self
     }
 
     pub fn with_details(mut self, details: Value) -> Self {
         match &mut self {
-            Self::BadRequest(s) | Self::NotFound(s) | Self::Conflict(s) | Self::Internal(s) => {
-                s.details = Some(details)
-            }
+            Self::BadRequest(s)
+            | Self::Unauthorized(s)
+            | Self::NotFound(s)
+            | Self::Conflict(s)
+            | Self::Internal(s) => s.details = Some(details),
         }
         self
     }
@@ -85,6 +94,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, code, state) = match self {
             Self::BadRequest(s) => (StatusCode::BAD_REQUEST, "invalid_argument", s),
+            Self::Unauthorized(s) => (StatusCode::UNAUTHORIZED, "unauthorized", s),
             Self::NotFound(s) => (StatusCode::NOT_FOUND, "not_found", s),
             Self::Conflict(s) => (StatusCode::CONFLICT, "conflict", s),
             Self::Internal(s) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", s),

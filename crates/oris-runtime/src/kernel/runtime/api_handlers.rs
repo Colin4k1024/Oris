@@ -4,8 +4,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
-use axum::middleware::{from_fn, Next};
+use axum::http::{header::AUTHORIZATION, HeaderMap};
+use axum::middleware::{from_fn, from_fn_with_state, Next};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
@@ -35,10 +36,41 @@ use super::scheduler::{SchedulerDecision, SkeletonScheduler};
 #[cfg(feature = "sqlite-persistence")]
 use super::sqlite_runtime_repository::{SqliteRuntimeRepository, StepReportWriteResult};
 
+#[derive(Clone, Debug, Default)]
+pub struct ExecutionApiAuthConfig {
+    pub bearer_token: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl ExecutionApiAuthConfig {
+    fn normalize_secret(secret: Option<String>) -> Option<String> {
+        secret.and_then(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    }
+
+    fn from_optional(bearer_token: Option<String>, api_key: Option<String>) -> Self {
+        Self {
+            bearer_token: Self::normalize_secret(bearer_token),
+            api_key: Self::normalize_secret(api_key),
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.bearer_token.is_some() || self.api_key.is_some()
+    }
+}
+
 #[derive(Clone)]
 pub struct ExecutionApiState {
     pub compiled: Arc<CompiledGraph<MessagesState>>,
     pub cancelled_threads: Arc<RwLock<HashSet<String>>>,
+    pub auth: ExecutionApiAuthConfig,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
     #[cfg(feature = "sqlite-persistence")]
@@ -52,6 +84,7 @@ impl ExecutionApiState {
         Self {
             compiled,
             cancelled_threads: Arc::new(RwLock::new(HashSet::new())),
+            auth: ExecutionApiAuthConfig::default(),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
             #[cfg(feature = "sqlite-persistence")]
@@ -74,6 +107,25 @@ impl ExecutionApiState {
             state.runtime_repo = Some(repo);
         }
         state
+    }
+
+    pub fn with_static_auth(
+        mut self,
+        bearer_token: Option<String>,
+        api_key: Option<String>,
+    ) -> Self {
+        self.auth = ExecutionApiAuthConfig::from_optional(bearer_token, api_key);
+        self
+    }
+
+    pub fn with_static_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth.bearer_token = ExecutionApiAuthConfig::normalize_secret(Some(token.into()));
+        self
+    }
+
+    pub fn with_static_api_key(mut self, key: impl Into<String>) -> Self {
+        self.auth.api_key = ExecutionApiAuthConfig::normalize_secret(Some(key.into()));
+        self
     }
 }
 
@@ -114,6 +166,7 @@ pub fn build_router(state: ExecutionApiState) -> Router {
             "/v1/interrupts/:interrupt_id/reject",
             post(reject_interrupt),
         )
+        .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(from_fn(request_log_middleware))
         .with_state(state)
 }
@@ -140,6 +193,64 @@ fn json_hash(value: &Value) -> Result<String, ApiError> {
     let mut hasher = Sha256::new();
     hasher.update(&json);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn bearer_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn api_key_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn is_authorized(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> bool {
+    let bearer_ok = auth
+        .bearer_token
+        .as_deref()
+        .zip(bearer_token_from_headers(headers))
+        .map(|(expected, actual)| expected == actual)
+        .unwrap_or(false);
+    let api_key_ok = auth
+        .api_key
+        .as_deref()
+        .zip(api_key_from_headers(headers))
+        .map(|(expected, actual)| expected == actual)
+        .unwrap_or(false);
+    bearer_ok || api_key_ok
+}
+
+async fn auth_middleware(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    if !state.auth.is_enabled() || is_authorized(&headers, &state.auth) {
+        return next.run(request).await;
+    }
+
+    let mut methods = Vec::new();
+    if state.auth.bearer_token.is_some() {
+        methods.push("bearer");
+    }
+    if state.auth.api_key.is_some() {
+        methods.push("x-api-key");
+    }
+
+    let rid = request_id(&headers);
+    ApiError::unauthorized("missing or invalid credentials")
+        .with_request_id(rid)
+        .with_details(serde_json::json!({ "supported_auth": methods }))
+        .into_response()
 }
 
 async fn request_log_middleware(
@@ -1424,6 +1535,75 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn auth_required_without_credentials_returns_unauthorized() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key("test-api-key"),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-auth-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("auth body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("auth json");
+        assert_eq!(json["request_id"], "req-auth-1");
+        assert_eq!(json["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn auth_bearer_token_allows_access() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_bearer_token("t-1"),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("authorization", "Bearer t-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_api_key_allows_access() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key("key-1"),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key", "key-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

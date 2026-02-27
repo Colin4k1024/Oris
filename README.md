@@ -288,6 +288,7 @@ cargo run -p oris-runtime --example execution_server --features "sqlite-persiste
 
 Default address: `127.0.0.1:8080` (`ORIS_SERVER_ADDR` to override)  
 Default SQLite db path: `oris_execution_server.db` (`ORIS_SQLITE_DB` to override)
+Optional auth secrets: `ORIS_API_AUTH_BEARER_TOKEN`, `ORIS_API_AUTH_API_KEY`
 
 Execution server endpoints (v1 runtime-bin):
 
@@ -337,7 +338,7 @@ Execution API error contract:
 
 - Error shape:
   - `request_id`: correlation id (propagates `x-request-id` when provided)
-  - `error.code`: stable machine code (`invalid_argument`, `not_found`, `conflict`, `internal`)
+  - `error.code`: stable machine code (`invalid_argument`, `unauthorized`, `not_found`, `conflict`, `internal`)
   - `error.message`: human-readable summary
   - `error.details`: optional structured context
 
