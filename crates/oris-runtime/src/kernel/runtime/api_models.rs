@@ -187,6 +187,35 @@ pub struct InterruptListResponse {
     pub interrupts: Vec<InterruptListItem>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct ListAuditLogsQuery {
+    pub request_id: Option<String>,
+    pub action: Option<String>,
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AuditLogItem {
+    pub audit_id: i64,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub result: String,
+    pub request_id: String,
+    pub details: Option<Value>,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AuditLogListResponse {
+    pub logs: Vec<AuditLogItem>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct InterruptDetailResponse {
     pub interrupt_id: String,

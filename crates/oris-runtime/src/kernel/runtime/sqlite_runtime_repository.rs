@@ -709,6 +709,17 @@ impl SqliteRuntimeRepository {
     }
 
     pub fn list_audit_logs(&self, limit: usize) -> Result<Vec<AuditLogRow>, KernelError> {
+        self.list_audit_logs_filtered(None, None, None, None, limit)
+    }
+
+    pub fn list_audit_logs_filtered(
+        &self,
+        request_id: Option<&str>,
+        action: Option<&str>,
+        from_ms: Option<i64>,
+        to_ms: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<AuditLogRow>, KernelError> {
         let conn = self
             .conn
             .lock()
@@ -717,26 +728,33 @@ impl SqliteRuntimeRepository {
             .prepare(
                 "SELECT audit_id, actor_type, actor_id, actor_role, action, resource_type, resource_id, result, request_id, details_json, created_at_ms
                  FROM runtime_audit_logs
+                 WHERE (?1 IS NULL OR request_id = ?1)
+                   AND (?2 IS NULL OR action = ?2)
+                   AND (?3 IS NULL OR created_at_ms >= ?3)
+                   AND (?4 IS NULL OR created_at_ms <= ?4)
                  ORDER BY audit_id DESC
-                 LIMIT ?1",
+                 LIMIT ?5",
             )
             .map_err(|e| KernelError::Driver(format!("prepare list_audit_logs: {}", e)))?;
         let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(AuditLogRow {
-                    audit_id: row.get(0)?,
-                    actor_type: row.get(1)?,
-                    actor_id: row.get(2)?,
-                    actor_role: row.get(3)?,
-                    action: row.get(4)?,
-                    resource_type: row.get(5)?,
-                    resource_id: row.get(6)?,
-                    result: row.get(7)?,
-                    request_id: row.get(8)?,
-                    details_json: row.get(9)?,
-                    created_at: ms_to_dt(row.get::<_, i64>(10)?),
-                })
-            })
+            .query_map(
+                params![request_id, action, from_ms, to_ms, limit as i64],
+                |row| {
+                    Ok(AuditLogRow {
+                        audit_id: row.get(0)?,
+                        actor_type: row.get(1)?,
+                        actor_id: row.get(2)?,
+                        actor_role: row.get(3)?,
+                        action: row.get(4)?,
+                        resource_type: row.get(5)?,
+                        resource_id: row.get(6)?,
+                        result: row.get(7)?,
+                        request_id: row.get(8)?,
+                        details_json: row.get(9)?,
+                        created_at: ms_to_dt(row.get::<_, i64>(10)?),
+                    })
+                },
+            )
             .map_err(|e| KernelError::Driver(format!("query list_audit_logs: {}", e)))?;
         let mut out = Vec::new();
         for row in rows {

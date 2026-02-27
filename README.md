@@ -291,7 +291,11 @@ Default SQLite db path: `oris_execution_server.db` (`ORIS_SQLITE_DB` to override
 Optional auth secrets: `ORIS_API_AUTH_BEARER_TOKEN`, `ORIS_API_AUTH_API_KEY`
 Optional keyed API key id: `ORIS_API_AUTH_API_KEY_ID` (use with `ORIS_API_AUTH_API_KEY`)
 When `ORIS_API_AUTH_API_KEY_ID` is set with SQLite persistence, the key record is persisted in `runtime_api_keys`.
-RBAC baseline: `admin` can access all APIs; `operator` can access `/v1/jobs*` and `/v1/interrupts*`; `worker` can access `/v1/workers*`.
+RBAC baseline: `admin` can access all APIs; `operator` can access `/v1/jobs*`, `/v1/interrupts*`, and `GET /v1/audit/logs`; `worker` can access `/v1/workers*`.
+
+Audit API:
+
+- `GET /v1/audit/logs` — list control-plane audit logs (query: `request_id`, `action`, `from_ms`, `to_ms`, `limit`)
 
 Execution server endpoints (v1 runtime-bin):
 

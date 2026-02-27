@@ -21,14 +21,14 @@ use super::api_errors::ApiError;
 #[cfg(feature = "sqlite-persistence")]
 use super::api_idempotency::{IdempotencyRecord, SqliteIdempotencyStore};
 use super::api_models::{
-    ApiEnvelope, ApiMeta, CancelJobRequest, CancelJobResponse, CheckpointInspectResponse,
-    InterruptDetailResponse, InterruptListItem, InterruptListResponse, JobDetailResponse,
-    JobHistoryItem, JobHistoryResponse, JobListItem, JobStateResponse, JobTimelineItem,
-    JobTimelineResponse, ListJobsResponse, RejectInterruptRequest, ReplayJobRequest,
-    ResumeInterruptRequest, ResumeJobRequest, RunJobRequest, RunJobResponse,
-    TimelineExportResponse, WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest,
-    WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse,
-    WorkerReportStepRequest,
+    ApiEnvelope, ApiMeta, AuditLogItem, AuditLogListResponse, CancelJobRequest, CancelJobResponse,
+    CheckpointInspectResponse, InterruptDetailResponse, InterruptListItem, InterruptListResponse,
+    JobDetailResponse, JobHistoryItem, JobHistoryResponse, JobListItem, JobStateResponse,
+    JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery, ListJobsResponse,
+    RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest,
+    RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest, WorkerAckResponse,
+    WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest,
+    WorkerPollResponse, WorkerReportStepRequest,
 };
 use super::lease::{LeaseConfig, LeaseManager, RepositoryLeaseManager};
 use super::models::AttemptExecutionStatus;
@@ -302,6 +302,7 @@ impl ExecutionApiState {
 
 pub fn build_router(state: ExecutionApiState) -> Router {
     Router::new()
+        .route("/v1/audit/logs", get(list_audit_logs))
         .route("/v1/jobs", get(list_jobs).post(run_job))
         .route("/v1/jobs/run", post(run_job))
         .route("/v1/jobs/:thread_id", get(inspect_job))
@@ -635,8 +636,11 @@ fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> b
     }
     let is_jobs_or_interrupts = path.starts_with("/v1/jobs") || path.starts_with("/v1/interrupts");
     let is_workers = path.starts_with("/v1/workers");
+    let is_audit = path.starts_with("/v1/audit");
     match role {
-        ApiRole::Operator => is_jobs_or_interrupts,
+        ApiRole::Operator => {
+            is_jobs_or_interrupts || (is_audit && *method == axum::http::Method::GET)
+        }
         ApiRole::Worker => {
             // Worker role can only call worker control/data-plane endpoints.
             is_workers && *method != axum::http::Method::GET
@@ -1312,6 +1316,66 @@ pub async fn list_interrupts(
             request_id: rid,
             data: InterruptListResponse { interrupts: vec![] },
         }))
+    }
+}
+
+pub async fn list_audit_logs(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<ListAuditLogsQuery>,
+) -> Result<Json<ApiEnvelope<AuditLogListResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    if let (Some(from_ms), Some(to_ms)) = (q.from_ms, q.to_ms) {
+        if from_ms > to_ms {
+            return Err(
+                ApiError::bad_request("from_ms must be less than or equal to to_ms")
+                    .with_request_id(rid),
+            );
+        }
+    }
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?.clone();
+        let limit = q.limit.unwrap_or(100).clamp(1, 500);
+        let request_id_filter = q
+            .request_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let action_filter = q.action.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let rows = repo
+            .list_audit_logs_filtered(request_id_filter, action_filter, q.from_ms, q.to_ms, limit)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+        let logs = rows
+            .into_iter()
+            .map(|row| AuditLogItem {
+                audit_id: row.audit_id,
+                actor_type: row.actor_type,
+                actor_id: row.actor_id,
+                actor_role: row.actor_role,
+                action: row.action,
+                resource_type: row.resource_type,
+                resource_id: row.resource_id,
+                result: row.result,
+                request_id: row.request_id,
+                details: row.details_json.and_then(|raw| {
+                    serde_json::from_str::<Value>(&raw)
+                        .ok()
+                        .or_else(|| Some(Value::String(raw)))
+                }),
+                created_at: row.created_at.to_rfc3339(),
+            })
+            .collect();
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: AuditLogListResponse { logs },
+        }));
+    }
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let _ = q;
+        Err(ApiError::internal("audit log APIs require sqlite-persistence").with_request_id(rid))
     }
 }
 
@@ -2394,6 +2458,117 @@ mod tests {
         assert_eq!(forbidden.action, "job.run");
         assert_eq!(forbidden.result, "error");
         assert_eq!(forbidden.actor_role.as_deref(), Some("worker"));
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_api_returns_filtered_records_for_operator() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_interrupt_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "operator-key-audit-read",
+                    "operator-secret-audit-read",
+                    true,
+                    ApiRole::Operator,
+                );
+        let router = build_router(state);
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-audit-read-run")
+            .header("x-api-key-id", "operator-key-audit-read")
+            .header("x-api-key", "operator-secret-audit-read")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "audit-read-1",
+                    "input": "trigger interrupt"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+
+        let cancel_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/audit-read-1/cancel")
+            .header("x-request-id", "req-audit-read-cancel")
+            .header("x-api-key-id", "operator-key-audit-read")
+            .header("x-api-key", "operator-secret-audit-read")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let cancel_resp = router.clone().oneshot(cancel_req).await.unwrap();
+        assert_eq!(cancel_resp.status(), StatusCode::OK);
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/audit/logs?action=job.cancel&request_id=req-audit-read-cancel&limit=5")
+            .header("x-api-key-id", "operator-key-audit-read")
+            .header("x-api-key", "operator-secret-audit-read")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .expect("audit list body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("audit list json");
+        let logs = json["data"]["logs"].as_array().expect("logs array");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["action"], "job.cancel");
+        assert_eq!(logs[0]["request_id"], "req-audit-read-cancel");
+        assert_eq!(logs[0]["actor_role"], "operator");
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_api_worker_role_is_forbidden() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "worker-key-audit-read",
+                    "worker-secret-audit-read",
+                    true,
+                    ApiRole::Worker,
+                );
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/audit/logs")
+            .header("x-api-key-id", "worker-key-audit-read")
+            .header("x-api-key", "worker-secret-audit-read")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_api_rejects_invalid_time_range() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "operator-key-audit-range",
+                    "operator-secret-audit-range",
+                    true,
+                    ApiRole::Operator,
+                );
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/audit/logs?from_ms=10&to_ms=1")
+            .header("x-api-key-id", "operator-key-audit-range")
+            .header("x-api-key", "operator-secret-audit-range")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

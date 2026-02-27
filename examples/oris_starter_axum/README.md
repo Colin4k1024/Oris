@@ -26,7 +26,7 @@ Optional environment variables:
 - `ORIS_API_AUTH_API_KEY_ID` (optional; when set with `ORIS_API_AUTH_API_KEY`, requests should send `x-api-key-id` + `x-api-key`)
 
 When `ORIS_API_AUTH_API_KEY_ID` + `ORIS_API_AUTH_API_KEY` are provided, starter will persist the keyed API credential into SQLite table `runtime_api_keys` on startup.
-Persisted keyed credentials default to `operator` role (jobs/interrupts APIs allowed; worker APIs denied).
+Persisted keyed credentials default to `operator` role (jobs/interrupts and `GET /v1/audit/logs` allowed; worker APIs denied).
 
 ## Quick API smoke test
 
