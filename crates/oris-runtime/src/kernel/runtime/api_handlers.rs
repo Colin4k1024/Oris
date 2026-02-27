@@ -1,11 +1,12 @@
 //! Axum handlers for Phase 2 execution server.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
-use axum::middleware::{from_fn, Next};
+use axum::http::{header::AUTHORIZATION, HeaderMap};
+use axum::middleware::{from_fn, from_fn_with_state, Next};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
@@ -20,25 +21,149 @@ use super::api_errors::ApiError;
 #[cfg(feature = "sqlite-persistence")]
 use super::api_idempotency::{IdempotencyRecord, SqliteIdempotencyStore};
 use super::api_models::{
-    ApiEnvelope, ApiMeta, CancelJobRequest, CancelJobResponse, CheckpointInspectResponse,
-    InterruptDetailResponse, InterruptListItem, InterruptListResponse, JobDetailResponse,
-    JobHistoryItem, JobHistoryResponse, JobListItem, JobStateResponse, JobTimelineItem,
-    JobTimelineResponse, ListJobsResponse, RejectInterruptRequest, ReplayJobRequest,
-    ResumeInterruptRequest, ResumeJobRequest, RunJobRequest, RunJobResponse,
-    TimelineExportResponse, WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest,
-    WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse,
-    WorkerReportStepRequest,
+    ApiEnvelope, ApiMeta, AuditLogItem, AuditLogListResponse, CancelJobRequest, CancelJobResponse,
+    CheckpointInspectResponse, InterruptDetailResponse, InterruptListItem, InterruptListResponse,
+    JobDetailResponse, JobHistoryItem, JobHistoryResponse, JobListItem, JobStateResponse,
+    JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery, ListJobsResponse,
+    RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest,
+    RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest, WorkerAckResponse,
+    WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest,
+    WorkerPollResponse, WorkerReportStepRequest,
 };
 use super::lease::{LeaseConfig, LeaseManager, RepositoryLeaseManager};
 use super::models::AttemptExecutionStatus;
 use super::scheduler::{SchedulerDecision, SkeletonScheduler};
 #[cfg(feature = "sqlite-persistence")]
-use super::sqlite_runtime_repository::{SqliteRuntimeRepository, StepReportWriteResult};
+use super::sqlite_runtime_repository::{
+    AuditLogEntry, SqliteRuntimeRepository, StepReportWriteResult,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApiRole {
+    Admin,
+    Operator,
+    Worker,
+}
+
+impl ApiRole {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Operator => "operator",
+            Self::Worker => "worker",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "admin" => Some(Self::Admin),
+            "operator" => Some(Self::Operator),
+            "worker" => Some(Self::Worker),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ApiRole {
+    fn default() -> Self {
+        Self::Admin
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AuthContext {
+    actor_type: String,
+    actor_id: Option<String>,
+    role: ApiRole,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ExecutionApiAuthConfig {
+    pub bearer_token: Option<String>,
+    pub bearer_role: ApiRole,
+    pub api_key_hash: Option<String>,
+    pub api_key_role: ApiRole,
+    pub keyed_api_keys: HashMap<String, StaticApiKeyConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticApiKeyConfig {
+    pub secret_hash: String,
+    pub active: bool,
+    pub role: ApiRole,
+}
+
+impl ExecutionApiAuthConfig {
+    fn normalize_secret(secret: Option<String>) -> Option<String> {
+        secret.and_then(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    }
+
+    fn normalize_key_id(key_id: Option<String>) -> Option<String> {
+        key_id.and_then(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    }
+
+    fn secret_hash(secret: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(secret.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn normalize_hashed_secret(secret: Option<String>) -> Option<String> {
+        Self::normalize_secret(secret).map(|value| Self::secret_hash(value.as_str()))
+    }
+
+    fn from_optional(bearer_token: Option<String>, api_key: Option<String>) -> Self {
+        Self {
+            bearer_token: Self::normalize_secret(bearer_token),
+            bearer_role: ApiRole::Admin,
+            api_key_hash: Self::normalize_hashed_secret(api_key),
+            api_key_role: ApiRole::Admin,
+            keyed_api_keys: HashMap::new(),
+        }
+    }
+
+    fn set_keyed_api_key(&mut self, key_id: String, secret: String, active: bool, role: ApiRole) {
+        if let (Some(key_id), Some(secret)) = (
+            Self::normalize_key_id(Some(key_id)),
+            Self::normalize_secret(Some(secret)),
+        ) {
+            self.keyed_api_keys.insert(
+                key_id,
+                StaticApiKeyConfig {
+                    secret_hash: Self::secret_hash(secret.as_str()),
+                    active,
+                    role,
+                },
+            );
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.bearer_token.is_some()
+            || self.api_key_hash.is_some()
+            || !self.keyed_api_keys.is_empty()
+    }
+}
 
 #[derive(Clone)]
 pub struct ExecutionApiState {
     pub compiled: Arc<CompiledGraph<MessagesState>>,
     pub cancelled_threads: Arc<RwLock<HashSet<String>>>,
+    pub auth: ExecutionApiAuthConfig,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
     #[cfg(feature = "sqlite-persistence")]
@@ -52,6 +177,7 @@ impl ExecutionApiState {
         Self {
             compiled,
             cancelled_threads: Arc::new(RwLock::new(HashSet::new())),
+            auth: ExecutionApiAuthConfig::default(),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
             #[cfg(feature = "sqlite-persistence")]
@@ -75,10 +201,108 @@ impl ExecutionApiState {
         }
         state
     }
+
+    pub fn with_static_auth(
+        mut self,
+        bearer_token: Option<String>,
+        api_key: Option<String>,
+    ) -> Self {
+        self.auth = ExecutionApiAuthConfig::from_optional(bearer_token, api_key);
+        self
+    }
+
+    pub fn with_static_auth_roles(mut self, bearer_role: ApiRole, api_key_role: ApiRole) -> Self {
+        self.auth.bearer_role = bearer_role;
+        self.auth.api_key_role = api_key_role;
+        self
+    }
+
+    pub fn with_static_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.auth.bearer_token = ExecutionApiAuthConfig::normalize_secret(Some(token.into()));
+        self.auth.bearer_role = ApiRole::Admin;
+        self
+    }
+
+    pub fn with_static_bearer_token_with_role(
+        mut self,
+        token: impl Into<String>,
+        role: ApiRole,
+    ) -> Self {
+        self.auth.bearer_token = ExecutionApiAuthConfig::normalize_secret(Some(token.into()));
+        self.auth.bearer_role = role;
+        self
+    }
+
+    pub fn with_static_api_key(mut self, key: impl Into<String>) -> Self {
+        self.auth.api_key_hash = ExecutionApiAuthConfig::normalize_hashed_secret(Some(key.into()));
+        self.auth.api_key_role = ApiRole::Admin;
+        self
+    }
+
+    pub fn with_static_api_key_with_role(mut self, key: impl Into<String>, role: ApiRole) -> Self {
+        self.auth.api_key_hash = ExecutionApiAuthConfig::normalize_hashed_secret(Some(key.into()));
+        self.auth.api_key_role = role;
+        self
+    }
+
+    pub fn with_static_api_key_record(
+        mut self,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+        active: bool,
+    ) -> Self {
+        self.auth
+            .set_keyed_api_key(key_id.into(), secret.into(), active, ApiRole::Operator);
+        self
+    }
+
+    pub fn with_static_api_key_record_with_role(
+        mut self,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+        active: bool,
+        role: ApiRole,
+    ) -> Self {
+        self.auth
+            .set_keyed_api_key(key_id.into(), secret.into(), active, role);
+        self
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    pub fn with_persisted_api_key_record(
+        self,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+        active: bool,
+    ) -> Self {
+        self.with_persisted_api_key_record_with_role(key_id, secret, active, ApiRole::Operator)
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    pub fn with_persisted_api_key_record_with_role(
+        self,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+        active: bool,
+        role: ApiRole,
+    ) -> Self {
+        let key_id = key_id.into();
+        let secret = secret.into();
+        if let Some(repo) = self.runtime_repo.as_ref() {
+            let _ = repo.upsert_api_key_record(
+                &key_id,
+                &ExecutionApiAuthConfig::secret_hash(secret.as_str()),
+                active,
+                role.as_str(),
+            );
+        }
+        self
+    }
 }
 
 pub fn build_router(state: ExecutionApiState) -> Router {
     Router::new()
+        .route("/v1/audit/logs", get(list_audit_logs))
         .route("/v1/jobs", get(list_jobs).post(run_job))
         .route("/v1/jobs/run", post(run_job))
         .route("/v1/jobs/:thread_id", get(inspect_job))
@@ -114,7 +338,9 @@ pub fn build_router(state: ExecutionApiState) -> Router {
             "/v1/interrupts/:interrupt_id/reject",
             post(reject_interrupt),
         )
+        .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(from_fn(request_log_middleware))
+        .layer(from_fn_with_state(state.clone(), audit_middleware))
         .with_state(state)
 }
 
@@ -122,8 +348,22 @@ fn request_id(headers: &HeaderMap) -> String {
     headers
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .and_then(normalize_request_id)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+fn normalize_request_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn payload_hash(thread_id: &str, input: &str) -> String {
@@ -140,6 +380,342 @@ fn json_hash(value: &Value) -> Result<String, ApiError> {
     let mut hasher = Sha256::new();
     hasher.update(&json);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn bearer_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn api_key_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn api_key_id_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-api-key-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Option<AuthContext> {
+    if auth
+        .bearer_token
+        .as_deref()
+        .zip(bearer_token_from_headers(headers))
+        .map(|(expected, actual)| expected == actual)
+        .unwrap_or(false)
+    {
+        return Some(AuthContext {
+            actor_type: "bearer".to_string(),
+            actor_id: None,
+            role: auth.bearer_role.clone(),
+        });
+    }
+
+    if auth
+        .api_key_hash
+        .as_deref()
+        .zip(api_key_from_headers(headers))
+        .map(|(expected_hash, actual)| expected_hash == ExecutionApiAuthConfig::secret_hash(actual))
+        .unwrap_or(false)
+    {
+        return Some(AuthContext {
+            actor_type: "api_key".to_string(),
+            actor_id: None,
+            role: auth.api_key_role.clone(),
+        });
+    }
+
+    api_key_id_from_headers(headers)
+        .zip(api_key_from_headers(headers))
+        .and_then(|(key_id, secret)| {
+            auth.keyed_api_keys.get(key_id).and_then(|config| {
+                if config.active
+                    && config.secret_hash == ExecutionApiAuthConfig::secret_hash(secret)
+                {
+                    Some(AuthContext {
+                        actor_type: "api_key".to_string(),
+                        actor_id: Some(key_id.to_string()),
+                        role: config.role.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+        })
+}
+
+#[cfg(feature = "sqlite-persistence")]
+fn authenticate_runtime_repo(
+    headers: &HeaderMap,
+    state: &ExecutionApiState,
+) -> Option<AuthContext> {
+    let Some(repo) = state.runtime_repo.as_ref() else {
+        return None;
+    };
+    let Some(key_id) = api_key_id_from_headers(headers) else {
+        return None;
+    };
+    let Some(secret) = api_key_from_headers(headers) else {
+        return None;
+    };
+    match repo.get_api_key_record(key_id) {
+        Ok(Some(record))
+            if record.active
+                && record.secret_hash == ExecutionApiAuthConfig::secret_hash(secret) =>
+        {
+            Some(AuthContext {
+                actor_type: "api_key".to_string(),
+                actor_id: Some(record.key_id),
+                role: ApiRole::from_str(&record.role).unwrap_or(ApiRole::Operator),
+            })
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "sqlite-persistence"))]
+fn authenticate_runtime_repo(
+    _headers: &HeaderMap,
+    _state: &ExecutionApiState,
+) -> Option<AuthContext> {
+    None
+}
+
+#[cfg(feature = "sqlite-persistence")]
+fn has_runtime_repo_api_keys(state: &ExecutionApiState) -> bool {
+    state
+        .runtime_repo
+        .as_ref()
+        .and_then(|repo| repo.has_any_api_keys().ok())
+        .unwrap_or(false)
+}
+
+#[cfg(not(feature = "sqlite-persistence"))]
+fn has_runtime_repo_api_keys(_state: &ExecutionApiState) -> bool {
+    false
+}
+
+fn resolve_auth_context(headers: &HeaderMap, state: &ExecutionApiState) -> Option<AuthContext> {
+    authenticate_static(headers, &state.auth).or_else(|| authenticate_runtime_repo(headers, state))
+}
+
+#[derive(Clone, Debug)]
+struct AuditTarget {
+    action: &'static str,
+    resource_type: &'static str,
+    resource_id: Option<String>,
+}
+
+fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTarget> {
+    if *method != axum::http::Method::POST {
+        return None;
+    }
+    let seg = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if seg.len() < 2 || seg[0] != "v1" {
+        return None;
+    }
+    match (seg[1], seg.as_slice()) {
+        ("jobs", ["v1", "jobs"]) => Some(AuditTarget {
+            action: "job.run",
+            resource_type: "thread",
+            resource_id: None,
+        }),
+        ("jobs", ["v1", "jobs", "run"]) => Some(AuditTarget {
+            action: "job.run",
+            resource_type: "thread",
+            resource_id: None,
+        }),
+        ("jobs", ["v1", "jobs", thread_id, "resume"]) => Some(AuditTarget {
+            action: "job.resume",
+            resource_type: "thread",
+            resource_id: Some((*thread_id).to_string()),
+        }),
+        ("jobs", ["v1", "jobs", thread_id, "replay"]) => Some(AuditTarget {
+            action: "job.replay",
+            resource_type: "thread",
+            resource_id: Some((*thread_id).to_string()),
+        }),
+        ("jobs", ["v1", "jobs", thread_id, "cancel"]) => Some(AuditTarget {
+            action: "job.cancel",
+            resource_type: "thread",
+            resource_id: Some((*thread_id).to_string()),
+        }),
+        ("interrupts", ["v1", "interrupts", interrupt_id, "resume"]) => Some(AuditTarget {
+            action: "interrupt.resume",
+            resource_type: "interrupt",
+            resource_id: Some((*interrupt_id).to_string()),
+        }),
+        ("interrupts", ["v1", "interrupts", interrupt_id, "reject"]) => Some(AuditTarget {
+            action: "interrupt.reject",
+            resource_type: "interrupt",
+            resource_id: Some((*interrupt_id).to_string()),
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "sqlite-persistence")]
+fn append_audit_log(
+    state: &ExecutionApiState,
+    auth: Option<&AuthContext>,
+    target: &AuditTarget,
+    request_id: &str,
+    method: &str,
+    path: &str,
+    status_code: u16,
+) {
+    let Some(repo) = state.runtime_repo.as_ref() else {
+        return;
+    };
+    let entry = AuditLogEntry {
+        actor_type: auth
+            .map(|a| a.actor_type.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        actor_id: auth.and_then(|a| a.actor_id.clone()),
+        actor_role: auth.map(|a| a.role.as_str().to_string()),
+        action: target.action.to_string(),
+        resource_type: target.resource_type.to_string(),
+        resource_id: target.resource_id.clone(),
+        result: if (200..300).contains(&status_code) {
+            "success".to_string()
+        } else {
+            "error".to_string()
+        },
+        request_id: request_id.to_string(),
+        details_json: serde_json::to_string(&serde_json::json!({
+            "method": method,
+            "path": path,
+            "status_code": status_code
+        }))
+        .ok(),
+    };
+    let _ = repo.append_audit_log(&entry);
+}
+
+#[cfg(not(feature = "sqlite-persistence"))]
+fn append_audit_log(
+    _state: &ExecutionApiState,
+    _auth: Option<&AuthContext>,
+    _target: &AuditTarget,
+    _request_id: &str,
+    _method: &str,
+    _path: &str,
+    _status_code: u16,
+) {
+}
+
+async fn audit_middleware(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let request_id = request_id(&headers);
+    let target = parse_audit_target(&method, &path);
+    let auth = resolve_auth_context(&headers, &state);
+    let response = next.run(request).await;
+    if let Some(target) = target {
+        append_audit_log(
+            &state,
+            auth.as_ref(),
+            &target,
+            &request_id,
+            method.as_str(),
+            &path,
+            response.status().as_u16(),
+        );
+    }
+    response
+}
+
+fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> bool {
+    if matches!(role, ApiRole::Admin) {
+        return true;
+    }
+    let is_jobs_or_interrupts = path.starts_with("/v1/jobs") || path.starts_with("/v1/interrupts");
+    let is_workers = path.starts_with("/v1/workers");
+    let is_audit = path.starts_with("/v1/audit");
+    match role {
+        ApiRole::Operator => {
+            is_jobs_or_interrupts || (is_audit && *method == axum::http::Method::GET)
+        }
+        ApiRole::Worker => {
+            // Worker role can only call worker control/data-plane endpoints.
+            is_workers && *method != axum::http::Method::GET
+        }
+        ApiRole::Admin => true,
+    }
+}
+
+fn supported_auth_methods(state: &ExecutionApiState) -> Vec<&'static str> {
+    let mut methods = Vec::new();
+    if state.auth.bearer_token.is_some() {
+        methods.push("bearer");
+    }
+    if state.auth.api_key_hash.is_some() {
+        methods.push("x-api-key");
+    }
+    if !state.auth.keyed_api_keys.is_empty() {
+        methods.push("x-api-key-id+x-api-key");
+    }
+    if has_runtime_repo_api_keys(state) {
+        methods.push("sqlite:x-api-key-id+x-api-key");
+    }
+    methods
+}
+
+async fn auth_middleware(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let auth_enabled = state.auth.is_enabled() || has_runtime_repo_api_keys(&state);
+    if !auth_enabled {
+        return next.run(request).await;
+    }
+
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+
+    let auth = resolve_auth_context(&headers, &state);
+    let Some(auth) = auth else {
+        let rid = request_id(&headers);
+        return ApiError::unauthorized("missing or invalid credentials")
+            .with_request_id(rid)
+            .with_details(serde_json::json!({ "supported_auth": supported_auth_methods(&state) }))
+            .into_response();
+    };
+
+    if !role_can_access(&auth.role, &method, &path) {
+        let rid = request_id(&headers);
+        return ApiError::forbidden("role is not allowed to access this endpoint")
+            .with_request_id(rid)
+            .with_details(serde_json::json!({
+                "role": auth.role.as_str(),
+                "method": method.as_str(),
+                "path": path
+            }))
+            .into_response();
+    }
+
+    next.run(request).await
 }
 
 async fn request_log_middleware(
@@ -757,6 +1333,66 @@ pub async fn list_interrupts(
     }
 }
 
+pub async fn list_audit_logs(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<ListAuditLogsQuery>,
+) -> Result<Json<ApiEnvelope<AuditLogListResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    if let (Some(from_ms), Some(to_ms)) = (q.from_ms, q.to_ms) {
+        if from_ms > to_ms {
+            return Err(
+                ApiError::bad_request("from_ms must be less than or equal to to_ms")
+                    .with_request_id(rid),
+            );
+        }
+    }
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?.clone();
+        let limit = q.limit.unwrap_or(100).clamp(1, 500);
+        let request_id_filter = q
+            .request_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let action_filter = q.action.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let rows = repo
+            .list_audit_logs_filtered(request_id_filter, action_filter, q.from_ms, q.to_ms, limit)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+        let logs = rows
+            .into_iter()
+            .map(|row| AuditLogItem {
+                audit_id: row.audit_id,
+                actor_type: row.actor_type,
+                actor_id: row.actor_id,
+                actor_role: row.actor_role,
+                action: row.action,
+                resource_type: row.resource_type,
+                resource_id: row.resource_id,
+                result: row.result,
+                request_id: row.request_id,
+                details: row.details_json.and_then(|raw| {
+                    serde_json::from_str::<Value>(&raw)
+                        .ok()
+                        .or_else(|| Some(Value::String(raw)))
+                }),
+                created_at: row.created_at.to_rfc3339(),
+            })
+            .collect();
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: AuditLogListResponse { logs },
+        }));
+    }
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let _ = q;
+        Err(ApiError::internal("audit log APIs require sqlite-persistence").with_request_id(rid))
+    }
+}
+
 pub async fn get_interrupt(
     State(state): State<ExecutionApiState>,
     Path(interrupt_id): Path<String>,
@@ -1337,7 +1973,7 @@ mod tests {
     use crate::kernel::runtime::repository::RuntimeRepository;
     use crate::schemas::messages::Message;
 
-    use super::{build_router, ExecutionApiState};
+    use super::{build_router, ApiRole, ExecutionApiState};
 
     async fn build_test_graph() -> Arc<crate::graph::CompiledGraph<MessagesState>> {
         let node = function_node("research", |_state: &MessagesState| async move {
@@ -1424,6 +2060,675 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn auth_required_without_credentials_returns_unauthorized() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key("test-api-key"),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-auth-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("auth body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("auth json");
+        assert_eq!(json["request_id"], "req-auth-1");
+        assert_eq!(json["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn auth_bearer_token_allows_access() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_bearer_token("t-1"),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("authorization", "Bearer t-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_api_key_allows_access() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key("key-1"),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key", "key-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_keyed_api_key_allows_access() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record(
+                "ops-key-1",
+                "secret-1",
+                true,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "ops-key-1")
+            .header("x-api-key", "secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-4"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_keyed_api_key_disabled_is_rejected() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record(
+                "ops-key-2",
+                "secret-2",
+                false,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "ops-key-2")
+            .header("x-api-key", "secret-2")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-5"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_keyed_api_key_wrong_secret_is_rejected() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record(
+                "ops-key-3",
+                "secret-3",
+                true,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "ops-key-3")
+            .header("x-api-key", "secret-wrong")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-6"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_sqlite_api_key_record_allows_access() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_persisted_api_key_record("db-key-1", "db-secret-1", true);
+        let router = build_router(state);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "db-key-1")
+            .header("x-api-key", "db-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-7"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_sqlite_disabled_api_key_is_rejected() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_persisted_api_key_record("db-key-2", "db-secret-2", true);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.set_api_key_status("db-key-2", false)
+            .expect("disable api key");
+        let router = build_router(state);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "db-key-2")
+            .header("x-api-key", "db-secret-2")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-8"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_sqlite_api_key_table_enforces_auth() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_persisted_api_key_record("db-key-3", "db-secret-3", false);
+        let router = build_router(state);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-9"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_worker_role_cannot_run_jobs() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "worker-key-1",
+                "worker-secret-1",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "worker-key-1")
+            .header("x-api-key", "worker-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-10"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_worker_role_can_access_worker_endpoints() {
+        let router = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "worker-key-2",
+                    "worker-secret-2",
+                    true,
+                    ApiRole::Worker,
+                ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("x-api-key-id", "worker-key-2")
+            .header("x-api-key", "worker-secret-2")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-rbac-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_operator_role_cannot_access_worker_endpoints() {
+        let router = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "operator-key-1",
+                    "operator-secret-1",
+                    true,
+                    ApiRole::Operator,
+                ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("x-api-key-id", "operator-key-1")
+            .header("x-api-key", "operator-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-rbac-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_admin_role_can_access_worker_endpoints() {
+        let router = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_with_role("admin-secret-1", ApiRole::Admin),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("x-api-key", "admin-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-rbac-3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_capture_control_plane_actions() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_interrupt_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-audit-run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "audit-job-1",
+                    "input": "trigger interrupt"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+
+        let cancel_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/audit-job-1/cancel")
+            .header("x-request-id", "req-audit-cancel")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let cancel_resp = router.clone().oneshot(cancel_req).await.unwrap();
+        assert_eq!(cancel_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(20).expect("list audit logs");
+        assert!(logs.iter().any(|l| l.action == "job.run"
+            && l.result == "success"
+            && l.request_id == "req-audit-run"));
+        assert!(logs.iter().any(|l| l.action == "job.cancel"
+            && l.result == "success"
+            && l.request_id == "req-audit-cancel"));
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_capture_forbidden_attempts() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "worker-key-audit",
+                    "worker-secret-audit",
+                    true,
+                    ApiRole::Worker,
+                );
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-audit-forbidden")
+            .header("x-api-key-id", "worker-key-audit")
+            .header("x-api-key", "worker-secret-audit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "audit-job-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let logs = repo.list_audit_logs(10).expect("list audit logs");
+        let forbidden = logs
+            .iter()
+            .find(|l| l.request_id == "req-audit-forbidden")
+            .expect("forbidden log");
+        assert_eq!(forbidden.action, "job.run");
+        assert_eq!(forbidden.result, "error");
+        assert_eq!(forbidden.actor_role.as_deref(), Some("worker"));
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_api_returns_filtered_records_for_operator() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_interrupt_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "operator-key-audit-read",
+                    "operator-secret-audit-read",
+                    true,
+                    ApiRole::Operator,
+                );
+        let router = build_router(state);
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-audit-read-run")
+            .header("x-api-key-id", "operator-key-audit-read")
+            .header("x-api-key", "operator-secret-audit-read")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "audit-read-1",
+                    "input": "trigger interrupt"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+
+        let cancel_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/audit-read-1/cancel")
+            .header("x-request-id", "req-audit-read-cancel")
+            .header("x-api-key-id", "operator-key-audit-read")
+            .header("x-api-key", "operator-secret-audit-read")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let cancel_resp = router.clone().oneshot(cancel_req).await.unwrap();
+        assert_eq!(cancel_resp.status(), StatusCode::OK);
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/audit/logs?action=job.cancel&request_id=req-audit-read-cancel&limit=5")
+            .header("x-api-key-id", "operator-key-audit-read")
+            .header("x-api-key", "operator-secret-audit-read")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .expect("audit list body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("audit list json");
+        let logs = json["data"]["logs"].as_array().expect("logs array");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["action"], "job.cancel");
+        assert_eq!(logs[0]["request_id"], "req-audit-read-cancel");
+        assert_eq!(logs[0]["actor_role"], "operator");
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_api_worker_role_is_forbidden() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "worker-key-audit-read",
+                    "worker-secret-audit-read",
+                    true,
+                    ApiRole::Worker,
+                );
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/audit/logs")
+            .header("x-api-key-id", "worker-key-audit-read")
+            .header("x-api-key", "worker-secret-audit-read")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_api_rejects_invalid_time_range() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "operator-key-audit-range",
+                    "operator-secret-audit-range",
+                    true,
+                    ApiRole::Operator,
+                );
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/audit/logs?from_ms=10&to_ms=1")
+            .header("x-api-key-id", "operator-key-audit-range")
+            .header("x-api-key", "operator-secret-audit-range")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn security_auth_bypass_with_mixed_invalid_credentials_is_rejected() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "sec-key-1",
+                "sec-secret-1",
+                true,
+                ApiRole::Operator,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("authorization", "Bearer definitely-wrong")
+            .header("x-api-key-id", "sec-key-1")
+            .header("x-api-key", "wrong-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-auth-bypass-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn security_privilege_escalation_header_is_ignored() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "sec-worker-1",
+                "sec-worker-secret-1",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-oris-role", "admin")
+            .header("x-api-key-id", "sec-worker-1")
+            .header("x-api-key", "sec-worker-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-rbac-escalation-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("forbidden body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("forbidden json");
+        assert_eq!(json["error"]["details"]["role"], "worker");
+    }
+
+    #[tokio::test]
+    async fn security_request_id_spoof_header_is_replaced() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key("sec-api-key-1"),
+        );
+        let spoofed = "req injected value";
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", spoofed)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-request-id-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("request id body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("request id json");
+        let rid = json["request_id"].as_str().expect("request_id");
+        assert_ne!(rid, spoofed);
+        assert!(!rid.contains(' '));
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn security_replay_resistance_idempotency_payload_swap_is_rejected() {
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            ":memory:",
+        ));
+
+        let first_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-idem-1",
+                    "input": "alpha",
+                    "idempotency_key": "security-idem-key-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_resp = router.clone().oneshot(first_req).await.unwrap();
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-idem-1",
+                    "input": "beta",
+                    "idempotency_key": "security-idem-key-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_resp = router.clone().oneshot(second_req).await.unwrap();
+        assert_eq!(second_resp.status(), StatusCode::CONFLICT);
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/jobs?limit=10&offset=0")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        let jobs = json["data"]["jobs"].as_array().expect("jobs array");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["thread_id"], "security-idem-1");
     }
 
     #[tokio::test]

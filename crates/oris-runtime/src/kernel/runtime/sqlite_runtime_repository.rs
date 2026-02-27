@@ -79,12 +79,37 @@ impl SqliteRuntimeRepository {
               created_at_ms INTEGER NOT NULL,
               UNIQUE(attempt_id, dedupe_token)
             );
+            CREATE TABLE IF NOT EXISTS runtime_audit_logs (
+              audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              actor_type TEXT NOT NULL,
+              actor_id TEXT NULL,
+              actor_role TEXT NULL,
+              action TEXT NOT NULL,
+              resource_type TEXT NOT NULL,
+              resource_id TEXT NULL,
+              result TEXT NOT NULL,
+              request_id TEXT NOT NULL,
+              details_json TEXT NULL,
+              created_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS runtime_api_keys (
+              key_id TEXT PRIMARY KEY,
+              secret_hash TEXT NOT NULL,
+              role TEXT NOT NULL DEFAULT 'operator',
+              status TEXT NOT NULL,
+              created_at_ms INTEGER NOT NULL,
+              updated_at_ms INTEGER NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_runtime_attempts_status_retry ON runtime_attempts(status, retry_at_ms);
             CREATE INDEX IF NOT EXISTS idx_runtime_leases_expiry ON runtime_leases(lease_expires_at_ms);
             CREATE INDEX IF NOT EXISTS idx_runtime_interrupts_status ON runtime_interrupts(status);
             CREATE INDEX IF NOT EXISTS idx_runtime_interrupts_thread ON runtime_interrupts(thread_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_jobs_status ON runtime_jobs(status);
             CREATE INDEX IF NOT EXISTS idx_runtime_step_reports_attempt ON runtime_step_reports(attempt_id, created_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_created ON runtime_audit_logs(created_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_request ON runtime_audit_logs(request_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_action ON runtime_audit_logs(action, created_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_api_keys_status ON runtime_api_keys(status);
             "#,
         )
         .map_err(|e| KernelError::Driver(format!("init sqlite runtime schema: {}", e)))?;
@@ -102,6 +127,12 @@ impl SqliteRuntimeRepository {
             "TEXT NULL",
         )?;
         add_column_if_missing(&conn, "runtime_interrupts", "resumed_at_ms", "INTEGER NULL")?;
+        add_column_if_missing(
+            &conn,
+            "runtime_api_keys",
+            "role",
+            "TEXT NOT NULL DEFAULT 'operator'",
+        )?;
         Ok(())
     }
 
@@ -560,6 +591,177 @@ impl SqliteRuntimeRepository {
             Err(e) => Err(KernelError::Driver(format!("record step report: {}", e))),
         }
     }
+
+    pub fn upsert_api_key_record(
+        &self,
+        key_id: &str,
+        secret_hash: &str,
+        active: bool,
+        role: &str,
+    ) -> Result<(), KernelError> {
+        let now = dt_to_ms(Utc::now());
+        let status = if active { "active" } else { "disabled" };
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_api_keys (key_id, secret_hash, role, status, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(key_id)
+             DO UPDATE SET secret_hash = excluded.secret_hash, role = excluded.role, status = excluded.status, updated_at_ms = excluded.updated_at_ms",
+            params![key_id, secret_hash, role, status, now],
+        )
+        .map_err(|e| KernelError::Driver(format!("upsert api key: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn get_api_key_record(&self, key_id: &str) -> Result<Option<ApiKeyRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT key_id, secret_hash, role, status, created_at_ms, updated_at_ms
+                 FROM runtime_api_keys WHERE key_id = ?1",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare get_api_key_record: {}", e)))?;
+        let mut rows = stmt
+            .query(params![key_id])
+            .map_err(|e| KernelError::Driver(format!("query get_api_key_record: {}", e)))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| KernelError::Driver(format!("scan get_api_key_record: {}", e)))?
+        {
+            let status: String = row.get(3).map_err(map_rusqlite_err)?;
+            Ok(Some(ApiKeyRow {
+                key_id: row.get(0).map_err(map_rusqlite_err)?,
+                secret_hash: row.get(1).map_err(map_rusqlite_err)?,
+                role: row.get(2).map_err(map_rusqlite_err)?,
+                active: status == "active",
+                created_at: ms_to_dt(row.get::<_, i64>(4).map_err(map_rusqlite_err)?),
+                updated_at: ms_to_dt(row.get::<_, i64>(5).map_err(map_rusqlite_err)?),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_api_key_status(&self, key_id: &str, active: bool) -> Result<(), KernelError> {
+        let now = dt_to_ms(Utc::now());
+        let status = if active { "active" } else { "disabled" };
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_api_keys SET status = ?2, updated_at_ms = ?3 WHERE key_id = ?1",
+                params![key_id, status, now],
+            )
+            .map_err(|e| KernelError::Driver(format!("set api key status: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "api key not found: {}",
+                key_id
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn has_any_api_keys(&self) -> Result<bool, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_api_keys", [], |r| r.get(0))
+            .map_err(|e| KernelError::Driver(format!("count api keys: {}", e)))?;
+        Ok(count > 0)
+    }
+
+    pub fn append_audit_log(&self, entry: &AuditLogEntry) -> Result<(), KernelError> {
+        let now = dt_to_ms(Utc::now());
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_audit_logs
+             (actor_type, actor_id, actor_role, action, resource_type, resource_id, result, request_id, details_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                entry.actor_type,
+                entry.actor_id,
+                entry.actor_role,
+                entry.action,
+                entry.resource_type,
+                entry.resource_id,
+                entry.result,
+                entry.request_id,
+                entry.details_json,
+                now
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("append audit log: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn list_audit_logs(&self, limit: usize) -> Result<Vec<AuditLogRow>, KernelError> {
+        self.list_audit_logs_filtered(None, None, None, None, limit)
+    }
+
+    pub fn list_audit_logs_filtered(
+        &self,
+        request_id: Option<&str>,
+        action: Option<&str>,
+        from_ms: Option<i64>,
+        to_ms: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<AuditLogRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT audit_id, actor_type, actor_id, actor_role, action, resource_type, resource_id, result, request_id, details_json, created_at_ms
+                 FROM runtime_audit_logs
+                 WHERE (?1 IS NULL OR request_id = ?1)
+                   AND (?2 IS NULL OR action = ?2)
+                   AND (?3 IS NULL OR created_at_ms >= ?3)
+                   AND (?4 IS NULL OR created_at_ms <= ?4)
+                 ORDER BY audit_id DESC
+                 LIMIT ?5",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare list_audit_logs: {}", e)))?;
+        let rows = stmt
+            .query_map(
+                params![request_id, action, from_ms, to_ms, limit as i64],
+                |row| {
+                    Ok(AuditLogRow {
+                        audit_id: row.get(0)?,
+                        actor_type: row.get(1)?,
+                        actor_id: row.get(2)?,
+                        actor_role: row.get(3)?,
+                        action: row.get(4)?,
+                        resource_type: row.get(5)?,
+                        resource_id: row.get(6)?,
+                        result: row.get(7)?,
+                        request_id: row.get(8)?,
+                        details_json: row.get(9)?,
+                        created_at: ms_to_dt(row.get::<_, i64>(10)?),
+                    })
+                },
+            )
+            .map_err(|e| KernelError::Driver(format!("query list_audit_logs: {}", e)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(map_rusqlite_err)?);
+        }
+        Ok(out)
+    }
 }
 
 fn map_row_to_interrupt(row: &rusqlite::Row) -> rusqlite::Result<InterruptRow> {
@@ -587,6 +789,44 @@ pub struct InterruptRow {
     pub created_at: DateTime<Utc>,
     pub resume_payload_hash: Option<String>,
     pub resume_response_json: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApiKeyRow {
+    pub key_id: String,
+    pub secret_hash: String,
+    pub role: String,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditLogEntry {
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub result: String,
+    pub request_id: String,
+    pub details_json: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditLogRow {
+    pub audit_id: i64,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub result: String,
+    pub request_id: String,
+    pub details_json: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

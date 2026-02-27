@@ -21,18 +21,19 @@ pub mod sqlite_runtime_repository;
 #[cfg(feature = "execution-server")]
 pub use api_errors::ApiError;
 #[cfg(feature = "execution-server")]
-pub use api_handlers::{build_router, ExecutionApiState};
+pub use api_handlers::{build_router, ApiRole, ExecutionApiState};
 #[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
 pub use api_idempotency::{IdempotencyRecord, SqliteIdempotencyStore};
 #[cfg(feature = "execution-server")]
 pub use api_models::{
-    ApiEnvelope, ApiMeta, CancelJobRequest, CancelJobResponse, CheckpointInspectResponse,
-    InterruptDetailResponse, InterruptListResponse, JobDetailResponse, JobHistoryItem,
-    JobHistoryResponse, JobStateResponse, JobTimelineItem, JobTimelineResponse, ListJobsResponse,
-    RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest,
-    RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest, WorkerAckResponse,
-    WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest,
-    WorkerPollResponse, WorkerReportStepRequest,
+    ApiEnvelope, ApiMeta, AuditLogItem, AuditLogListResponse, CancelJobRequest, CancelJobResponse,
+    CheckpointInspectResponse, InterruptDetailResponse, InterruptListResponse, JobDetailResponse,
+    JobHistoryItem, JobHistoryResponse, JobStateResponse, JobTimelineItem, JobTimelineResponse,
+    ListAuditLogsQuery, ListJobsResponse, RejectInterruptRequest, ReplayJobRequest,
+    ResumeInterruptRequest, ResumeJobRequest, RunJobRequest, RunJobResponse,
+    TimelineExportResponse, WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest,
+    WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse,
+    WorkerReportStepRequest,
 };
 pub use lease::{LeaseConfig, LeaseManager, LeaseTickResult, RepositoryLeaseManager};
 pub use models::{

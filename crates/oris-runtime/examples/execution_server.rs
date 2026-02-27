@@ -61,15 +61,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path =
         std::env::var("ORIS_SQLITE_DB").unwrap_or_else(|_| "oris_execution_server.db".into());
     let addr = std::env::var("ORIS_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let bearer_token = std::env::var("ORIS_API_AUTH_BEARER_TOKEN").ok();
+    let api_key_id = std::env::var("ORIS_API_AUTH_API_KEY_ID").ok();
+    let api_key = std::env::var("ORIS_API_AUTH_API_KEY").ok();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     let compiled = build_compiled(&db_path)?;
-    let state = ExecutionApiState::with_sqlite_idempotency(compiled, &db_path);
+    let mut state = if api_key_id.is_some() && api_key.is_some() {
+        ExecutionApiState::with_sqlite_idempotency(compiled, &db_path)
+            .with_static_auth(bearer_token.clone(), None)
+    } else {
+        ExecutionApiState::with_sqlite_idempotency(compiled, &db_path)
+            .with_static_auth(bearer_token.clone(), api_key.clone())
+    };
+    if let (Some(key_id), Some(secret)) = (api_key_id.clone(), api_key.clone()) {
+        state = state.with_persisted_api_key_record(key_id, secret, true);
+    }
     let app = Router::new()
         .route("/healthz", get(healthz))
         .merge(build_router(state));
 
     println!("execution server listening on http://{}", addr);
+    if bearer_token.is_some() || api_key.is_some() || api_key_id.is_some() {
+        println!("execution API auth enabled");
+    }
     axum::serve(listener, app).await?;
     Ok(())
 }

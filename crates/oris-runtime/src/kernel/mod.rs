@@ -35,14 +35,14 @@ pub use reducer::{Reducer, StateUpdatedOnlyReducer};
 pub use runner::KernelRunner;
 #[cfg(feature = "execution-server")]
 pub use runtime::{
-    build_router, ApiEnvelope, ApiError, ApiMeta, CancelJobRequest, CancelJobResponse,
-    CheckpointInspectResponse, ExecutionApiState, InterruptDetailResponse, InterruptListResponse,
-    JobDetailResponse, JobHistoryItem, JobHistoryResponse, JobStateResponse, JobTimelineItem,
-    JobTimelineResponse, ListJobsResponse, RejectInterruptRequest, ReplayJobRequest,
-    ResumeInterruptRequest, ResumeJobRequest, RunJobRequest, RunJobResponse,
-    TimelineExportResponse, WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest,
-    WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse,
-    WorkerReportStepRequest,
+    build_router, ApiEnvelope, ApiError, ApiMeta, ApiRole, AuditLogItem, AuditLogListResponse,
+    CancelJobRequest, CancelJobResponse, CheckpointInspectResponse, ExecutionApiState,
+    InterruptDetailResponse, InterruptListResponse, JobDetailResponse, JobHistoryItem,
+    JobHistoryResponse, JobStateResponse, JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery,
+    ListJobsResponse, RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest,
+    ResumeJobRequest, RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest,
+    WorkerAckResponse, WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse,
+    WorkerPollRequest, WorkerPollResponse, WorkerReportStepRequest,
 };
 pub use runtime::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseConfig, LeaseManager,

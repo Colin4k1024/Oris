@@ -43,6 +43,12 @@ cargo test -p oris-runtime kernel::driver::tests:: -- --nocapture
 cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests:: -- --nocapture
 ```
 
+For security-focused changes, run the dedicated regression slice:
+
+```bash
+cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::security_ -- --nocapture --test-threads=1
+```
+
 ## Pull request expectations
 
 - Keep PRs small and scoped to one problem.
