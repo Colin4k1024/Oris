@@ -115,3 +115,17 @@ bash scripts/scaffold_example_template.sh operator_cli /tmp/my-oris-ops
 1. 先复制 `examples/oris_starter_axum`，替换成你的业务 graph 节点。
 2. 为你的 `thread_id` 设计稳定主键规则（建议与业务实体一一映射）。
 3. 把“崩溃恢复 + replay 等价 + interrupt 恢复”三类测试接入 CI。
+
+## 7. 批量创建路线图 Issue（可选）
+
+已提供脚本，可从 `docs/issues-roadmap.csv` 批量创建 GitHub Issues：
+
+```bash
+bash scripts/import_issues_from_csv.sh --repo Colin4k1024/Oris --create-milestones --create-labels
+```
+
+先预览不落库：
+
+```bash
+bash scripts/import_issues_from_csv.sh --repo Colin4k1024/Oris --dry-run --create-milestones --create-labels
+```
