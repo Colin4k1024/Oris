@@ -81,6 +81,16 @@ jobs:
         with:
           command: test
           args: --release --all-features
+      - name: Run runtime schema migration regression (sqlite)
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::sqlite_runtime_repository::tests::schema_migration -- --nocapture --test-threads=1
+      - name: Run runtime schema migration regression (postgres, env-gated)
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::postgres_runtime_repository::tests::postgres_schema_migration_ -- --nocapture --test-threads=1
 
   security:
     runs-on: ubuntu-latest

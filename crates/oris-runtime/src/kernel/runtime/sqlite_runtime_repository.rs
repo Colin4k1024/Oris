@@ -13,6 +13,8 @@ use crate::kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
+const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 2;
+
 #[derive(Clone)]
 pub struct SqliteRuntimeRepository {
     conn: Arc<Mutex<Connection>>,
@@ -34,105 +36,22 @@ impl SqliteRuntimeRepository {
             .conn
             .lock()
             .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS runtime_attempts (
-              attempt_id TEXT PRIMARY KEY,
-              run_id TEXT NOT NULL,
-              attempt_no INTEGER NOT NULL,
-              status TEXT NOT NULL,
-              retry_at_ms INTEGER NULL
-            );
-            CREATE TABLE IF NOT EXISTS runtime_leases (
-              lease_id TEXT PRIMARY KEY,
-              attempt_id TEXT NOT NULL UNIQUE,
-              worker_id TEXT NOT NULL,
-              lease_expires_at_ms INTEGER NOT NULL,
-              heartbeat_at_ms INTEGER NOT NULL,
-              version INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS runtime_jobs (
-              thread_id TEXT PRIMARY KEY,
-              status TEXT NOT NULL,
-              created_at_ms INTEGER NOT NULL,
-              updated_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS runtime_interrupts (
-              interrupt_id TEXT PRIMARY KEY,
-              thread_id TEXT NOT NULL,
-              run_id TEXT NOT NULL,
-              attempt_id TEXT NOT NULL,
-              value_json TEXT NOT NULL,
-              status TEXT NOT NULL,
-              created_at_ms INTEGER NOT NULL,
-              resume_payload_hash TEXT NULL,
-              resume_response_json TEXT NULL,
-              resumed_at_ms INTEGER NULL
-            );
-            CREATE TABLE IF NOT EXISTS runtime_step_reports (
-              report_id INTEGER PRIMARY KEY AUTOINCREMENT,
-              worker_id TEXT NOT NULL,
-              attempt_id TEXT NOT NULL,
-              action_id TEXT NOT NULL,
-              status TEXT NOT NULL,
-              dedupe_token TEXT NOT NULL,
-              created_at_ms INTEGER NOT NULL,
-              UNIQUE(attempt_id, dedupe_token)
-            );
-            CREATE TABLE IF NOT EXISTS runtime_audit_logs (
-              audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
-              actor_type TEXT NOT NULL,
-              actor_id TEXT NULL,
-              actor_role TEXT NULL,
-              action TEXT NOT NULL,
-              resource_type TEXT NOT NULL,
-              resource_id TEXT NULL,
-              result TEXT NOT NULL,
-              request_id TEXT NOT NULL,
-              details_json TEXT NULL,
-              created_at_ms INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS runtime_api_keys (
-              key_id TEXT PRIMARY KEY,
-              secret_hash TEXT NOT NULL,
-              role TEXT NOT NULL DEFAULT 'operator',
-              status TEXT NOT NULL,
-              created_at_ms INTEGER NOT NULL,
-              updated_at_ms INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_runtime_attempts_status_retry ON runtime_attempts(status, retry_at_ms);
-            CREATE INDEX IF NOT EXISTS idx_runtime_leases_expiry ON runtime_leases(lease_expires_at_ms);
-            CREATE INDEX IF NOT EXISTS idx_runtime_interrupts_status ON runtime_interrupts(status);
-            CREATE INDEX IF NOT EXISTS idx_runtime_interrupts_thread ON runtime_interrupts(thread_id);
-            CREATE INDEX IF NOT EXISTS idx_runtime_jobs_status ON runtime_jobs(status);
-            CREATE INDEX IF NOT EXISTS idx_runtime_step_reports_attempt ON runtime_step_reports(attempt_id, created_at_ms DESC);
-            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_created ON runtime_audit_logs(created_at_ms DESC);
-            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_request ON runtime_audit_logs(request_id);
-            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_action ON runtime_audit_logs(action, created_at_ms DESC);
-            CREATE INDEX IF NOT EXISTS idx_runtime_api_keys_status ON runtime_api_keys(status);
-            "#,
-        )
-        .map_err(|e| KernelError::Driver(format!("init sqlite runtime schema: {}", e)))?;
-        // Backward-compatible upgrades for older local SQLite files.
-        add_column_if_missing(
-            &conn,
-            "runtime_interrupts",
-            "resume_payload_hash",
-            "TEXT NULL",
-        )?;
-        add_column_if_missing(
-            &conn,
-            "runtime_interrupts",
-            "resume_response_json",
-            "TEXT NULL",
-        )?;
-        add_column_if_missing(&conn, "runtime_interrupts", "resumed_at_ms", "INTEGER NULL")?;
-        add_column_if_missing(
-            &conn,
-            "runtime_api_keys",
-            "role",
-            "TEXT NOT NULL DEFAULT 'operator'",
-        )?;
+        ensure_sqlite_migration_table(&conn)?;
+        let current = sqlite_current_schema_version(&conn)?;
+        if current > SQLITE_RUNTIME_SCHEMA_VERSION {
+            return Err(KernelError::Driver(format!(
+                "sqlite runtime schema version {} is newer than supported {}",
+                current, SQLITE_RUNTIME_SCHEMA_VERSION
+            )));
+        }
+        if current < 1 {
+            apply_sqlite_runtime_migration_v1(&conn)?;
+            record_sqlite_migration(&conn, 1, "baseline_runtime_tables")?;
+        }
+        if current < 2 {
+            apply_sqlite_runtime_migration_v2(&conn)?;
+            record_sqlite_migration(&conn, 2, "interrupt_resume_and_api_key_role")?;
+        }
         Ok(())
     }
 
@@ -1055,6 +974,142 @@ fn map_rusqlite_err(err: rusqlite::Error) -> KernelError {
     KernelError::Driver(format!("sqlite runtime repo: {}", err))
 }
 
+fn ensure_sqlite_migration_table(conn: &Connection) -> Result<(), KernelError> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS runtime_schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at_ms INTEGER NOT NULL
+        );
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("init sqlite runtime migration table: {}", e)))?;
+    Ok(())
+}
+
+fn sqlite_current_schema_version(conn: &Connection) -> Result<i64, KernelError> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM runtime_schema_migrations",
+        [],
+        |r| r.get(0),
+    )
+    .map_err(|e| KernelError::Driver(format!("read sqlite runtime schema version: {}", e)))
+}
+
+fn record_sqlite_migration(conn: &Connection, version: i64, name: &str) -> Result<(), KernelError> {
+    let now = dt_to_ms(Utc::now());
+    conn.execute(
+        "INSERT OR IGNORE INTO runtime_schema_migrations(version, name, applied_at_ms)
+         VALUES (?1, ?2, ?3)",
+        params![version, name, now],
+    )
+    .map_err(|e| KernelError::Driver(format!("record sqlite runtime migration: {}", e)))?;
+    Ok(())
+}
+
+fn apply_sqlite_runtime_migration_v1(conn: &Connection) -> Result<(), KernelError> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS runtime_attempts (
+          attempt_id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL,
+          attempt_no INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          retry_at_ms INTEGER NULL
+        );
+        CREATE TABLE IF NOT EXISTS runtime_leases (
+          lease_id TEXT PRIMARY KEY,
+          attempt_id TEXT NOT NULL UNIQUE,
+          worker_id TEXT NOT NULL,
+          lease_expires_at_ms INTEGER NOT NULL,
+          heartbeat_at_ms INTEGER NOT NULL,
+          version INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS runtime_jobs (
+          thread_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS runtime_interrupts (
+          interrupt_id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          attempt_id TEXT NOT NULL,
+          value_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS runtime_step_reports (
+          report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          worker_id TEXT NOT NULL,
+          attempt_id TEXT NOT NULL,
+          action_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          dedupe_token TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          UNIQUE(attempt_id, dedupe_token)
+        );
+        CREATE TABLE IF NOT EXISTS runtime_audit_logs (
+          audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          actor_type TEXT NOT NULL,
+          actor_id TEXT NULL,
+          actor_role TEXT NULL,
+          action TEXT NOT NULL,
+          resource_type TEXT NOT NULL,
+          resource_id TEXT NULL,
+          result TEXT NOT NULL,
+          request_id TEXT NOT NULL,
+          details_json TEXT NULL,
+          created_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS runtime_api_keys (
+          key_id TEXT PRIMARY KEY,
+          secret_hash TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_attempts_status_retry ON runtime_attempts(status, retry_at_ms);
+        CREATE INDEX IF NOT EXISTS idx_runtime_leases_expiry ON runtime_leases(lease_expires_at_ms);
+        CREATE INDEX IF NOT EXISTS idx_runtime_interrupts_status ON runtime_interrupts(status);
+        CREATE INDEX IF NOT EXISTS idx_runtime_interrupts_thread ON runtime_interrupts(thread_id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_jobs_status ON runtime_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_runtime_step_reports_attempt ON runtime_step_reports(attempt_id, created_at_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_created ON runtime_audit_logs(created_at_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_request ON runtime_audit_logs(request_id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_action ON runtime_audit_logs(action, created_at_ms DESC);
+        CREATE INDEX IF NOT EXISTS idx_runtime_api_keys_status ON runtime_api_keys(status);
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v1: {}", e)))?;
+    Ok(())
+}
+
+fn apply_sqlite_runtime_migration_v2(conn: &Connection) -> Result<(), KernelError> {
+    add_column_if_missing(
+        conn,
+        "runtime_interrupts",
+        "resume_payload_hash",
+        "TEXT NULL",
+    )?;
+    add_column_if_missing(
+        conn,
+        "runtime_interrupts",
+        "resume_response_json",
+        "TEXT NULL",
+    )?;
+    add_column_if_missing(conn, "runtime_interrupts", "resumed_at_ms", "INTEGER NULL")?;
+    add_column_if_missing(
+        conn,
+        "runtime_api_keys",
+        "role",
+        "TEXT NOT NULL DEFAULT 'operator'",
+    )?;
+    Ok(())
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -1078,4 +1133,119 @@ fn add_column_if_missing(
     conn.execute(&alter, [])
         .map_err(|e| KernelError::Driver(format!("alter table {} add {}: {}", table, column, e)))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use rusqlite::{Connection, OptionalExtension};
+
+    use super::{
+        apply_sqlite_runtime_migration_v1, ensure_sqlite_migration_table, record_sqlite_migration,
+        SqliteRuntimeRepository, SQLITE_RUNTIME_SCHEMA_VERSION,
+    };
+
+    fn temp_sqlite_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("oris-runtime-{}-{}.db", name, uuid::Uuid::new_v4()))
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let pragma = format!("PRAGMA table_info({})", table);
+        let mut stmt = conn.prepare(&pragma).expect("prepare pragma table_info");
+        let mut rows = stmt.query([]).expect("query pragma table_info");
+        while let Some(row) = rows.next().expect("scan pragma row") {
+            let col_name: String = row.get(1).expect("column name");
+            if col_name == column {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn migration_version(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM runtime_schema_migrations",
+            [],
+            |r| r.get(0),
+        )
+        .expect("read migration version")
+    }
+
+    #[test]
+    fn schema_migration_clean_init_reaches_latest_version() {
+        let path = temp_sqlite_path("schema-clean-init");
+        let path_str = path.to_string_lossy().to_string();
+        let _repo = SqliteRuntimeRepository::new(&path_str).expect("create sqlite runtime repo");
+
+        let conn = Connection::open(&path).expect("open sqlite db");
+        assert_eq!(migration_version(&conn), SQLITE_RUNTIME_SCHEMA_VERSION);
+        assert!(column_exists(
+            &conn,
+            "runtime_interrupts",
+            "resume_payload_hash"
+        ));
+        assert!(column_exists(
+            &conn,
+            "runtime_interrupts",
+            "resume_response_json"
+        ));
+        assert!(column_exists(&conn, "runtime_interrupts", "resumed_at_ms"));
+        assert!(column_exists(&conn, "runtime_api_keys", "role"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn schema_migration_incremental_upgrade_from_v1_to_v2() {
+        let path = temp_sqlite_path("schema-upgrade");
+        {
+            let conn = Connection::open(&path).expect("open sqlite db");
+            ensure_sqlite_migration_table(&conn).expect("ensure migration table");
+            apply_sqlite_runtime_migration_v1(&conn).expect("apply v1 migration");
+            record_sqlite_migration(&conn, 1, "baseline_runtime_tables")
+                .expect("record v1 migration");
+            assert_eq!(migration_version(&conn), 1);
+            assert!(!column_exists(
+                &conn,
+                "runtime_interrupts",
+                "resume_payload_hash"
+            ));
+            assert!(!column_exists(&conn, "runtime_api_keys", "role"));
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        let _repo = SqliteRuntimeRepository::new(&path_str).expect("reopen and migrate sqlite db");
+
+        let conn = Connection::open(&path).expect("open upgraded sqlite db");
+        assert_eq!(migration_version(&conn), SQLITE_RUNTIME_SCHEMA_VERSION);
+        assert!(column_exists(
+            &conn,
+            "runtime_interrupts",
+            "resume_payload_hash"
+        ));
+        assert!(column_exists(
+            &conn,
+            "runtime_interrupts",
+            "resume_response_json"
+        ));
+        assert!(column_exists(&conn, "runtime_interrupts", "resumed_at_ms"));
+        assert!(column_exists(&conn, "runtime_api_keys", "role"));
+
+        let migration_v2: Option<String> = conn
+            .query_row(
+                "SELECT name FROM runtime_schema_migrations WHERE version = 2",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query migration v2");
+        assert_eq!(
+            migration_v2.as_deref(),
+            Some("interrupt_resume_and_api_key_role")
+        );
+
+        let _ = fs::remove_file(path);
+    }
 }

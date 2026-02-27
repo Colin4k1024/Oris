@@ -42,6 +42,7 @@ For runtime-specific work, also run:
 cargo test -p oris-runtime kernel::driver::tests:: -- --nocapture
 cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests:: -- --nocapture
 cargo test -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::postgres_runtime_repository::tests:: -- --nocapture --test-threads=1
+cargo test -p oris-runtime --features "sqlite-persistence" kernel::runtime::sqlite_runtime_repository::tests::schema_migration -- --nocapture --test-threads=1
 ```
 
 To execute the PostgreSQL branch of the runtime repository contract tests, set:
@@ -49,6 +50,10 @@ To execute the PostgreSQL branch of the runtime repository contract tests, set:
 ```bash
 export ORIS_TEST_POSTGRES_URL=postgres://<user>:<password>@<host>:5432/<db>
 ```
+
+Migration workflow and rollback runbook:
+
+- [docs/runtime-schema-migrations.md](docs/runtime-schema-migrations.md)
 
 For security-focused changes, run the dedicated regression slice:
 

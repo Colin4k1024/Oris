@@ -15,6 +15,8 @@ use crate::kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
+const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 2;
+
 fn is_valid_schema_ident(schema: &str) -> bool {
     !schema.is_empty()
         && schema
@@ -140,35 +142,16 @@ impl PostgresRuntimeRepository {
         let result = self.schema_ready.get_or_init(|| {
             let schema = self.schema.clone();
             let sql_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema);
-            let sql_attempts = format!(
-                "CREATE TABLE IF NOT EXISTS \"{}\".runtime_attempts (
-                    attempt_id TEXT PRIMARY KEY,
-                    run_id TEXT NOT NULL,
-                    attempt_no INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    retry_at_ms BIGINT NULL
+            let sql_migration_table = format!(
+                "CREATE TABLE IF NOT EXISTS \"{}\".runtime_schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at_ms BIGINT NOT NULL
                 )",
                 schema
             );
-            let sql_leases = format!(
-                "CREATE TABLE IF NOT EXISTS \"{}\".runtime_leases (
-                    lease_id TEXT PRIMARY KEY,
-                    attempt_id TEXT NOT NULL UNIQUE,
-                    worker_id TEXT NOT NULL,
-                    lease_expires_at_ms BIGINT NOT NULL,
-                    heartbeat_at_ms BIGINT NOT NULL,
-                    version BIGINT NOT NULL
-                )",
-                schema
-            );
-            let sql_attempt_idx = format!(
-                "CREATE INDEX IF NOT EXISTS idx_runtime_attempts_status_retry
-                 ON \"{}\".runtime_attempts(status, retry_at_ms)",
-                schema
-            );
-            let sql_lease_idx = format!(
-                "CREATE INDEX IF NOT EXISTS idx_runtime_leases_expiry
-                 ON \"{}\".runtime_leases(lease_expires_at_ms)",
+            let sql_current_version = format!(
+                "SELECT COALESCE(MAX(version), 0) FROM \"{}\".runtime_schema_migrations",
                 schema
             );
 
@@ -182,14 +165,110 @@ impl PostgresRuntimeRepository {
             };
 
             rt.block_on(async {
-                sqlx::query(&sql_schema).execute(&pool).await?;
-                sqlx::query(&sql_attempts).execute(&pool).await?;
-                sqlx::query(&sql_leases).execute(&pool).await?;
-                sqlx::query(&sql_attempt_idx).execute(&pool).await?;
-                sqlx::query(&sql_lease_idx).execute(&pool).await?;
-                Ok::<(), sqlx::Error>(())
+                sqlx::query(&sql_schema)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                sqlx::query(&sql_migration_table)
+                    .execute(&pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                let mut current_version: i64 = sqlx::query_scalar(&sql_current_version)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if current_version > POSTGRES_RUNTIME_SCHEMA_VERSION {
+                    return Err(format!(
+                        "postgres runtime schema version {} is newer than supported {}",
+                        current_version, POSTGRES_RUNTIME_SCHEMA_VERSION
+                    ));
+                }
+
+                if current_version < 1 {
+                    let sql_attempts = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_attempts (
+                            attempt_id TEXT PRIMARY KEY,
+                            run_id TEXT NOT NULL,
+                            attempt_no INTEGER NOT NULL,
+                            status TEXT NOT NULL,
+                            retry_at_ms BIGINT NULL
+                        )",
+                        schema
+                    );
+                    let sql_leases = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_leases (
+                            lease_id TEXT PRIMARY KEY,
+                            attempt_id TEXT NOT NULL UNIQUE,
+                            worker_id TEXT NOT NULL,
+                            lease_expires_at_ms BIGINT NOT NULL,
+                            heartbeat_at_ms BIGINT NOT NULL,
+                            version BIGINT NOT NULL
+                        )",
+                        schema
+                    );
+                    sqlx::query(&sql_attempts)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_leases)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let now = dt_to_ms(Utc::now());
+                    let sql_record = format!(
+                        "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT(version) DO NOTHING",
+                        schema
+                    );
+                    sqlx::query(&sql_record)
+                        .bind(1_i32)
+                        .bind("baseline_runtime_tables")
+                        .bind(now)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    current_version = 1;
+                }
+
+                if current_version < 2 {
+                    let sql_attempt_idx = format!(
+                        "CREATE INDEX IF NOT EXISTS idx_runtime_attempts_status_retry
+                         ON \"{}\".runtime_attempts(status, retry_at_ms)",
+                        schema
+                    );
+                    let sql_lease_idx = format!(
+                        "CREATE INDEX IF NOT EXISTS idx_runtime_leases_expiry
+                         ON \"{}\".runtime_leases(lease_expires_at_ms)",
+                        schema
+                    );
+                    sqlx::query(&sql_attempt_idx)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_lease_idx)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let now = dt_to_ms(Utc::now());
+                    let sql_record = format!(
+                        "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT(version) DO NOTHING",
+                        schema
+                    );
+                    sqlx::query(&sql_record)
+                        .bind(2_i32)
+                        .bind("runtime_indexes")
+                        .bind(now)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                Ok(())
             })
-            .map_err(|e| e.to_string())
         });
 
         result
@@ -617,8 +696,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use chrono::{Duration, Utc};
+    use sqlx::postgres::PgPoolOptions;
 
-    use super::PostgresRuntimeRepository;
+    use super::{PostgresRuntimeRepository, POSTGRES_RUNTIME_SCHEMA_VERSION};
     use crate::kernel::runtime::{
         RuntimeRepository, SchedulerDecision, SkeletonScheduler, SqliteRuntimeRepository,
     };
@@ -710,6 +790,38 @@ mod tests {
         format!("oris_runtime_repo_test_{}", ts)
     }
 
+    fn pg_query_i64(db_url: &str, query: String) -> i64 {
+        let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+        rt.block_on(async move {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(db_url)
+                .await
+                .expect("connect postgres");
+            sqlx::query_scalar::<_, i64>(&query)
+                .fetch_one(&pool)
+                .await
+                .expect("query postgres i64")
+        })
+    }
+
+    fn pg_execute_batch(db_url: &str, statements: Vec<String>) {
+        let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+        rt.block_on(async move {
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(db_url)
+                .await
+                .expect("connect postgres");
+            for sql in statements {
+                sqlx::query(&sql)
+                    .execute(&pool)
+                    .await
+                    .expect("execute postgres statement");
+            }
+        });
+    }
+
     #[test]
     fn runtime_repository_contract_sqlite() {
         let repo = SqliteRuntimeRepository::new(":memory:").expect("sqlite repo");
@@ -723,6 +835,112 @@ mod tests {
         };
         let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
         assert_dispatch_lease_requeue_contract(&repo, "postgres");
+    }
+
+    #[test]
+    fn postgres_schema_migration_clean_init_reaches_latest_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let schema = test_schema();
+        let repo = PostgresRuntimeRepository::new(db_url.clone()).with_schema(schema.clone());
+        repo.enqueue_attempt("migration-clean-attempt", "migration-clean-run")
+            .expect("enqueue attempt for schema init");
+
+        let version = pg_query_i64(
+            &db_url,
+            format!(
+                "SELECT COALESCE(MAX(version), 0) FROM \"{}\".runtime_schema_migrations",
+                schema
+            ),
+        );
+        assert_eq!(version, POSTGRES_RUNTIME_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn postgres_schema_migration_incremental_upgrade_from_v1_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let schema = test_schema();
+
+        pg_execute_batch(
+            &db_url,
+            vec![
+                format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS \"{}\".runtime_schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        applied_at_ms BIGINT NOT NULL
+                    )",
+                    schema
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS \"{}\".runtime_attempts (
+                        attempt_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        attempt_no INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        retry_at_ms BIGINT NULL
+                    )",
+                    schema
+                ),
+                format!(
+                    "CREATE TABLE IF NOT EXISTS \"{}\".runtime_leases (
+                        lease_id TEXT PRIMARY KEY,
+                        attempt_id TEXT NOT NULL UNIQUE,
+                        worker_id TEXT NOT NULL,
+                        lease_expires_at_ms BIGINT NOT NULL,
+                        heartbeat_at_ms BIGINT NOT NULL,
+                        version BIGINT NOT NULL
+                    )",
+                    schema
+                ),
+                format!(
+                    "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                     VALUES (1, 'baseline_runtime_tables', 1)
+                     ON CONFLICT(version) DO NOTHING",
+                    schema
+                ),
+            ],
+        );
+
+        let repo = PostgresRuntimeRepository::new(db_url.clone()).with_schema(schema.clone());
+        repo.enqueue_attempt("migration-upgrade-attempt", "migration-upgrade-run")
+            .expect("enqueue attempt for upgrade");
+
+        let version = pg_query_i64(
+            &db_url,
+            format!(
+                "SELECT COALESCE(MAX(version), 0) FROM \"{}\".runtime_schema_migrations",
+                schema
+            ),
+        );
+        assert_eq!(version, POSTGRES_RUNTIME_SCHEMA_VERSION);
+
+        let attempts_idx_exists = pg_query_i64(
+            &db_url,
+            format!(
+                "SELECT COUNT(*) FROM pg_indexes
+                 WHERE schemaname = '{}'
+                   AND tablename = 'runtime_attempts'
+                   AND indexname = 'idx_runtime_attempts_status_retry'",
+                schema
+            ),
+        );
+        let leases_idx_exists = pg_query_i64(
+            &db_url,
+            format!(
+                "SELECT COUNT(*) FROM pg_indexes
+                 WHERE schemaname = '{}'
+                   AND tablename = 'runtime_leases'
+                   AND indexname = 'idx_runtime_leases_expiry'",
+                schema
+            ),
+        );
+        assert_eq!(attempts_idx_exists, 1);
+        assert_eq!(leases_idx_exists, 1);
     }
 
     #[test]
