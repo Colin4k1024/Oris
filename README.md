@@ -266,6 +266,7 @@ Common environment variables:
 ## Examples and docs
 
 - [Hello World graph](crates/oris-runtime/examples/graph_hello_world.rs)
+- [Starter service project (Axum)](examples/oris_starter_axum/README.md) — standalone workspace example for integrating Oris into a Rust backend.
 - [Durable agent job](crates/oris-runtime/examples/durable_agent_job.rs) — interrupt, restart, resume with same `thread_id`; state is checkpointed so it survives process restarts.
 - [Durable agent job with SQLite](crates/oris-runtime/examples/durable_agent_job_sqlite.rs) — same flow with SQLite persistence (run with `--features sqlite-persistence`).
 - [CLI durable job](crates/oris-runtime/examples/cli_durable_job.rs) — minimal operator CLI: `run`, `list`, `inspect`, `resume`, `replay`, `cancel` (requires `--features sqlite-persistence`).
@@ -275,6 +276,7 @@ Common environment variables:
 - [Persistence](crates/oris-runtime/examples/graph_persistence_basic.rs)
 - [Deep agent (planning + filesystem)](crates/oris-runtime/examples/deep_agent_basic.rs)
 - [Oris v1 OS architecture (single-tenant)](docs/oris-v1-os-architecture.md)
+- [Rust ecosystem integration guide](docs/rust-ecosystem-integration.md)
 
 Start the execution server:
 

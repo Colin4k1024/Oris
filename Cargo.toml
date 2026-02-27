@@ -3,4 +3,5 @@ resolver = "2"
 members = [
     "crates/oris-runtime",
     "examples/vector_store_surrealdb",
+    "examples/oris_starter_axum",
 ]

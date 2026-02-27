@@ -1,0 +1,14 @@
+[package]
+name = "oris_starter_axum"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1.0.81"
+axum = "0.7"
+oris-runtime = { path = "../../crates/oris-runtime", features = ["sqlite-persistence", "execution-server"] }
+serde_json = "1.0"
+tokio = { version = "1.36.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
