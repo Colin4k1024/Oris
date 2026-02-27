@@ -348,8 +348,22 @@ fn request_id(headers: &HeaderMap) -> String {
     headers
         .get("x-request-id")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
+        .and_then(normalize_request_id)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
+fn normalize_request_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return None;
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn payload_hash(thread_id: &str, input: &str) -> String {
@@ -2569,6 +2583,152 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn security_auth_bypass_with_mixed_invalid_credentials_is_rejected() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "sec-key-1",
+                "sec-secret-1",
+                true,
+                ApiRole::Operator,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("authorization", "Bearer definitely-wrong")
+            .header("x-api-key-id", "sec-key-1")
+            .header("x-api-key", "wrong-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-auth-bypass-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn security_privilege_escalation_header_is_ignored() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "sec-worker-1",
+                "sec-worker-secret-1",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-oris-role", "admin")
+            .header("x-api-key-id", "sec-worker-1")
+            .header("x-api-key", "sec-worker-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-rbac-escalation-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("forbidden body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("forbidden json");
+        assert_eq!(json["error"]["details"]["role"], "worker");
+    }
+
+    #[tokio::test]
+    async fn security_request_id_spoof_header_is_replaced() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key("sec-api-key-1"),
+        );
+        let spoofed = "req injected value";
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", spoofed)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-request-id-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("request id body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("request id json");
+        let rid = json["request_id"].as_str().expect("request_id");
+        assert_ne!(rid, spoofed);
+        assert!(!rid.contains(' '));
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn security_replay_resistance_idempotency_payload_swap_is_rejected() {
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            ":memory:",
+        ));
+
+        let first_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-idem-1",
+                    "input": "alpha",
+                    "idempotency_key": "security-idem-key-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_resp = router.clone().oneshot(first_req).await.unwrap();
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "security-idem-1",
+                    "input": "beta",
+                    "idempotency_key": "security-idem-key-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_resp = router.clone().oneshot(second_req).await.unwrap();
+        assert_eq!(second_resp.status(), StatusCode::CONFLICT);
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/jobs?limit=10&offset=0")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        let jobs = json["data"]["jobs"].as_array().expect("jobs array");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["thread_id"], "security-idem-1");
     }
 
     #[tokio::test]
