@@ -89,8 +89,18 @@ impl SqliteRuntimeRepository {
         )
         .map_err(|e| KernelError::Driver(format!("init sqlite runtime schema: {}", e)))?;
         // Backward-compatible upgrades for older local SQLite files.
-        add_column_if_missing(&conn, "runtime_interrupts", "resume_payload_hash", "TEXT NULL")?;
-        add_column_if_missing(&conn, "runtime_interrupts", "resume_response_json", "TEXT NULL")?;
+        add_column_if_missing(
+            &conn,
+            "runtime_interrupts",
+            "resume_payload_hash",
+            "TEXT NULL",
+        )?;
+        add_column_if_missing(
+            &conn,
+            "runtime_interrupts",
+            "resume_response_json",
+            "TEXT NULL",
+        )?;
         add_column_if_missing(&conn, "runtime_interrupts", "resumed_at_ms", "INTEGER NULL")?;
         Ok(())
     }
@@ -492,12 +502,7 @@ impl SqliteRuntimeRepository {
                      resume_response_json = COALESCE(resume_response_json, ?3),
                      resumed_at_ms = COALESCE(resumed_at_ms, ?4)
                  WHERE interrupt_id = ?1",
-                params![
-                    interrupt_id,
-                    resume_payload_hash,
-                    resume_response_json,
-                    now
-                ],
+                params![interrupt_id, resume_payload_hash, resume_response_json, now],
             )
             .map_err(|e| KernelError::Driver(format!("persist interrupt resume result: {}", e)))?;
         if updated == 0 {
@@ -657,7 +662,13 @@ impl RuntimeRepository for SqliteRuntimeRepository {
             "INSERT INTO runtime_leases
              (lease_id, attempt_id, worker_id, lease_expires_at_ms, heartbeat_at_ms, version)
              VALUES (?1, ?2, ?3, ?4, ?5, 1)",
-            params![lease_id, attempt_id, worker_id, dt_to_ms(lease_expires_at), dt_to_ms(now)],
+            params![
+                lease_id,
+                attempt_id,
+                worker_id,
+                dt_to_ms(lease_expires_at),
+                dt_to_ms(now)
+            ],
         ) {
             Ok(_) => {}
             Err(rusqlite::Error::SqliteFailure(err, _))
@@ -823,10 +834,7 @@ fn add_column_if_missing(
             return Ok(());
         }
     }
-    let alter = format!(
-        "ALTER TABLE {} ADD COLUMN {} {}",
-        table, column, column_def
-    );
+    let alter = format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, column_def);
     conn.execute(&alter, [])
         .map_err(|e| KernelError::Driver(format!("alter table {} add {}: {}", table, column, e)))?;
     Ok(())

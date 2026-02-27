@@ -29,6 +29,7 @@ cargo add oris-runtime --features sqlite-persistence
 仓库内已提供完整 starter 工程（Axum + Oris Runtime）：
 
 - `examples/oris_starter_axum`
+- `examples/templates`（三套可脚手架模板）
 
 启动：
 
@@ -61,6 +62,14 @@ curl -s http://127.0.0.1:8080/v1/jobs/starter-1
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/jobs
+```
+
+如果希望直接生成你自己的项目骨架：
+
+```bash
+bash scripts/scaffold_example_template.sh axum_service /tmp/my-oris-service
+bash scripts/scaffold_example_template.sh worker_only /tmp/my-oris-worker
+bash scripts/scaffold_example_template.sh operator_cli /tmp/my-oris-ops
 ```
 
 ## 3. 如何接入现有 Rust 服务
@@ -106,4 +115,3 @@ curl -s http://127.0.0.1:8080/v1/jobs
 1. 先复制 `examples/oris_starter_axum`，替换成你的业务 graph 节点。
 2. 为你的 `thread_id` 设计稳定主键规则（建议与业务实体一一映射）。
 3. 把“崩溃恢复 + replay 等价 + interrupt 恢复”三类测试接入 CI。
-

@@ -135,8 +135,8 @@ fn payload_hash(thread_id: &str, input: &str) -> String {
 }
 
 fn json_hash(value: &Value) -> Result<String, ApiError> {
-    let json =
-        serde_json::to_vec(value).map_err(|e| ApiError::internal(format!("serialize json: {}", e)))?;
+    let json = serde_json::to_vec(value)
+        .map_err(|e| ApiError::internal(format!("serialize json: {}", e)))?;
     let mut hasher = Sha256::new();
     hasher.update(&json);
     Ok(format!("{:x}", hasher.finalize()))
@@ -814,8 +814,10 @@ pub async fn resume_interrupt(
 
         if row.status == "resumed" {
             if row.resume_payload_hash.as_deref() != Some(resume_hash.as_str()) {
-                return Err(ApiError::conflict("interrupt already resumed with different payload")
-                    .with_request_id(rid.clone()));
+                return Err(
+                    ApiError::conflict("interrupt already resumed with different payload")
+                        .with_request_id(rid.clone()),
+                );
             }
             let response_json = row.resume_response_json.ok_or_else(|| {
                 ApiError::internal("missing stored resume response").with_request_id(rid.clone())
@@ -856,8 +858,13 @@ pub async fn resume_interrupt(
             value: req.value,
             checkpoint_id: None,
         };
-        let envelope = match resume_job(State(state), Path(row.thread_id.clone()), headers, Json(resume_req))
-            .await
+        let envelope = match resume_job(
+            State(state),
+            Path(row.thread_id.clone()),
+            headers,
+            Json(resume_req),
+        )
+        .await
         {
             Ok(response) => response.0,
             Err(err) => {
@@ -1787,7 +1794,9 @@ mod tests {
             .method(Method::POST)
             .uri(format!("/v1/interrupts/{}/resume", interrupt_id))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::json!({ "value": false }).to_string()))
+            .body(Body::from(
+                serde_json::json!({ "value": false }).to_string(),
+            ))
             .unwrap();
         let second_resp = router.oneshot(second_req).await.unwrap();
         assert_eq!(second_resp.status(), StatusCode::CONFLICT);

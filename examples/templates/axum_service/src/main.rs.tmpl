@@ -10,13 +10,15 @@ use oris_runtime::schemas::messages::Message;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
-fn build_compiled(db_path: &str) -> Result<Arc<oris_runtime::graph::CompiledGraph<MessagesState>>> {
+fn build_compiled(
+    db_path: &str,
+) -> Result<Arc<oris_runtime::graph::CompiledGraph<MessagesState>>> {
     let research = function_node("research", |_state: &MessagesState| async move {
         let mut update = HashMap::new();
         update.insert(
             "messages".to_string(),
             serde_json::to_value(vec![Message::new_ai_message(
-                "starter workflow step completed",
+                "replace this node with your real workflow",
             )])?,
         );
         Ok(update)
@@ -39,14 +41,12 @@ async fn healthz() -> Json<serde_json::Value> {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("info,oris_runtime=info,oris_starter_axum=info")
-            }),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("info,oris_runtime=info")
+        }))
         .init();
 
-    let db_path = std::env::var("ORIS_SQLITE_DB").unwrap_or_else(|_| "oris_starter.db".into());
+    let db_path = std::env::var("ORIS_SQLITE_DB").unwrap_or_else(|_| "oris_template.db".into());
     let addr = std::env::var("ORIS_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
         .route("/healthz", get(healthz))
         .merge(build_router(state));
 
-    tracing::info!("oris starter server listening on http://{}", addr);
+    tracing::info!("server listening on http://{}", addr);
     axum::serve(listener, app).await?;
     Ok(())
 }

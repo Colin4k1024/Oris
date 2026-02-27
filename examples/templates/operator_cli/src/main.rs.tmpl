@@ -1,0 +1,146 @@
+use anyhow::{anyhow, Context, Result};
+use clap::{Parser, Subcommand};
+use reqwest::{Client, RequestBuilder, StatusCode};
+use serde_json::{json, Value};
+
+#[derive(Debug, Parser)]
+#[command(name = "__CRATE_NAME__")]
+#[command(about = "Operator CLI for Oris execution APIs")]
+struct Cli {
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
+    server: String,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Run {
+        thread_id: String,
+        #[arg(long)]
+        input: Option<String>,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
+    Inspect {
+        thread_id: String,
+    },
+    Resume {
+        thread_id: String,
+        #[arg(long, help = "JSON value string, e.g. '{\"approved\":true}'")]
+        value: String,
+        #[arg(long)]
+        checkpoint_id: Option<String>,
+    },
+    Replay {
+        thread_id: String,
+        #[arg(long)]
+        checkpoint_id: Option<String>,
+    },
+    Cancel {
+        thread_id: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let client = Client::builder().build()?;
+    let base = cli.server.trim_end_matches('/');
+
+    let result = match cli.command {
+        Command::Run {
+            thread_id,
+            input,
+            idempotency_key,
+        } => {
+            let req = client
+                .post(format!("{}/v1/jobs/run", base))
+                .json(&json!({
+                    "thread_id": thread_id,
+                    "input": input,
+                    "idempotency_key": idempotency_key
+                }));
+            send_and_decode(req).await?
+        }
+        Command::List {
+            status,
+            limit,
+            offset,
+        } => {
+            let mut query: Vec<(&str, String)> = vec![
+                ("limit", limit.to_string()),
+                ("offset", offset.to_string()),
+            ];
+            if let Some(status) = status {
+                query.push(("status", status));
+            }
+            let req = client.get(format!("{}/v1/jobs", base)).query(&query);
+            send_and_decode(req).await?
+        }
+        Command::Inspect { thread_id } => {
+            let req = client.get(format!("{}/v1/jobs/{}", base, thread_id));
+            send_and_decode(req).await?
+        }
+        Command::Resume {
+            thread_id,
+            value,
+            checkpoint_id,
+        } => {
+            let parsed_value: Value =
+                serde_json::from_str(&value).context("`--value` must be valid JSON")?;
+            let req = client
+                .post(format!("{}/v1/jobs/{}/resume", base, thread_id))
+                .json(&json!({
+                    "value": parsed_value,
+                    "checkpoint_id": checkpoint_id
+                }));
+            send_and_decode(req).await?
+        }
+        Command::Replay {
+            thread_id,
+            checkpoint_id,
+        } => {
+            let req = client
+                .post(format!("{}/v1/jobs/{}/replay", base, thread_id))
+                .json(&json!({
+                    "checkpoint_id": checkpoint_id
+                }));
+            send_and_decode(req).await?
+        }
+        Command::Cancel { thread_id, reason } => {
+            let req = client
+                .post(format!("{}/v1/jobs/{}/cancel", base, thread_id))
+                .json(&json!({
+                    "reason": reason
+                }));
+            send_and_decode(req).await?
+        }
+    };
+
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn send_and_decode(req: RequestBuilder) -> Result<Value> {
+    let resp = req.send().await?;
+    decode_response(resp.status(), resp.text().await?)
+}
+
+fn decode_response(status: StatusCode, body: String) -> Result<Value> {
+    let parsed = serde_json::from_str::<Value>(&body).unwrap_or_else(|_| json!({ "raw": body }));
+    if !status.is_success() {
+        return Err(anyhow!("request failed status={} body={}", status, parsed));
+    }
+    Ok(parsed)
+}
