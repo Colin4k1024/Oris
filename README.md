@@ -1,84 +1,145 @@
 # Oris
 
-**A programmable execution runtime for AI agents.**
+**Oris is an execution runtime for software that reasons before it acts.**
 
 [![Latest Version](https://img.shields.io/crates/v/oris-runtime.svg)](https://crates.io/crates/oris-runtime)
 [![docs.rs](https://img.shields.io/docsrs/oris-runtime)](https://docs.rs/oris-runtime)
 
-Oris is not a prompt framework.
+Modern AI systems are no longer single API calls.
 
-It is a runtime layer that lets software systems *execute reasoning*, not just generate text.
+They are long-running processes involving:
 
-Modern LLM applications are no longer single requests.
-They are long-running processes: planning, tool use, memory updates, retries, and human approval.
+* planning
+* tool execution
+* memory updates
+* retries
+* human approval
+* continuation across failures
 
-Today this logic lives in ad-hoc code, background jobs, and fragile queues.
+Today, this logic lives in fragile background jobs, queues, and ad-hoc orchestration code.
 
-Oris turns that into a **first-class execution system**.
-
----
-
-## What Oris actually provides
-
-Oris is closer to **Temporal / Ray** than to a chat SDK.
-
-It provides a persistent execution environment for agentic workloads:
-
-* Stateful execution graphs
-* Durable checkpoints
-* Interruptible runs (human-in-the-loop)
-* Tool calling as system actions
-* Multi-step planning loops
-* Deterministic replay
-* Recovery after crash or deploy
-
-Instead of writing:
-
-> "call LLM → parse → call tool → retry → store memory → schedule task"
-
-You define an execution graph, and the runtime runs it.
+**Oris turns reasoning into a first-class executable system.**
 
 ---
 
-## Why this exists
+## What Oris Is
 
-LLMs changed backend architecture.
+Oris is **not**:
+
+* a prompt framework
+* an agent SDK
+* a chat orchestration library
+
+Oris is closer to:
+
+> **Temporal or Ray — but designed for reasoning workloads.**
+
+It provides a durable execution environment where AI processes can:
+
+* persist state
+* pause and resume safely
+* survive crashes or deployments
+* replay execution deterministically
+* coordinate tools and humans
+
+---
+
+## Core Idea
+
+If:
+
+* databases manage **data**
+* message queues manage **communication**
+
+then:
+
+> **Oris manages reasoning processes.**
+
+---
+
+## Why Oris Exists
+
+LLMs fundamentally changed backend architecture.
 
 We are moving from:
 
+```
 request → response
+```
 
 to:
 
-goal → process → decisions → actions → memory → continuation
+```
+goal → reasoning → decisions → actions → memory → continuation
+```
 
-This is not an API problem anymore.
+This is no longer an API problem.
 
 It is an **execution problem**.
 
-Oris is an attempt to build the execution layer for software that *thinks before it acts*.
-
-**Positioning:** Oris is the execution kernel for reasoning processes: durable, interruptible, and replayable by design. Unlike generic workflow engines (e.g. Temporal), Oris models *reasoning*—multi-step, non-deterministic decisions involving LLMs and tools—as a first-class execution model with its own state, interrupt, and replay semantics. See [Oris 2.0 Strategy & Evolution Blueprint](docs/ORIS_2.0_STRATEGY.md) for architecture, axioms, and roadmap.
+Oris introduces an execution kernel purpose-built for reasoning systems.
 
 ---
 
-## Mental model
+## Positioning
 
-If databases manage data
-and message queues manage communication
+Oris aims to become:
 
-**Oris manages reasoning processes.**
+> **The execution OS for reasoning-driven software systems.**
+
+Where traditional workflow engines orchestrate tasks,
+Oris orchestrates **decision-making processes**.
+
+See [Oris 2.0 Strategy & Evolution Blueprint](docs/ORIS_2.0_STRATEGY.md) for architecture, axioms, and roadmap.
 
 ---
 
-## What you can build with it
+## Comparison
 
-* autonomous coding agents
+| | Oris | Temporal | LangGraph |
+|---|------|----------|-----------|
+| **Domain** | Reasoning processes | Task workflows | Agent graphs |
+| **First-class** | Decision-making, LLM state | Tasks, activities | Chat, messages |
+| **Replay** | Deterministic (reasoning) | Deterministic (tasks) | Limited |
+| **Interrupt** | Human-in-the-loop native | External | Via nodes |
+
+LangGraph users will understand it. Temporal users will respect it. Rust users will try it.
+
+---
+
+## What You Can Build
+
+* autonomous coding systems
 * long-running research agents
 * human-approval workflows
-* retrieval-augmented systems
 * operational copilots
-* AI operations pipelines
+* AI backend pipelines
+* durable agent infrastructure
+
+---
+
+## Design Principles
+
+* Durable by default
+* Interruptible execution
+* Deterministic replay
+* Stateful reasoning
+* Tooling as system actions
+* Execution over prompting
+
+---
+
+## Mental Model
+
+```
+Application Logic
+        ↓
+Reasoning Graph
+        ↓
+Oris Runtime
+        ↓
+LLMs / Tools / Memory / Humans
+```
 
 ---
 
