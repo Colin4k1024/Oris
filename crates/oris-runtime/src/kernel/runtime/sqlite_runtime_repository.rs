@@ -79,6 +79,19 @@ impl SqliteRuntimeRepository {
               created_at_ms INTEGER NOT NULL,
               UNIQUE(attempt_id, dedupe_token)
             );
+            CREATE TABLE IF NOT EXISTS runtime_audit_logs (
+              audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+              actor_type TEXT NOT NULL,
+              actor_id TEXT NULL,
+              actor_role TEXT NULL,
+              action TEXT NOT NULL,
+              resource_type TEXT NOT NULL,
+              resource_id TEXT NULL,
+              result TEXT NOT NULL,
+              request_id TEXT NOT NULL,
+              details_json TEXT NULL,
+              created_at_ms INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS runtime_api_keys (
               key_id TEXT PRIMARY KEY,
               secret_hash TEXT NOT NULL,
@@ -93,6 +106,9 @@ impl SqliteRuntimeRepository {
             CREATE INDEX IF NOT EXISTS idx_runtime_interrupts_thread ON runtime_interrupts(thread_id);
             CREATE INDEX IF NOT EXISTS idx_runtime_jobs_status ON runtime_jobs(status);
             CREATE INDEX IF NOT EXISTS idx_runtime_step_reports_attempt ON runtime_step_reports(attempt_id, created_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_created ON runtime_audit_logs(created_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_request ON runtime_audit_logs(request_id);
+            CREATE INDEX IF NOT EXISTS idx_runtime_audit_logs_action ON runtime_audit_logs(action, created_at_ms DESC);
             CREATE INDEX IF NOT EXISTS idx_runtime_api_keys_status ON runtime_api_keys(status);
             "#,
         )
@@ -664,6 +680,70 @@ impl SqliteRuntimeRepository {
             .map_err(|e| KernelError::Driver(format!("count api keys: {}", e)))?;
         Ok(count > 0)
     }
+
+    pub fn append_audit_log(&self, entry: &AuditLogEntry) -> Result<(), KernelError> {
+        let now = dt_to_ms(Utc::now());
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_audit_logs
+             (actor_type, actor_id, actor_role, action, resource_type, resource_id, result, request_id, details_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                entry.actor_type,
+                entry.actor_id,
+                entry.actor_role,
+                entry.action,
+                entry.resource_type,
+                entry.resource_id,
+                entry.result,
+                entry.request_id,
+                entry.details_json,
+                now
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("append audit log: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn list_audit_logs(&self, limit: usize) -> Result<Vec<AuditLogRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT audit_id, actor_type, actor_id, actor_role, action, resource_type, resource_id, result, request_id, details_json, created_at_ms
+                 FROM runtime_audit_logs
+                 ORDER BY audit_id DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare list_audit_logs: {}", e)))?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(AuditLogRow {
+                    audit_id: row.get(0)?,
+                    actor_type: row.get(1)?,
+                    actor_id: row.get(2)?,
+                    actor_role: row.get(3)?,
+                    action: row.get(4)?,
+                    resource_type: row.get(5)?,
+                    resource_id: row.get(6)?,
+                    result: row.get(7)?,
+                    request_id: row.get(8)?,
+                    details_json: row.get(9)?,
+                    created_at: ms_to_dt(row.get::<_, i64>(10)?),
+                })
+            })
+            .map_err(|e| KernelError::Driver(format!("query list_audit_logs: {}", e)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(map_rusqlite_err)?);
+        }
+        Ok(out)
+    }
 }
 
 fn map_row_to_interrupt(row: &rusqlite::Row) -> rusqlite::Result<InterruptRow> {
@@ -701,6 +781,34 @@ pub struct ApiKeyRow {
     pub active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditLogEntry {
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub result: String,
+    pub request_id: String,
+    pub details_json: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditLogRow {
+    pub audit_id: i64,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub result: String,
+    pub request_id: String,
+    pub details_json: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -34,7 +34,9 @@ use super::lease::{LeaseConfig, LeaseManager, RepositoryLeaseManager};
 use super::models::AttemptExecutionStatus;
 use super::scheduler::{SchedulerDecision, SkeletonScheduler};
 #[cfg(feature = "sqlite-persistence")]
-use super::sqlite_runtime_repository::{SqliteRuntimeRepository, StepReportWriteResult};
+use super::sqlite_runtime_repository::{
+    AuditLogEntry, SqliteRuntimeRepository, StepReportWriteResult,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApiRole {
@@ -66,6 +68,13 @@ impl Default for ApiRole {
     fn default() -> Self {
         Self::Admin
     }
+}
+
+#[derive(Clone, Debug)]
+struct AuthContext {
+    actor_type: String,
+    actor_id: Option<String>,
+    role: ApiRole,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -330,6 +339,7 @@ pub fn build_router(state: ExecutionApiState) -> Router {
         )
         .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(from_fn(request_log_middleware))
+        .layer(from_fn_with_state(state.clone(), audit_middleware))
         .with_state(state)
 }
 
@@ -382,7 +392,7 @@ fn api_key_id_from_headers(headers: &HeaderMap) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
-fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Option<ApiRole> {
+fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Option<AuthContext> {
     if auth
         .bearer_token
         .as_deref()
@@ -390,7 +400,11 @@ fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Op
         .map(|(expected, actual)| expected == actual)
         .unwrap_or(false)
     {
-        return Some(auth.bearer_role.clone());
+        return Some(AuthContext {
+            actor_type: "bearer".to_string(),
+            actor_id: None,
+            role: auth.bearer_role.clone(),
+        });
     }
 
     if auth
@@ -400,7 +414,11 @@ fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Op
         .map(|(expected_hash, actual)| expected_hash == ExecutionApiAuthConfig::secret_hash(actual))
         .unwrap_or(false)
     {
-        return Some(auth.api_key_role.clone());
+        return Some(AuthContext {
+            actor_type: "api_key".to_string(),
+            actor_id: None,
+            role: auth.api_key_role.clone(),
+        });
     }
 
     api_key_id_from_headers(headers)
@@ -410,7 +428,11 @@ fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Op
                 if config.active
                     && config.secret_hash == ExecutionApiAuthConfig::secret_hash(secret)
                 {
-                    Some(config.role.clone())
+                    Some(AuthContext {
+                        actor_type: "api_key".to_string(),
+                        actor_id: Some(key_id.to_string()),
+                        role: config.role.clone(),
+                    })
                 } else {
                     None
                 }
@@ -419,7 +441,10 @@ fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Op
 }
 
 #[cfg(feature = "sqlite-persistence")]
-fn authenticate_runtime_repo(headers: &HeaderMap, state: &ExecutionApiState) -> Option<ApiRole> {
+fn authenticate_runtime_repo(
+    headers: &HeaderMap,
+    state: &ExecutionApiState,
+) -> Option<AuthContext> {
     let Some(repo) = state.runtime_repo.as_ref() else {
         return None;
     };
@@ -434,14 +459,21 @@ fn authenticate_runtime_repo(headers: &HeaderMap, state: &ExecutionApiState) -> 
             if record.active
                 && record.secret_hash == ExecutionApiAuthConfig::secret_hash(secret) =>
         {
-            Some(ApiRole::from_str(&record.role).unwrap_or(ApiRole::Operator))
+            Some(AuthContext {
+                actor_type: "api_key".to_string(),
+                actor_id: Some(record.key_id),
+                role: ApiRole::from_str(&record.role).unwrap_or(ApiRole::Operator),
+            })
         }
         _ => None,
     }
 }
 
 #[cfg(not(feature = "sqlite-persistence"))]
-fn authenticate_runtime_repo(_headers: &HeaderMap, _state: &ExecutionApiState) -> Option<ApiRole> {
+fn authenticate_runtime_repo(
+    _headers: &HeaderMap,
+    _state: &ExecutionApiState,
+) -> Option<AuthContext> {
     None
 }
 
@@ -457,6 +489,144 @@ fn has_runtime_repo_api_keys(state: &ExecutionApiState) -> bool {
 #[cfg(not(feature = "sqlite-persistence"))]
 fn has_runtime_repo_api_keys(_state: &ExecutionApiState) -> bool {
     false
+}
+
+fn resolve_auth_context(headers: &HeaderMap, state: &ExecutionApiState) -> Option<AuthContext> {
+    authenticate_static(headers, &state.auth).or_else(|| authenticate_runtime_repo(headers, state))
+}
+
+#[derive(Clone, Debug)]
+struct AuditTarget {
+    action: &'static str,
+    resource_type: &'static str,
+    resource_id: Option<String>,
+}
+
+fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTarget> {
+    if *method != axum::http::Method::POST {
+        return None;
+    }
+    let seg = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    if seg.len() < 2 || seg[0] != "v1" {
+        return None;
+    }
+    match (seg[1], seg.as_slice()) {
+        ("jobs", ["v1", "jobs"]) => Some(AuditTarget {
+            action: "job.run",
+            resource_type: "thread",
+            resource_id: None,
+        }),
+        ("jobs", ["v1", "jobs", "run"]) => Some(AuditTarget {
+            action: "job.run",
+            resource_type: "thread",
+            resource_id: None,
+        }),
+        ("jobs", ["v1", "jobs", thread_id, "resume"]) => Some(AuditTarget {
+            action: "job.resume",
+            resource_type: "thread",
+            resource_id: Some((*thread_id).to_string()),
+        }),
+        ("jobs", ["v1", "jobs", thread_id, "replay"]) => Some(AuditTarget {
+            action: "job.replay",
+            resource_type: "thread",
+            resource_id: Some((*thread_id).to_string()),
+        }),
+        ("jobs", ["v1", "jobs", thread_id, "cancel"]) => Some(AuditTarget {
+            action: "job.cancel",
+            resource_type: "thread",
+            resource_id: Some((*thread_id).to_string()),
+        }),
+        ("interrupts", ["v1", "interrupts", interrupt_id, "resume"]) => Some(AuditTarget {
+            action: "interrupt.resume",
+            resource_type: "interrupt",
+            resource_id: Some((*interrupt_id).to_string()),
+        }),
+        ("interrupts", ["v1", "interrupts", interrupt_id, "reject"]) => Some(AuditTarget {
+            action: "interrupt.reject",
+            resource_type: "interrupt",
+            resource_id: Some((*interrupt_id).to_string()),
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "sqlite-persistence")]
+fn append_audit_log(
+    state: &ExecutionApiState,
+    auth: Option<&AuthContext>,
+    target: &AuditTarget,
+    request_id: &str,
+    method: &str,
+    path: &str,
+    status_code: u16,
+) {
+    let Some(repo) = state.runtime_repo.as_ref() else {
+        return;
+    };
+    let entry = AuditLogEntry {
+        actor_type: auth
+            .map(|a| a.actor_type.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        actor_id: auth.and_then(|a| a.actor_id.clone()),
+        actor_role: auth.map(|a| a.role.as_str().to_string()),
+        action: target.action.to_string(),
+        resource_type: target.resource_type.to_string(),
+        resource_id: target.resource_id.clone(),
+        result: if (200..300).contains(&status_code) {
+            "success".to_string()
+        } else {
+            "error".to_string()
+        },
+        request_id: request_id.to_string(),
+        details_json: serde_json::to_string(&serde_json::json!({
+            "method": method,
+            "path": path,
+            "status_code": status_code
+        }))
+        .ok(),
+    };
+    let _ = repo.append_audit_log(&entry);
+}
+
+#[cfg(not(feature = "sqlite-persistence"))]
+fn append_audit_log(
+    _state: &ExecutionApiState,
+    _auth: Option<&AuthContext>,
+    _target: &AuditTarget,
+    _request_id: &str,
+    _method: &str,
+    _path: &str,
+    _status_code: u16,
+) {
+}
+
+async fn audit_middleware(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let request_id = request_id(&headers);
+    let target = parse_audit_target(&method, &path);
+    let auth = resolve_auth_context(&headers, &state);
+    let response = next.run(request).await;
+    if let Some(target) = target {
+        append_audit_log(
+            &state,
+            auth.as_ref(),
+            &target,
+            &request_id,
+            method.as_str(),
+            &path,
+            response.status().as_u16(),
+        );
+    }
+    response
 }
 
 fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> bool {
@@ -506,9 +676,8 @@ async fn auth_middleware(
     let method = request.method().clone();
     let path = request.uri().path().to_string();
 
-    let role = authenticate_static(&headers, &state.auth)
-        .or_else(|| authenticate_runtime_repo(&headers, &state));
-    let Some(role) = role else {
+    let auth = resolve_auth_context(&headers, &state);
+    let Some(auth) = auth else {
         let rid = request_id(&headers);
         return ApiError::unauthorized("missing or invalid credentials")
             .with_request_id(rid)
@@ -516,12 +685,12 @@ async fn auth_middleware(
             .into_response();
     };
 
-    if !role_can_access(&role, &method, &path) {
+    if !role_can_access(&auth.role, &method, &path) {
         let rid = request_id(&headers);
         return ApiError::forbidden("role is not allowed to access this endpoint")
             .with_request_id(rid)
             .with_details(serde_json::json!({
-                "role": role.as_str(),
+                "role": auth.role.as_str(),
                 "method": method.as_str(),
                 "path": path
             }))
@@ -2141,6 +2310,90 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_capture_control_plane_actions() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_interrupt_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-audit-run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "audit-job-1",
+                    "input": "trigger interrupt"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+
+        let cancel_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/audit-job-1/cancel")
+            .header("x-request-id", "req-audit-cancel")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let cancel_resp = router.clone().oneshot(cancel_req).await.unwrap();
+        assert_eq!(cancel_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(20).expect("list audit logs");
+        assert!(logs.iter().any(|l| l.action == "job.run"
+            && l.result == "success"
+            && l.request_id == "req-audit-run"));
+        assert!(logs.iter().any(|l| l.action == "job.cancel"
+            && l.result == "success"
+            && l.request_id == "req-audit-cancel"));
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn audit_logs_capture_forbidden_attempts() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "worker-key-audit",
+                    "worker-secret-audit",
+                    true,
+                    ApiRole::Worker,
+                );
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-request-id", "req-audit-forbidden")
+            .header("x-api-key-id", "worker-key-audit")
+            .header("x-api-key", "worker-secret-audit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "audit-job-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let logs = repo.list_audit_logs(10).expect("list audit logs");
+        let forbidden = logs
+            .iter()
+            .find(|l| l.request_id == "req-audit-forbidden")
+            .expect("forbidden log");
+        assert_eq!(forbidden.action, "job.run");
+        assert_eq!(forbidden.result, "error");
+        assert_eq!(forbidden.actor_role.as_deref(), Some("worker"));
     }
 
     #[tokio::test]
