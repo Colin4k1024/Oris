@@ -19,7 +19,9 @@ use axum::{Json, Router};
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::graph::{function_node, MessagesState, SqliteSaver, StateGraph, END, START};
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
-use oris_runtime::kernel::{build_router, ExecutionApiState};
+use oris_runtime::kernel::{
+    build_router, ExecutionApiState, RuntimeStorageBackend, RuntimeStorageConfig,
+};
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::schemas::messages::Message;
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
@@ -58,8 +60,13 @@ async fn healthz() -> impl IntoResponse {
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let db_path =
-        std::env::var("ORIS_SQLITE_DB").unwrap_or_else(|_| "oris_execution_server.db".into());
+    let storage_cfg = RuntimeStorageConfig::from_env("oris_execution_server.db")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    storage_cfg
+        .startup_health_check()
+        .await
+        .map_err(|e| std::io::Error::other(format!("startup health check failed: {}", e)))?;
+    let db_path = storage_cfg.sqlite_db_path.clone();
     let addr = std::env::var("ORIS_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let bearer_token = std::env::var("ORIS_API_AUTH_BEARER_TOKEN").ok();
     let api_key_id = std::env::var("ORIS_API_AUTH_API_KEY_ID").ok();
@@ -82,6 +89,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(build_router(state));
 
     println!("execution server listening on http://{}", addr);
+    println!(
+        "runtime backend selected: {}",
+        match storage_cfg.backend {
+            RuntimeStorageBackend::Sqlite => "sqlite",
+            RuntimeStorageBackend::Postgres => "postgres",
+        }
+    );
+    if matches!(storage_cfg.backend, RuntimeStorageBackend::Postgres) {
+        println!(
+            "note: execution API persistence currently uses sqlite runtime tables; postgres backend is validated at startup for rollout safety"
+        );
+    }
     if bearer_token.is_some() || api_key.is_some() || api_key_id.is_some() {
         println!("execution API auth enabled");
     }

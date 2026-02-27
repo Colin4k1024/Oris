@@ -21,9 +21,15 @@ Optional environment variables:
 
 - `ORIS_SERVER_ADDR` (default: `127.0.0.1:8080`)
 - `ORIS_SQLITE_DB` (default: `oris_starter.db`)
+- `ORIS_RUNTIME_BACKEND` (`sqlite` default; `postgres` requires `kernel-postgres` feature)
+- `ORIS_POSTGRES_DSN` or `ORIS_RUNTIME_DSN` (required when `ORIS_RUNTIME_BACKEND=postgres`)
+- `ORIS_POSTGRES_SCHEMA` (default: `public`)
+- `ORIS_POSTGRES_REQUIRE_SCHEMA` (default: `true`; fail fast when schema is missing)
 - `ORIS_API_AUTH_BEARER_TOKEN` (optional; when set, requests must send `Authorization: Bearer <token>`)
 - `ORIS_API_AUTH_API_KEY` (optional; when set, requests may send `x-api-key: <key>`)
 - `ORIS_API_AUTH_API_KEY_ID` (optional; when set with `ORIS_API_AUTH_API_KEY`, requests should send `x-api-key-id` + `x-api-key`)
+
+Startup now performs backend health checks and exits non-zero on invalid backend config (for example invalid DSN or missing required schema).
 
 When `ORIS_API_AUTH_API_KEY_ID` + `ORIS_API_AUTH_API_KEY` are provided, starter will persist the keyed API credential into SQLite table `runtime_api_keys` on startup.
 Persisted keyed credentials default to `operator` role (jobs/interrupts and `GET /v1/audit/logs` allowed; worker APIs denied).

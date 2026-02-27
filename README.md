@@ -289,8 +289,12 @@ cargo run -p oris-runtime --example execution_server --features "sqlite-persiste
 
 Default address: `127.0.0.1:8080` (`ORIS_SERVER_ADDR` to override)  
 Default SQLite db path: `oris_execution_server.db` (`ORIS_SQLITE_DB` to override)
+Runtime backend selector: `ORIS_RUNTIME_BACKEND` (`sqlite` default; `postgres` requires `kernel-postgres` feature)
+Postgres DSN/schema: `ORIS_POSTGRES_DSN` (or `ORIS_RUNTIME_DSN`), `ORIS_POSTGRES_SCHEMA` (default `public`)
+Postgres schema strictness: `ORIS_POSTGRES_REQUIRE_SCHEMA` (default `true`, startup fails if schema is missing)
 Optional auth secrets: `ORIS_API_AUTH_BEARER_TOKEN`, `ORIS_API_AUTH_API_KEY`
 Optional keyed API key id: `ORIS_API_AUTH_API_KEY_ID` (use with `ORIS_API_AUTH_API_KEY`)
+Bad backend config/health now fails startup with actionable error and non-zero exit.
 When `ORIS_API_AUTH_API_KEY_ID` is set with SQLite persistence, the key record is persisted in `runtime_api_keys`.
 RBAC baseline: `admin` can access all APIs; `operator` can access `/v1/jobs*`, `/v1/interrupts*`, and `GET /v1/audit/logs`; `worker` can access `/v1/workers*`.
 

@@ -43,6 +43,7 @@ cargo test -p oris-runtime kernel::driver::tests:: -- --nocapture
 cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests:: -- --nocapture
 cargo test -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::postgres_runtime_repository::tests:: -- --nocapture --test-threads=1
 cargo test -p oris-runtime --features "sqlite-persistence" kernel::runtime::sqlite_runtime_repository::tests::schema_migration -- --nocapture --test-threads=1
+cargo test -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::backend_config::tests:: -- --nocapture --test-threads=1
 ```
 
 To execute the PostgreSQL branch of the runtime repository contract tests, set:

@@ -53,6 +53,8 @@ pub use runtime::{
 };
 #[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
 pub use runtime::{IdempotencyRecord, SqliteIdempotencyStore, SqliteRuntimeRepository};
+#[cfg(feature = "sqlite-persistence")]
+pub use runtime::{RuntimeStorageBackend, RuntimeStorageConfig};
 pub use snapshot::{InMemorySnapshotStore, Snapshot, SnapshotStore};
 pub use state::KernelState;
 pub use step::{InterruptInfo, Next, StepFn};

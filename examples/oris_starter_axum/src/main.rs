@@ -5,7 +5,9 @@ use anyhow::Result;
 use axum::routing::get;
 use axum::{Json, Router};
 use oris_runtime::graph::{function_node, MessagesState, SqliteSaver, StateGraph, END, START};
-use oris_runtime::kernel::{build_router, ExecutionApiState};
+use oris_runtime::kernel::{
+    build_router, ExecutionApiState, RuntimeStorageBackend, RuntimeStorageConfig,
+};
 use oris_runtime::schemas::messages::Message;
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
@@ -46,7 +48,13 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let db_path = std::env::var("ORIS_SQLITE_DB").unwrap_or_else(|_| "oris_starter.db".into());
+    let storage_cfg = RuntimeStorageConfig::from_env("oris_starter.db")
+        .map_err(|e| anyhow::anyhow!("invalid runtime backend config: {}", e))?;
+    storage_cfg
+        .startup_health_check()
+        .await
+        .map_err(|e| anyhow::anyhow!("startup health check failed: {}", e))?;
+    let db_path = storage_cfg.sqlite_db_path.clone();
     let addr = std::env::var("ORIS_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let bearer_token = std::env::var("ORIS_API_AUTH_BEARER_TOKEN").ok();
     let api_key_id = std::env::var("ORIS_API_AUTH_API_KEY_ID").ok();
@@ -70,6 +78,18 @@ async fn main() -> Result<()> {
         .merge(build_router(state));
 
     tracing::info!("oris starter server listening on http://{}", addr);
+    tracing::info!(
+        "runtime backend selected: {}",
+        match storage_cfg.backend {
+            RuntimeStorageBackend::Sqlite => "sqlite",
+            RuntimeStorageBackend::Postgres => "postgres",
+        }
+    );
+    if matches!(storage_cfg.backend, RuntimeStorageBackend::Postgres) {
+        tracing::warn!(
+            "execution API persistence currently uses sqlite runtime tables; postgres backend is validated at startup for rollout safety"
+        );
+    }
     if bearer_token.is_some() || api_key.is_some() || api_key_id.is_some() {
         tracing::info!("execution API auth enabled");
     }

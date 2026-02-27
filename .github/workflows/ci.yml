@@ -91,6 +91,11 @@ jobs:
         with:
           command: test
           args: -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::postgres_runtime_repository::tests::postgres_schema_migration_ -- --nocapture --test-threads=1
+      - name: Run backend config startup checks regression
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::backend_config::tests:: -- --nocapture --test-threads=1
 
   security:
     runs-on: ubuntu-latest
