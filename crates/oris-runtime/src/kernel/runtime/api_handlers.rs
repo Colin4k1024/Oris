@@ -1,6 +1,6 @@
 //! Axum handlers for Phase 2 execution server.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -39,7 +39,14 @@ use super::sqlite_runtime_repository::{SqliteRuntimeRepository, StepReportWriteR
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionApiAuthConfig {
     pub bearer_token: Option<String>,
-    pub api_key: Option<String>,
+    pub api_key_hash: Option<String>,
+    pub keyed_api_keys: HashMap<String, StaticApiKeyConfig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StaticApiKeyConfig {
+    pub secret_hash: String,
+    pub active: bool,
 }
 
 impl ExecutionApiAuthConfig {
@@ -54,15 +61,54 @@ impl ExecutionApiAuthConfig {
         })
     }
 
+    fn normalize_key_id(key_id: Option<String>) -> Option<String> {
+        key_id.and_then(|v| {
+            let trimmed = v.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+    }
+
+    fn secret_hash(secret: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(secret.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn normalize_hashed_secret(secret: Option<String>) -> Option<String> {
+        Self::normalize_secret(secret).map(|value| Self::secret_hash(value.as_str()))
+    }
+
     fn from_optional(bearer_token: Option<String>, api_key: Option<String>) -> Self {
         Self {
             bearer_token: Self::normalize_secret(bearer_token),
-            api_key: Self::normalize_secret(api_key),
+            api_key_hash: Self::normalize_hashed_secret(api_key),
+            keyed_api_keys: HashMap::new(),
+        }
+    }
+
+    fn set_keyed_api_key(&mut self, key_id: String, secret: String, active: bool) {
+        if let (Some(key_id), Some(secret)) = (
+            Self::normalize_key_id(Some(key_id)),
+            Self::normalize_secret(Some(secret)),
+        ) {
+            self.keyed_api_keys.insert(
+                key_id,
+                StaticApiKeyConfig {
+                    secret_hash: Self::secret_hash(secret.as_str()),
+                    active,
+                },
+            );
         }
     }
 
     fn is_enabled(&self) -> bool {
-        self.bearer_token.is_some() || self.api_key.is_some()
+        self.bearer_token.is_some()
+            || self.api_key_hash.is_some()
+            || !self.keyed_api_keys.is_empty()
     }
 }
 
@@ -124,7 +170,18 @@ impl ExecutionApiState {
     }
 
     pub fn with_static_api_key(mut self, key: impl Into<String>) -> Self {
-        self.auth.api_key = ExecutionApiAuthConfig::normalize_secret(Some(key.into()));
+        self.auth.api_key_hash = ExecutionApiAuthConfig::normalize_hashed_secret(Some(key.into()));
+        self
+    }
+
+    pub fn with_static_api_key_record(
+        mut self,
+        key_id: impl Into<String>,
+        secret: impl Into<String>,
+        active: bool,
+    ) -> Self {
+        self.auth
+            .set_keyed_api_key(key_id.into(), secret.into(), active);
         self
     }
 }
@@ -212,6 +269,14 @@ fn api_key_from_headers(headers: &HeaderMap) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
+fn api_key_id_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-api-key-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
 fn is_authorized(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> bool {
     let bearer_ok = auth
         .bearer_token
@@ -220,12 +285,20 @@ fn is_authorized(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> bool {
         .map(|(expected, actual)| expected == actual)
         .unwrap_or(false);
     let api_key_ok = auth
-        .api_key
+        .api_key_hash
         .as_deref()
         .zip(api_key_from_headers(headers))
-        .map(|(expected, actual)| expected == actual)
+        .map(|(expected_hash, actual)| expected_hash == ExecutionApiAuthConfig::secret_hash(actual))
         .unwrap_or(false);
-    bearer_ok || api_key_ok
+    let keyed_api_key_ok = api_key_id_from_headers(headers)
+        .zip(api_key_from_headers(headers))
+        .and_then(|(key_id, secret)| {
+            auth.keyed_api_keys.get(key_id).map(|config| {
+                config.active && config.secret_hash == ExecutionApiAuthConfig::secret_hash(secret)
+            })
+        })
+        .unwrap_or(false);
+    bearer_ok || api_key_ok || keyed_api_key_ok
 }
 
 async fn auth_middleware(
@@ -242,8 +315,11 @@ async fn auth_middleware(
     if state.auth.bearer_token.is_some() {
         methods.push("bearer");
     }
-    if state.auth.api_key.is_some() {
+    if state.auth.api_key_hash.is_some() {
         methods.push("x-api-key");
+    }
+    if !state.auth.keyed_api_keys.is_empty() {
+        methods.push("x-api-key-id+x-api-key");
     }
 
     let rid = request_id(&headers);
@@ -1604,6 +1680,84 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_keyed_api_key_allows_access() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record(
+                "ops-key-1",
+                "secret-1",
+                true,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "ops-key-1")
+            .header("x-api-key", "secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-4"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_keyed_api_key_disabled_is_rejected() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record(
+                "ops-key-2",
+                "secret-2",
+                false,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "ops-key-2")
+            .header("x-api-key", "secret-2")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-5"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_keyed_api_key_wrong_secret_is_rejected() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record(
+                "ops-key-3",
+                "secret-3",
+                true,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("x-api-key-id", "ops-key-3")
+            .header("x-api-key", "secret-wrong")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "auth-run-6"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

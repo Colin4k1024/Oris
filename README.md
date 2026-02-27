@@ -289,6 +289,7 @@ cargo run -p oris-runtime --example execution_server --features "sqlite-persiste
 Default address: `127.0.0.1:8080` (`ORIS_SERVER_ADDR` to override)  
 Default SQLite db path: `oris_execution_server.db` (`ORIS_SQLITE_DB` to override)
 Optional auth secrets: `ORIS_API_AUTH_BEARER_TOKEN`, `ORIS_API_AUTH_API_KEY`
+Optional keyed API key id: `ORIS_API_AUTH_API_KEY_ID` (use with `ORIS_API_AUTH_API_KEY`)
 
 Execution server endpoints (v1 runtime-bin):
 

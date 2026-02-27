@@ -23,6 +23,7 @@ Optional environment variables:
 - `ORIS_SQLITE_DB` (default: `oris_starter.db`)
 - `ORIS_API_AUTH_BEARER_TOKEN` (optional; when set, requests must send `Authorization: Bearer <token>`)
 - `ORIS_API_AUTH_API_KEY` (optional; when set, requests may send `x-api-key: <key>`)
+- `ORIS_API_AUTH_API_KEY_ID` (optional; when set with `ORIS_API_AUTH_API_KEY`, requests should send `x-api-key-id` + `x-api-key`)
 
 ## Quick API smoke test
 
@@ -32,6 +33,8 @@ Create a run:
 curl -s -X POST http://127.0.0.1:8080/v1/jobs \
   -H 'content-type: application/json' \
   -H 'Authorization: Bearer <token-if-enabled>' \
+  -H 'x-api-key-id: <key-id-if-enabled>' \
+  -H 'x-api-key: <key-if-enabled>' \
   -d '{"thread_id":"starter-1","input":"hello from starter","idempotency_key":"starter-key-1"}'
 ```
 
