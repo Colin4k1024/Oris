@@ -41,6 +41,13 @@ For runtime-specific work, also run:
 ```bash
 cargo test -p oris-runtime kernel::driver::tests:: -- --nocapture
 cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests:: -- --nocapture
+cargo test -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::postgres_runtime_repository::tests:: -- --nocapture --test-threads=1
+```
+
+To execute the PostgreSQL branch of the runtime repository contract tests, set:
+
+```bash
+export ORIS_TEST_POSTGRES_URL=postgres://<user>:<password>@<host>:5432/<db>
 ```
 
 For security-focused changes, run the dedicated regression slice:

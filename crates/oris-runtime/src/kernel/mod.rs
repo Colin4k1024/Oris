@@ -33,6 +33,8 @@ pub use policy::{
 pub use postgres_store::{PostgresEventStore, PostgresSnapshotStore};
 pub use reducer::{Reducer, StateUpdatedOnlyReducer};
 pub use runner::KernelRunner;
+#[cfg(feature = "kernel-postgres")]
+pub use runtime::PostgresRuntimeRepository;
 #[cfg(feature = "execution-server")]
 pub use runtime::{
     build_router, ApiEnvelope, ApiError, ApiMeta, ApiRole, AuditLogItem, AuditLogListResponse,

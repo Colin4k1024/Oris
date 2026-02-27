@@ -13,6 +13,8 @@ pub mod api_idempotency;
 pub mod api_models;
 pub mod lease;
 pub mod models;
+#[cfg(feature = "kernel-postgres")]
+pub mod postgres_runtime_repository;
 pub mod repository;
 pub mod scheduler;
 #[cfg(feature = "sqlite-persistence")]
@@ -40,6 +42,8 @@ pub use models::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, RunRecord,
     RunRuntimeStatus,
 };
+#[cfg(feature = "kernel-postgres")]
+pub use postgres_runtime_repository::PostgresRuntimeRepository;
 pub use repository::RuntimeRepository;
 pub use scheduler::{SchedulerDecision, SkeletonScheduler};
 #[cfg(feature = "sqlite-persistence")]
