@@ -84,16 +84,21 @@ pub struct PostgresRuntimeRepository {
 impl PostgresRuntimeRepository {
     pub fn new(database_url: impl Into<String>) -> Self {
         let database_url = database_url.into();
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect_lazy(&database_url)
-            .ok();
+        let db_runtime = new_db_runtime().ok();
+        let pool = db_runtime.as_ref().and_then(|rt| {
+            let _guard = rt.enter();
+            PgPoolOptions::new()
+                .max_connections(5)
+                .connect_lazy(&database_url)
+                .ok()
+        });
         let init_error = if pool.is_some() {
             None
+        } else if db_runtime.is_none() {
+            Some("failed to initialize postgres runtime".to_string())
         } else {
             Some("failed to initialize lazy postgres runtime pool".to_string())
         };
-        let db_runtime = new_db_runtime().ok();
 
         Self {
             pool,
@@ -151,7 +156,7 @@ impl PostgresRuntimeRepository {
                 schema
             );
             let sql_current_version = format!(
-                "SELECT COALESCE(MAX(version), 0) FROM \"{}\".runtime_schema_migrations",
+                "SELECT COALESCE(MAX(version), 0)::BIGINT FROM \"{}\".runtime_schema_migrations",
                 schema
             );
 
@@ -850,7 +855,7 @@ mod tests {
         let version = pg_query_i64(
             &db_url,
             format!(
-                "SELECT COALESCE(MAX(version), 0) FROM \"{}\".runtime_schema_migrations",
+                "SELECT COALESCE(MAX(version), 0)::BIGINT FROM \"{}\".runtime_schema_migrations",
                 schema
             ),
         );
@@ -913,7 +918,7 @@ mod tests {
         let version = pg_query_i64(
             &db_url,
             format!(
-                "SELECT COALESCE(MAX(version), 0) FROM \"{}\".runtime_schema_migrations",
+                "SELECT COALESCE(MAX(version), 0)::BIGINT FROM \"{}\".runtime_schema_migrations",
                 schema
             ),
         );

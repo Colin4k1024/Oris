@@ -67,16 +67,21 @@ pub struct PostgresEventStore {
 impl PostgresEventStore {
     pub fn new(database_url: impl Into<String>) -> Self {
         let database_url = database_url.into();
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect_lazy(&database_url)
-            .ok();
+        let db_runtime = new_db_runtime().ok();
+        let pool = db_runtime.as_ref().and_then(|rt| {
+            let _guard = rt.enter();
+            PgPoolOptions::new()
+                .max_connections(5)
+                .connect_lazy(&database_url)
+                .ok()
+        });
         let init_error = if pool.is_some() {
             None
+        } else if db_runtime.is_none() {
+            Some("failed to initialize postgres runtime".to_string())
         } else {
             Some("failed to initialize lazy postgres pool".to_string())
         };
-        let db_runtime = new_db_runtime().ok();
 
         Self {
             pool,
@@ -300,16 +305,21 @@ pub struct PostgresSnapshotStore<S> {
 impl<S> PostgresSnapshotStore<S> {
     pub fn new(database_url: impl Into<String>) -> Self {
         let database_url = database_url.into();
-        let pool = PgPoolOptions::new()
-            .max_connections(5)
-            .connect_lazy(&database_url)
-            .ok();
+        let db_runtime = new_db_runtime().ok();
+        let pool = db_runtime.as_ref().and_then(|rt| {
+            let _guard = rt.enter();
+            PgPoolOptions::new()
+                .max_connections(5)
+                .connect_lazy(&database_url)
+                .ok()
+        });
         let init_error = if pool.is_some() {
             None
+        } else if db_runtime.is_none() {
+            Some("failed to initialize postgres runtime".to_string())
         } else {
             Some("failed to initialize lazy postgres pool".to_string())
         };
-        let db_runtime = new_db_runtime().ok();
 
         Self {
             pool,
