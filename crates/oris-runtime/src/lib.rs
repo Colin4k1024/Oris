@@ -39,7 +39,7 @@
 //! # Ok(()) }
 //! ```
 //!
-//! See the [repository](https://github.com/fanjia1024/oris) and [examples](https://github.com/fanjia1024/oris/tree/main/examples) for more.
+//! See the [repository](https://github.com/Colin4k1024/Oris) and [examples](https://github.com/Colin4k1024/Oris/tree/main/examples) for more.
 //!
 //! ## Stable API (0.1.x)
 //!

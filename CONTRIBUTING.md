@@ -32,6 +32,7 @@ Run these before opening a PR:
 
 ```bash
 cargo fmt --all
+bash scripts/check_release_metadata.sh
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```

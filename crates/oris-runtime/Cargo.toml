@@ -2,8 +2,9 @@
 name = "oris-runtime"
 version = "0.1.3"
 edition = "2021"
+rust-version = "1.80"
 publish = true
-repository = "https://github.com/fanjia1024/oris"
+repository = "https://github.com/Colin4k1024/Oris"
 license = "MIT"
 description = "An agentic workflow runtime and programmable AI execution system in Rust: stateful graphs, agents, tools, and multi-step execution."
 keywords = [
@@ -20,7 +21,7 @@ categories = [
     "text-processing",
 ]
 readme = "../../README.md"
-homepage = "https://github.com/fanjia1024/oris"
+homepage = "https://github.com/Colin4k1024/Oris"
 documentation = "https://docs.rs/oris-runtime"
 authors = ["Jiafan"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
