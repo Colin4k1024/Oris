@@ -448,5 +448,5 @@ MIT. This project includes code derived from [langchain-rust](https://github.com
 ## Links
 
 - [Crates.io](https://crates.io/crates/oris-runtime)
-- [GitHub](https://github.com/fanjia1024/oris)
+- [GitHub](https://github.com/Colin4k1024/Oris)
 - [docs.rs](https://docs.rs/oris-runtime)

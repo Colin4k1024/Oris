@@ -31,7 +31,7 @@ Use this shape:
 
 - Crate: https://crates.io/crates/oris-runtime
 - Docs: https://docs.rs/oris-runtime
-- Repo: https://github.com/fanjia1024/oris
+- Repo: https://github.com/Colin4k1024/Oris
 ```
 
 ## Drafting Rules

@@ -24,8 +24,8 @@ cargo add oris-runtime --features postgres
 
 - **Crate:** [crates.io/crates/oris-runtime](https://crates.io/crates/oris-runtime)
 - **Docs:** [docs.rs/oris-runtime](https://docs.rs/oris-runtime)
-- **Repo:** [github.com/fanjia1024/oris](https://github.com/fanjia1024/oris)
-- **Examples:** [crates/oris-runtime/examples](https://github.com/fanjia1024/oris/tree/main/crates/oris-runtime/examples)
+- **Repo:** [github.com/Colin4k1024/Oris](https://github.com/Colin4k1024/Oris)
+- **Examples:** [examples](https://github.com/Colin4k1024/Oris/tree/main/examples)
 
 ## Note
 

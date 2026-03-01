@@ -84,6 +84,10 @@ jobs:
             echo "git tag version (${{ env.TAG_VERSION }}) does not match oris-runtime Cargo.toml version (v${{ env.CARGO_VERSION }})"
             exit 1
           fi
+      - name: Validate release metadata and public links
+        shell: bash
+        run: |
+          bash scripts/check_release_metadata.sh
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:

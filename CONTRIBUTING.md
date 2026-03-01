@@ -33,6 +33,7 @@ Run these before opening a PR:
 ```bash
 cargo fmt --all
 bash scripts/update_runtime_api_contract.sh
+bash scripts/check_release_metadata.sh
 cargo clippy -p oris-runtime --lib --features "sqlite-persistence,execution-server,kernel-postgres" -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
 cargo clippy -p oris_starter_axum --no-deps -- -D warnings
 cargo test --all-features
