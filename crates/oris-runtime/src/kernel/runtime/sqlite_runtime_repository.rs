@@ -1912,28 +1912,36 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         Ok(())
     }
 
-    fn expire_leases_and_requeue(&self, now: DateTime<Utc>) -> Result<u64, KernelError> {
-        let conn = self
+    fn expire_leases_and_requeue(&self, stale_before: DateTime<Utc>) -> Result<u64, KernelError> {
+        let mut conn = self
             .conn
             .lock()
             .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
-        let mut stmt = conn
-            .prepare("SELECT attempt_id FROM runtime_leases WHERE lease_expires_at_ms < ?1")
+        let tx = conn
+            .transaction()
+            .map_err(|e| KernelError::Driver(format!("begin expire/requeue tx: {}", e)))?;
+        let mut stmt = tx
+            .prepare(
+                "SELECT attempt_id
+                 FROM runtime_leases
+                 WHERE lease_expires_at_ms < ?1",
+            )
             .map_err(|e| KernelError::Driver(format!("prepare expired lease query: {}", e)))?;
         let rows = stmt
-            .query_map(params![dt_to_ms(now)], |r| r.get::<_, String>(0))
+            .query_map(params![dt_to_ms(stale_before)], |r| r.get::<_, String>(0))
             .map_err(|e| KernelError::Driver(format!("query expired leases: {}", e)))?;
         let mut expired_attempts = Vec::new();
         for row in rows {
             expired_attempts.push(row.map_err(map_rusqlite_err)?);
         }
+        drop(stmt);
         for attempt_id in &expired_attempts {
-            conn.execute(
+            tx.execute(
                 "DELETE FROM runtime_leases WHERE attempt_id = ?1",
                 params![attempt_id],
             )
             .map_err(|e| KernelError::Driver(format!("delete expired lease: {}", e)))?;
-            conn.execute(
+            tx.execute(
                 "UPDATE runtime_attempts
                  SET status = 'queued'
                  WHERE attempt_id = ?1
@@ -1942,6 +1950,8 @@ impl RuntimeRepository for SqliteRuntimeRepository {
             )
             .map_err(|e| KernelError::Driver(format!("requeue attempt: {}", e)))?;
         }
+        tx.commit()
+            .map_err(|e| KernelError::Driver(format!("commit expire/requeue tx: {}", e)))?;
         Ok(expired_attempts.len() as u64)
     }
 
@@ -2894,5 +2904,86 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].attempt_id, "attempt-priority-high");
         assert_eq!(rows[1].attempt_id, "attempt-priority-low");
+    }
+
+    #[test]
+    fn heartbeat_lease_with_version_rejects_split_brain_owner_or_stale_version() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        repo.enqueue_attempt("attempt-split-brain", "run-split-brain")
+            .expect("enqueue split-brain attempt");
+        let lease = repo
+            .upsert_lease(
+                "attempt-split-brain",
+                "worker-a",
+                Utc::now() + Duration::seconds(30),
+            )
+            .expect("create lease");
+
+        let wrong_owner = repo.heartbeat_lease_with_version(
+            &lease.lease_id,
+            "worker-b",
+            lease.version,
+            Utc::now(),
+            Utc::now() + Duration::seconds(30),
+        );
+        assert!(wrong_owner.is_err());
+
+        repo.heartbeat_lease_with_version(
+            &lease.lease_id,
+            "worker-a",
+            lease.version,
+            Utc::now(),
+            Utc::now() + Duration::seconds(30),
+        )
+        .expect("owner heartbeat succeeds");
+
+        let stale_version = repo.heartbeat_lease_with_version(
+            &lease.lease_id,
+            "worker-a",
+            lease.version,
+            Utc::now(),
+            Utc::now() + Duration::seconds(30),
+        );
+        assert!(stale_version.is_err());
+
+        let persisted = repo
+            .get_lease_by_id(&lease.lease_id)
+            .expect("read persisted lease")
+            .expect("lease still exists");
+        assert_eq!(persisted.version, 2);
+    }
+
+    #[test]
+    fn expire_leases_and_requeue_respects_stale_cutoff() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        repo.enqueue_attempt("attempt-grace", "run-grace")
+            .expect("enqueue attempt");
+        repo.upsert_lease("attempt-grace", "worker-grace", now - Duration::seconds(1))
+            .expect("create nearly expired lease");
+
+        let not_yet_stale = repo
+            .expire_leases_and_requeue(now - Duration::seconds(5))
+            .expect("grace-aware expire");
+        assert_eq!(not_yet_stale, 0);
+        assert!(repo
+            .get_lease_for_attempt("attempt-grace")
+            .expect("read lease")
+            .is_some());
+
+        let expired = repo
+            .expire_leases_and_requeue(now)
+            .expect("expire after grace");
+        assert_eq!(expired, 1);
+        assert!(repo
+            .get_lease_for_attempt("attempt-grace")
+            .expect("read lease after expire")
+            .is_none());
+
+        let (_, status) = repo
+            .get_attempt_status("attempt-grace")
+            .expect("read attempt status")
+            .expect("attempt exists");
+        assert_eq!(status, AttemptExecutionStatus::Queued);
     }
 }
