@@ -15,7 +15,7 @@ Migrations are forward-only and idempotent.
 
 - Table: `runtime_schema_migrations`
 - Columns: `version`, `name`, `applied_at_ms`
-- Current version: `2`
+- Current version: `9`
 
 ### PostgreSQL
 
@@ -69,3 +69,4 @@ Runtime schema migrations are forward-only. Rollback is operational:
 
 - If runtime starts against a newer schema version than supported, startup fails fast.
 - Always take a backup before deploying binaries that may apply new migrations.
+- Use [Production operations guide](production-operations-guide.md) for the full deploy-to-upgrade sequence.

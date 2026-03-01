@@ -285,6 +285,8 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 - [Deep agent (planning + filesystem)](crates/oris-runtime/examples/deep_agent_basic.rs)
 - [Oris v1 OS architecture (single-tenant)](docs/oris-v1-os-architecture.md)
 - [Rust ecosystem integration guide](docs/rust-ecosystem-integration.md)
+- [Production operations guide](docs/production-operations-guide.md)
+- [Incident response runbook](docs/incident-response-runbook.md)
 - [Runtime schema migration workflow](docs/runtime-schema-migrations.md)
 - [Scheduler stress baseline](docs/scheduler-stress-baseline.md)
 - [PostgreSQL backup and restore runbook](docs/postgres-backup-restore-runbook.md)

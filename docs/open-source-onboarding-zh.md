@@ -87,6 +87,8 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 
 - `docs/rust-ecosystem-integration.md`
 - `docs/kernel-api.md`
+- `docs/production-operations-guide.md`
+- `docs/incident-response-runbook.md`
 
 ## 4. 对外发布时的最小生产清单
 

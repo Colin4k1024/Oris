@@ -60,6 +60,8 @@ export ORIS_TEST_POSTGRES_URL=postgres://<user>:<password>@<host>:5432/<db>
 Migration workflow and rollback runbook:
 
 - [docs/runtime-schema-migrations.md](docs/runtime-schema-migrations.md)
+- [docs/production-operations-guide.md](docs/production-operations-guide.md)
+- [docs/incident-response-runbook.md](docs/incident-response-runbook.md)
 
 For security-focused changes, run the dedicated regression slice:
 
