@@ -145,6 +145,16 @@ pub struct WorkerReportStepRequest {
 pub struct WorkerAckRequest {
     pub attempt_id: String,
     pub terminal_status: String,
+    pub retry_policy: Option<RetryPolicyRequest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetryPolicyRequest {
+    pub strategy: String,
+    pub backoff_ms: i64,
+    pub max_backoff_ms: Option<i64>,
+    pub multiplier: Option<f64>,
+    pub max_retries: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -158,6 +168,8 @@ pub struct WorkerLeaseResponse {
 pub struct WorkerAckResponse {
     pub attempt_id: String,
     pub status: String,
+    pub next_retry_at: Option<String>,
+    pub next_attempt_no: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -253,4 +265,22 @@ pub struct TimelineExportResponse {
     pub thread_id: String,
     pub timeline: Vec<JobTimelineItem>,
     pub history: Vec<JobHistoryItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptRetryHistoryItem {
+    pub retry_no: u32,
+    pub attempt_no: u32,
+    pub strategy: String,
+    pub backoff_ms: i64,
+    pub max_retries: u32,
+    pub scheduled_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptRetryHistoryResponse {
+    pub attempt_id: String,
+    pub current_attempt_no: u32,
+    pub current_status: String,
+    pub history: Vec<AttemptRetryHistoryItem>,
 }

@@ -37,12 +37,13 @@ pub use runner::KernelRunner;
 pub use runtime::PostgresRuntimeRepository;
 #[cfg(feature = "execution-server")]
 pub use runtime::{
-    build_router, ApiEnvelope, ApiError, ApiMeta, ApiRole, AuditLogItem, AuditLogListResponse,
-    CancelJobRequest, CancelJobResponse, CheckpointInspectResponse, ExecutionApiState,
-    InterruptDetailResponse, InterruptListResponse, JobDetailResponse, JobHistoryItem,
-    JobHistoryResponse, JobStateResponse, JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery,
-    ListJobsResponse, RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest,
-    ResumeJobRequest, RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest,
+    build_router, ApiEnvelope, ApiError, ApiMeta, ApiRole, AttemptRetryHistoryItem,
+    AttemptRetryHistoryResponse, AuditLogItem, AuditLogListResponse, CancelJobRequest,
+    CancelJobResponse, CheckpointInspectResponse, ExecutionApiState, InterruptDetailResponse,
+    InterruptListResponse, JobDetailResponse, JobHistoryItem, JobHistoryResponse, JobStateResponse,
+    JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery, ListJobsResponse,
+    RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest,
+    RetryPolicyRequest, RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest,
     WorkerAckResponse, WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse,
     WorkerPollRequest, WorkerPollResponse, WorkerReportStepRequest,
 };

@@ -4,8 +4,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{params, Connection, ErrorCode};
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 
 use crate::kernel::event::KernelError;
 use crate::kernel::identity::{RunId, Seq};
@@ -13,11 +13,86 @@ use crate::kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
-const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 2;
+const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone)]
 pub struct SqliteRuntimeRepository {
     conn: Arc<Mutex<Connection>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetryStrategy {
+    Fixed,
+    Exponential,
+}
+
+impl RetryStrategy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fixed => "fixed",
+            Self::Exponential => "exponential",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fixed" => Some(Self::Fixed),
+            "exponential" => Some(Self::Exponential),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RetryPolicyConfig {
+    pub strategy: RetryStrategy,
+    pub backoff_ms: i64,
+    pub max_backoff_ms: Option<i64>,
+    pub multiplier: Option<f64>,
+    pub max_retries: u32,
+}
+
+impl RetryPolicyConfig {
+    fn next_backoff_ms(&self, current_attempt_no: u32) -> i64 {
+        let current_attempt_no = current_attempt_no.max(1);
+        let raw_backoff = match self.strategy {
+            RetryStrategy::Fixed => self.backoff_ms,
+            RetryStrategy::Exponential => {
+                let multiplier = self.multiplier.unwrap_or(2.0);
+                let exponent = (current_attempt_no - 1) as i32;
+                ((self.backoff_ms as f64) * multiplier.powi(exponent)).round() as i64
+            }
+        };
+        if let Some(max_backoff_ms) = self.max_backoff_ms {
+            raw_backoff.min(max_backoff_ms)
+        } else {
+            raw_backoff
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AttemptAckOutcome {
+    pub status: AttemptExecutionStatus,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub next_attempt_no: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttemptRetryHistoryRow {
+    pub attempt_no: u32,
+    pub strategy: String,
+    pub backoff_ms: i64,
+    pub max_retries: u32,
+    pub scheduled_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttemptRetryHistorySnapshot {
+    pub attempt_id: String,
+    pub current_attempt_no: u32,
+    pub current_status: AttemptExecutionStatus,
+    pub history: Vec<AttemptRetryHistoryRow>,
 }
 
 impl SqliteRuntimeRepository {
@@ -51,6 +126,10 @@ impl SqliteRuntimeRepository {
         if current < 2 {
             apply_sqlite_runtime_migration_v2(&conn)?;
             record_sqlite_migration(&conn, 2, "interrupt_resume_and_api_key_role")?;
+        }
+        if current < 3 {
+            apply_sqlite_runtime_migration_v3(&conn)?;
+            record_sqlite_migration(&conn, 3, "attempt_retry_policy_and_history")?;
         }
         Ok(())
     }
@@ -204,6 +283,205 @@ impl SqliteRuntimeRepository {
         )
         .map_err(|e| KernelError::Driver(format!("mark attempt status: {}", e)))?;
         Ok(())
+    }
+
+    pub fn ack_attempt(
+        &self,
+        attempt_id: &str,
+        status: AttemptExecutionStatus,
+        retry_policy: Option<&RetryPolicyConfig>,
+        now: DateTime<Utc>,
+    ) -> Result<AttemptAckOutcome, KernelError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| KernelError::Driver(format!("begin ack attempt tx: {}", e)))?;
+
+        let attempt_row = tx
+            .query_row(
+                "SELECT attempt_no, status, retry_strategy, retry_backoff_ms, retry_max_backoff_ms, retry_multiplier, retry_max_retries
+                 FROM runtime_attempts
+                 WHERE attempt_id = ?1",
+                params![attempt_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<f64>>(5)?,
+                        row.get::<_, Option<i64>>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| KernelError::Driver(format!("read attempt for ack: {}", e)))?;
+
+        let Some((
+            current_attempt_no,
+            _current_status,
+            stored_strategy,
+            stored_backoff_ms,
+            stored_max_backoff_ms,
+            stored_multiplier,
+            stored_max_retries,
+        )) = attempt_row
+        else {
+            return Err(KernelError::Driver(format!(
+                "attempt not found for ack: {}",
+                attempt_id
+            )));
+        };
+
+        if let Some(policy) = retry_policy {
+            tx.execute(
+                "UPDATE runtime_attempts
+                 SET retry_strategy = ?2,
+                     retry_backoff_ms = ?3,
+                     retry_max_backoff_ms = ?4,
+                     retry_multiplier = ?5,
+                     retry_max_retries = ?6
+                 WHERE attempt_id = ?1",
+                params![
+                    attempt_id,
+                    policy.strategy.as_str(),
+                    policy.backoff_ms,
+                    policy.max_backoff_ms,
+                    policy.multiplier,
+                    policy.max_retries as i64
+                ],
+            )
+            .map_err(|e| KernelError::Driver(format!("persist retry policy: {}", e)))?;
+        }
+
+        tx.execute(
+            "DELETE FROM runtime_leases WHERE attempt_id = ?1",
+            params![attempt_id],
+        )
+        .map_err(|e| KernelError::Driver(format!("delete attempt lease on ack: {}", e)))?;
+
+        if status == AttemptExecutionStatus::Failed {
+            let effective_policy = retry_policy.cloned().or_else(|| {
+                parse_retry_policy_record(
+                    stored_strategy,
+                    stored_backoff_ms,
+                    stored_max_backoff_ms,
+                    stored_multiplier,
+                    stored_max_retries,
+                )
+            });
+
+            let current_attempt_no = current_attempt_no.max(1) as u32;
+            if let Some(policy) = effective_policy {
+                if current_attempt_no <= policy.max_retries {
+                    let next_attempt_no = current_attempt_no + 1;
+                    let backoff_ms = policy.next_backoff_ms(current_attempt_no).max(1);
+                    let scheduled_at = now + Duration::milliseconds(backoff_ms);
+                    tx.execute(
+                        "UPDATE runtime_attempts
+                         SET attempt_no = ?2,
+                             status = 'retry_backoff',
+                             retry_at_ms = ?3
+                         WHERE attempt_id = ?1",
+                        params![attempt_id, next_attempt_no as i64, dt_to_ms(scheduled_at)],
+                    )
+                    .map_err(|e| KernelError::Driver(format!("schedule retry backoff: {}", e)))?;
+                    tx.execute(
+                        "INSERT INTO runtime_attempt_retry_history
+                         (attempt_id, attempt_no, strategy, backoff_ms, max_retries, scheduled_at_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            attempt_id,
+                            next_attempt_no as i64,
+                            policy.strategy.as_str(),
+                            backoff_ms,
+                            policy.max_retries as i64,
+                            dt_to_ms(scheduled_at)
+                        ],
+                    )
+                    .map_err(|e| KernelError::Driver(format!("insert retry history: {}", e)))?;
+                    tx.commit()
+                        .map_err(|e| KernelError::Driver(format!("commit retry ack: {}", e)))?;
+                    return Ok(AttemptAckOutcome {
+                        status: AttemptExecutionStatus::RetryBackoff,
+                        next_retry_at: Some(scheduled_at),
+                        next_attempt_no,
+                    });
+                }
+            }
+        }
+
+        tx.execute(
+            "UPDATE runtime_attempts
+             SET status = ?2,
+                 retry_at_ms = NULL
+             WHERE attempt_id = ?1",
+            params![attempt_id, attempt_status_to_str(&status)],
+        )
+        .map_err(|e| KernelError::Driver(format!("mark terminal attempt status: {}", e)))?;
+        tx.commit()
+            .map_err(|e| KernelError::Driver(format!("commit terminal ack: {}", e)))?;
+        Ok(AttemptAckOutcome {
+            status: status.clone(),
+            next_retry_at: None,
+            next_attempt_no: current_attempt_no.max(1) as u32,
+        })
+    }
+
+    pub fn get_attempt_retry_history(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<AttemptRetryHistorySnapshot>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let attempt = conn
+            .query_row(
+                "SELECT attempt_no, status FROM runtime_attempts WHERE attempt_id = ?1",
+                params![attempt_id],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|e| KernelError::Driver(format!("read retry history attempt: {}", e)))?;
+        let Some((current_attempt_no, status)) = attempt else {
+            return Ok(None);
+        };
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT attempt_no, strategy, backoff_ms, max_retries, scheduled_at_ms
+                 FROM runtime_attempt_retry_history
+                 WHERE attempt_id = ?1
+                 ORDER BY retry_id ASC",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare retry history: {}", e)))?;
+        let rows = stmt
+            .query_map(params![attempt_id], |row| {
+                Ok(AttemptRetryHistoryRow {
+                    attempt_no: row.get::<_, i64>(0)? as u32,
+                    strategy: row.get(1)?,
+                    backoff_ms: row.get(2)?,
+                    max_retries: row.get::<_, i64>(3)? as u32,
+                    scheduled_at: ms_to_dt(row.get::<_, i64>(4)?),
+                })
+            })
+            .map_err(|e| KernelError::Driver(format!("query retry history: {}", e)))?;
+        let mut history = Vec::new();
+        for row in rows {
+            history.push(row.map_err(map_rusqlite_err)?);
+        }
+
+        Ok(Some(AttemptRetryHistorySnapshot {
+            attempt_id: attempt_id.to_string(),
+            current_attempt_no: current_attempt_no.max(1) as u32,
+            current_status: parse_attempt_status(&status),
+            history,
+        }))
     }
 
     pub fn upsert_job(&self, thread_id: &str, status: &str) -> Result<(), KernelError> {
@@ -970,6 +1248,22 @@ fn parse_attempt_status(value: &str) -> AttemptExecutionStatus {
     }
 }
 
+fn parse_retry_policy_record(
+    strategy: Option<String>,
+    backoff_ms: Option<i64>,
+    max_backoff_ms: Option<i64>,
+    multiplier: Option<f64>,
+    max_retries: Option<i64>,
+) -> Option<RetryPolicyConfig> {
+    Some(RetryPolicyConfig {
+        strategy: RetryStrategy::from_str(strategy?.as_str())?,
+        backoff_ms: backoff_ms?,
+        max_backoff_ms,
+        multiplier,
+        max_retries: max_retries?.max(0) as u32,
+    })
+}
+
 fn map_rusqlite_err(err: rusqlite::Error) -> KernelError {
     KernelError::Driver(format!("sqlite runtime repo: {}", err))
 }
@@ -1110,6 +1404,31 @@ fn apply_sqlite_runtime_migration_v2(conn: &Connection) -> Result<(), KernelErro
     Ok(())
 }
 
+fn apply_sqlite_runtime_migration_v3(conn: &Connection) -> Result<(), KernelError> {
+    add_column_if_missing(conn, "runtime_attempts", "retry_strategy", "TEXT NULL")?;
+    add_column_if_missing(conn, "runtime_attempts", "retry_backoff_ms", "INTEGER NULL")?;
+    add_column_if_missing(conn, "runtime_attempts", "retry_max_backoff_ms", "INTEGER NULL")?;
+    add_column_if_missing(conn, "runtime_attempts", "retry_multiplier", "REAL NULL")?;
+    add_column_if_missing(conn, "runtime_attempts", "retry_max_retries", "INTEGER NULL")?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS runtime_attempt_retry_history (
+          retry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          attempt_id TEXT NOT NULL,
+          attempt_no INTEGER NOT NULL,
+          strategy TEXT NOT NULL,
+          backoff_ms INTEGER NOT NULL,
+          max_retries INTEGER NOT NULL,
+          scheduled_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_attempt_retry_history_attempt
+          ON runtime_attempt_retry_history(attempt_id, retry_id ASC);
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v3: {}", e)))?;
+    Ok(())
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -1140,12 +1459,14 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    use chrono::Utc;
     use rusqlite::{Connection, OptionalExtension};
 
     use super::{
         apply_sqlite_runtime_migration_v1, ensure_sqlite_migration_table, record_sqlite_migration,
-        SqliteRuntimeRepository, SQLITE_RUNTIME_SCHEMA_VERSION,
+        RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository, SQLITE_RUNTIME_SCHEMA_VERSION,
     };
+    use crate::kernel::runtime::models::AttemptExecutionStatus;
 
     fn temp_sqlite_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oris-runtime-{}-{}.db", name, uuid::Uuid::new_v4()))
@@ -1162,6 +1483,16 @@ mod tests {
             }
         }
         false
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false)
     }
 
     fn migration_version(conn: &Connection) -> i64 {
@@ -1193,12 +1524,18 @@ mod tests {
         ));
         assert!(column_exists(&conn, "runtime_interrupts", "resumed_at_ms"));
         assert!(column_exists(&conn, "runtime_api_keys", "role"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_strategy"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_backoff_ms"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_max_backoff_ms"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_multiplier"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_max_retries"));
+        assert!(table_exists(&conn, "runtime_attempt_retry_history"));
 
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn schema_migration_incremental_upgrade_from_v1_to_v2() {
+    fn schema_migration_incremental_upgrade_from_v1_to_latest() {
         let path = temp_sqlite_path("schema-upgrade");
         {
             let conn = Connection::open(&path).expect("open sqlite db");
@@ -1232,6 +1569,12 @@ mod tests {
         ));
         assert!(column_exists(&conn, "runtime_interrupts", "resumed_at_ms"));
         assert!(column_exists(&conn, "runtime_api_keys", "role"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_strategy"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_backoff_ms"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_max_backoff_ms"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_multiplier"));
+        assert!(column_exists(&conn, "runtime_attempts", "retry_max_retries"));
+        assert!(table_exists(&conn, "runtime_attempt_retry_history"));
 
         let migration_v2: Option<String> = conn
             .query_row(
@@ -1245,7 +1588,75 @@ mod tests {
             migration_v2.as_deref(),
             Some("interrupt_resume_and_api_key_role")
         );
+        let migration_v3: Option<String> = conn
+            .query_row(
+                "SELECT name FROM runtime_schema_migrations WHERE version = 3",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query migration v3");
+        assert_eq!(migration_v3.as_deref(), Some("attempt_retry_policy_and_history"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn ack_attempt_exponential_backoff_respects_cap_and_max_retries() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        repo.enqueue_attempt("attempt-retry-exp", "run-retry-exp")
+            .expect("enqueue retry attempt");
+        let policy = RetryPolicyConfig {
+            strategy: RetryStrategy::Exponential,
+            backoff_ms: 100,
+            max_backoff_ms: Some(250),
+            multiplier: Some(3.0),
+            max_retries: 2,
+        };
+
+        let first = repo
+            .ack_attempt(
+                "attempt-retry-exp",
+                AttemptExecutionStatus::Failed,
+                Some(&policy),
+                Utc::now(),
+            )
+            .expect("schedule first retry");
+        assert_eq!(first.status, AttemptExecutionStatus::RetryBackoff);
+        assert_eq!(first.next_attempt_no, 2);
+
+        let second = repo
+            .ack_attempt(
+                "attempt-retry-exp",
+                AttemptExecutionStatus::Failed,
+                None,
+                Utc::now(),
+            )
+            .expect("schedule second retry");
+        assert_eq!(second.status, AttemptExecutionStatus::RetryBackoff);
+        assert_eq!(second.next_attempt_no, 3);
+
+        let third = repo
+            .ack_attempt(
+                "attempt-retry-exp",
+                AttemptExecutionStatus::Failed,
+                None,
+                Utc::now(),
+            )
+            .expect("final failure after max retries");
+        assert_eq!(third.status, AttemptExecutionStatus::Failed);
+        assert_eq!(third.next_attempt_no, 3);
+
+        let snapshot = repo
+            .get_attempt_retry_history("attempt-retry-exp")
+            .expect("read retry history")
+            .expect("retry history exists");
+        assert_eq!(snapshot.current_attempt_no, 3);
+        assert_eq!(snapshot.current_status, AttemptExecutionStatus::Failed);
+        assert_eq!(snapshot.history.len(), 2);
+        assert_eq!(snapshot.history[0].attempt_no, 2);
+        assert_eq!(snapshot.history[0].backoff_ms, 100);
+        assert_eq!(snapshot.history[1].attempt_no, 3);
+        assert_eq!(snapshot.history[1].backoff_ms, 250);
     }
 }

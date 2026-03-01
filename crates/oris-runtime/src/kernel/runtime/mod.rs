@@ -30,14 +30,14 @@ pub use api_handlers::{build_router, ApiRole, ExecutionApiState};
 pub use api_idempotency::{IdempotencyRecord, SqliteIdempotencyStore};
 #[cfg(feature = "execution-server")]
 pub use api_models::{
-    ApiEnvelope, ApiMeta, AuditLogItem, AuditLogListResponse, CancelJobRequest, CancelJobResponse,
-    CheckpointInspectResponse, InterruptDetailResponse, InterruptListResponse, JobDetailResponse,
-    JobHistoryItem, JobHistoryResponse, JobStateResponse, JobTimelineItem, JobTimelineResponse,
-    ListAuditLogsQuery, ListJobsResponse, RejectInterruptRequest, ReplayJobRequest,
-    ResumeInterruptRequest, ResumeJobRequest, RunJobRequest, RunJobResponse,
-    TimelineExportResponse, WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest,
-    WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse,
-    WorkerReportStepRequest,
+    ApiEnvelope, ApiMeta, AttemptRetryHistoryItem, AttemptRetryHistoryResponse, AuditLogItem,
+    AuditLogListResponse, CancelJobRequest, CancelJobResponse, CheckpointInspectResponse,
+    InterruptDetailResponse, InterruptListResponse, JobDetailResponse, JobHistoryItem,
+    JobHistoryResponse, JobStateResponse, JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery,
+    ListJobsResponse, RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest,
+    ResumeJobRequest, RetryPolicyRequest, RunJobRequest, RunJobResponse, TimelineExportResponse,
+    WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest, WorkerHeartbeatRequest,
+    WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse, WorkerReportStepRequest,
 };
 #[cfg(feature = "sqlite-persistence")]
 pub use backend_config::{RuntimeStorageBackend, RuntimeStorageConfig};
