@@ -637,13 +637,13 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         })
     }
 
-    fn expire_leases_and_requeue(&self, now: DateTime<Utc>) -> Result<u64, KernelError> {
+    fn expire_leases_and_requeue(&self, stale_before: DateTime<Utc>) -> Result<u64, KernelError> {
         self.ensure_schema()?;
 
         let pool = self.pool()?.clone();
         let rt = self.runtime()?;
         let schema = self.schema.clone();
-        let now_ms = dt_to_ms(now);
+        let stale_before_ms = dt_to_ms(stale_before);
 
         rt.block_on(async move {
             let mut tx = pool
@@ -659,7 +659,7 @@ impl RuntimeRepository for PostgresRuntimeRepository {
                 schema
             );
             let deleted_rows = sqlx::query(&delete_sql)
-                .bind(now_ms)
+                .bind(stale_before_ms)
                 .fetch_all(&mut *tx)
                 .await
                 .map_err(|e| map_driver_err("delete expired leases", e))?;
