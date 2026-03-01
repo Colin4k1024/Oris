@@ -458,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_function_node() {
-        let node = function_node("test_node", |state: &MessagesState| async move {
+        let node = function_node("test_node", |_state: &MessagesState| async move {
             let mut update = HashMap::new();
             update.insert(
                 "messages".to_string(),

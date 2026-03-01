@@ -106,7 +106,7 @@ impl Agent for ConversationalAgent {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, sync::Arc};
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use serde_json::Value;

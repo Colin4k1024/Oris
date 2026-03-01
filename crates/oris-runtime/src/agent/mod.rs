@@ -13,6 +13,7 @@ mod executor;
 pub use executor::*;
 
 mod utils;
+#[allow(unused_imports)]
 pub use utils::*;
 
 mod chat;

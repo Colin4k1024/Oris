@@ -133,6 +133,7 @@ pub async fn handle_structured_output_tool_call(
 }
 
 /// Create a structured output tool from a strategy.
+#[allow(clippy::boxed_local)]
 pub fn create_structured_output_tool<S: StructuredOutputStrategy>(
     _strategy: Box<S>,
 ) -> Result<Arc<dyn Tool>, StructuredOutputError> {

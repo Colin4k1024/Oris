@@ -2,7 +2,6 @@ use regex::Regex;
 use std::collections::HashMap;
 
 /// Helper utilities for creating custom guardrails.
-
 /// Extract text content from various message formats.
 pub fn extract_text_from_messages(messages: &[serde_json::Value]) -> String {
     messages
@@ -92,7 +91,7 @@ pub fn extract_urls(text: &str) -> Vec<String> {
 /// Check if text contains profanity (basic word list).
 pub fn contains_profanity(text: &str) -> bool {
     // Basic profanity list - in production, use a comprehensive library
-    let profanity_words = vec![
+    let profanity_words = [
         "damn", "hell", "crap", // Add more as needed
     ];
 

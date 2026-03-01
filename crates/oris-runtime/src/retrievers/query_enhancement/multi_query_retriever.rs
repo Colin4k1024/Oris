@@ -126,7 +126,7 @@ impl Retriever for MultiQueryRetriever {
         for q in queries {
             match self.base_retriever.get_relevant_documents(&q).await {
                 Ok(results) => all_results.push(results),
-                Err(e) => {
+                Err(_e) => {
                     log::warn!(
                         "Failed to retrieve documents for generated query (length: {})",
                         q.len()

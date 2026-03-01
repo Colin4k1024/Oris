@@ -117,7 +117,7 @@ impl<R: AsyncRead + Send + Sync + Unpin + 'static> Loader for PandocLoader<R> {
             match tokio::io::copy(&mut self.input, &mut stdin).await {
                 Ok(_) => {}
                 Err(e) => {
-                    log::error!("pandoc stdin error: {}", e.to_string());
+                    log::error!("pandoc stdin error: {}", e);
                 }
             }
             stdin.flush().await.unwrap();

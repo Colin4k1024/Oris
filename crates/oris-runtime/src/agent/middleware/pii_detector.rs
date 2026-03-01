@@ -179,7 +179,7 @@ mod tests {
         let detector = PIIDetector::new(PIIType::CreditCard);
         // Valid Luhn credit card: 4532-1234-5678-9010
         let text = "My card is 4532-1234-5678-9010";
-        let matches = detector.detect(text);
+        let _matches = detector.detect(text);
         // Note: This may not pass if the number doesn't pass Luhn validation
         // For testing, we can use a known valid test card number
     }
