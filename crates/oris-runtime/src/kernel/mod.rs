@@ -51,6 +51,13 @@ pub use runtime::{
     WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest,
     WorkerPollResponse, WorkerReportStepRequest, RUNTIME_API_CONTRACT_DOC_PATH,
 };
+#[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
+pub use runtime::{
+    canonical_runtime_benchmark_baseline_path, run_runtime_benchmark_suite,
+    runtime_benchmark_suite_pretty_json, write_runtime_benchmark_suite,
+    RuntimeBenchmarkEnvironment, RuntimeBenchmarkMetric, RuntimeBenchmarkSuiteReport,
+    RUNTIME_BENCHMARK_BASELINE_DOC_PATH,
+};
 pub use runtime::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseConfig, LeaseManager,
     LeaseRecord, LeaseTickResult, RepositoryLeaseManager, RunRecord, RunRuntimeStatus,

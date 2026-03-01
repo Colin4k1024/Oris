@@ -15,6 +15,8 @@ pub mod api_idempotency;
 pub mod api_models;
 #[cfg(feature = "sqlite-persistence")]
 pub mod backend_config;
+#[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
+pub mod benchmark_suite;
 pub mod lease;
 pub mod models;
 #[cfg(feature = "kernel-postgres")]
@@ -50,6 +52,13 @@ pub use api_models::{
 };
 #[cfg(feature = "sqlite-persistence")]
 pub use backend_config::{RuntimeStorageBackend, RuntimeStorageConfig};
+#[cfg(all(feature = "execution-server", feature = "sqlite-persistence"))]
+pub use benchmark_suite::{
+    canonical_runtime_benchmark_baseline_path, run_runtime_benchmark_suite,
+    runtime_benchmark_suite_pretty_json, write_runtime_benchmark_suite,
+    RuntimeBenchmarkEnvironment, RuntimeBenchmarkMetric, RuntimeBenchmarkSuiteReport,
+    RUNTIME_BENCHMARK_BASELINE_DOC_PATH,
+};
 pub use lease::{LeaseConfig, LeaseManager, LeaseTickResult, RepositoryLeaseManager};
 pub use models::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, RunRecord,

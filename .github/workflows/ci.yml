@@ -210,6 +210,34 @@ jobs:
           command: test
           args: -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::security_ -- --nocapture --test-threads=1
 
+  benchmark_suite:
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-benchmark-suite"
+      - name: Run runtime benchmark suite
+        shell: bash
+        run: |
+          bash scripts/run_runtime_benchmark_suite.sh target/runtime-benchmark-ci.json 3
+      - name: Upload runtime benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-benchmark-ci
+          path: target/runtime-benchmark-ci.json
+
   supply_chain:
     runs-on: ubuntu-latest
     env:

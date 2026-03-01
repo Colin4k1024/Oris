@@ -34,6 +34,7 @@ Run these before opening a PR:
 cargo fmt --all
 bash scripts/update_runtime_api_contract.sh
 bash scripts/check_release_metadata.sh
+bash scripts/run_runtime_benchmark_suite.sh target/runtime-benchmark-latest.json 3
 cargo clippy -p oris-runtime --lib --features "sqlite-persistence,execution-server,kernel-postgres" -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
 cargo clippy -p oris_starter_axum --no-deps -- -D warnings
 cargo test --all-features
@@ -96,6 +97,10 @@ Baseline output reference:
 Runtime API contract:
 
 - Canonical artifact: [docs/runtime-api-contract.json](docs/runtime-api-contract.json)
+
+Runtime benchmark policy:
+
+- [docs/runtime-benchmark-policy.md](docs/runtime-benchmark-policy.md)
 
 ## Pull request expectations
 

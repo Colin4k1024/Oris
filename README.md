@@ -336,6 +336,7 @@ Execution server endpoints (v1 runtime-bin):
 
 - Canonical machine-readable contract: [docs/runtime-api-contract.json](docs/runtime-api-contract.json)
 - Regenerate after API changes: `bash scripts/update_runtime_api_contract.sh`
+- Benchmark policy and baseline: [docs/runtime-benchmark-policy.md](docs/runtime-benchmark-policy.md)
 - `GET /metrics` — Prometheus scrape endpoint for runtime metrics (`queue_depth`, `dispatch_latency_ms`, `lease_conflict_rate`, `recovery_latency_ms`)
 - `POST /v1/jobs/run`
   Optional request fields: `timeout_policy` with `{ "timeout_ms": <positive>, "on_timeout_status": "failed"|"cancelled" }`, `priority` (`0..100`, higher dispatches first), and `tenant_id` (stable throttling key). Optional header: `traceparent` (`00-<trace_id>-<span_id>-<flags>`) to continue an upstream W3C/OpenTelemetry trace; responses return `data.trace`.
