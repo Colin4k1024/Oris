@@ -3,7 +3,7 @@ name: CI
 on:
   workflow_dispatch:
   pull_request:
-      branches:
+    branches:
       - main
   push:
     branches:
@@ -16,6 +16,52 @@ on:
       - 'renovate.json'
 
 jobs:
+  cross_platform_smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Free disk space
+        if: matrix.os == 'ubuntu-latest'
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-cross-platform-${{ matrix.os }}"
+      - name: Check workspace
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --workspace --locked
+      - name: Check custom node plugins example
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: -p oris-runtime --example custom_node_plugins --locked
+
   build:
     runs-on: ubuntu-latest
     env:
@@ -71,6 +117,16 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - name: Rust clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets --all-features -- -D warnings
+      - name: Rust clippy (Axum starter)
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -p oris_starter_axum --all-targets -- -D warnings
       - name: Build release
         uses: actions-rs/cargo@v1
         with:
@@ -101,6 +157,21 @@ jobs:
         with:
           command: test
           args: -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::scheduler_stress_ -- --nocapture --test-threads=1
+      - name: Check custom node plugins example
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: -p oris-runtime --example custom_node_plugins --locked
+      - name: Check execution server example
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: -p oris-runtime --example execution_server --features "sqlite-persistence,execution-server" --locked
+      - name: Check Axum starter example
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: -p oris_starter_axum --locked
       - name: Verify cargo-generate templates
         shell: bash
         run: |
@@ -196,6 +267,7 @@ jobs:
   publish_crate:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
+      - cross_platform_smoke
       - build
       - security
       - runtime_backends

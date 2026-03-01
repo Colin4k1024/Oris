@@ -143,7 +143,6 @@ impl Clone for DynamicToolsMiddleware {
 mod tests {
     use super::*;
     use crate::schemas::Message;
-    use crate::tools::SimpleContext;
 
     #[tokio::test]
     async fn test_dynamic_tools_exclude() {

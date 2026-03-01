@@ -350,7 +350,7 @@ mod tests {
         let events = Box::new(SharedEventStore(inner.clone()));
         let run_id = "run-interrupt-resume".to_string();
         let k = Kernel::<TestState> {
-            events: events,
+            events,
             snaps: None,
             reducer: Box::new(StateUpdatedOnlyReducer),
             exec: Box::new(NoopActionExecutor),

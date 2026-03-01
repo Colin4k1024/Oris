@@ -19,7 +19,7 @@ use super::{
     state::AgentState,
     AgentError,
 };
-use crate::schemas::{LogTools, Message, MessageType};
+use crate::schemas::{LogTools, Message};
 use crate::{
     chain::{chain_trait::Chain, ChainError},
     language_models::GenerateResult,

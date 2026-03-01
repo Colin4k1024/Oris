@@ -2,8 +2,6 @@
 //!
 //! This module is feature-gated behind `kernel-postgres`.
 
-#![cfg(feature = "kernel-postgres")]
-
 use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, TimeZone, Utc};

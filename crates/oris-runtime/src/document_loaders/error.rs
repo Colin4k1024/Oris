@@ -40,7 +40,7 @@ pub enum LoaderError {
     #[error("Excel parsing error: {0}")]
     ExcelError(String),
 
-    #[cfg(any(feature = "lopdf"))]
+    #[cfg(feature = "lopdf")]
     #[cfg(not(feature = "pdf-extract"))]
     #[error(transparent)]
     LoPdfError(#[from] lopdf::Error),

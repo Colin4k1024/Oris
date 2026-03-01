@@ -10,9 +10,11 @@ mod external;
 pub use external::*;
 
 mod algorithm;
+#[allow(unused_imports)]
 pub use algorithm::*;
 
 mod reranker;
+#[allow(unused_imports)]
 pub use reranker::*;
 
 mod hybrid;

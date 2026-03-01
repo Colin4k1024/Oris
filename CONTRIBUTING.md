@@ -32,7 +32,8 @@ Run these before opening a PR:
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy -p oris-runtime --lib --features "sqlite-persistence,execution-server,kernel-postgres" -- -D clippy::correctness -D clippy::suspicious -D clippy::perf
+cargo clippy -p oris_starter_axum --no-deps -- -D warnings
 cargo test --all-features
 ```
 
@@ -51,6 +52,8 @@ cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kern
 cargo test -p oris-runtime agent::checkpoint::tests:: -- --nocapture
 cargo test -p oris-runtime graph::plugin::tests:: -- --nocapture
 cargo check -p oris-runtime --example custom_node_plugins --offline
+cargo check -p oris-runtime --example execution_server --features "sqlite-persistence,execution-server" --offline
+cargo check -p oris_starter_axum --offline
 bash scripts/verify_cargo_generate_templates.sh
 ```
 

@@ -160,7 +160,6 @@ mod tests {
             crate::language_models::LLMError,
         > {
             use futures::stream;
-            use std::pin::Pin;
             let response = self.response.clone();
             Ok(Box::pin(stream::once(async move {
                 Ok(StreamData::new(serde_json::Value::Null, None, response))

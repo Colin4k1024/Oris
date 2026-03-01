@@ -154,18 +154,15 @@ impl MergerRetriever {
     /// Generate a unique key for a document (for deduplication)
     fn document_key(doc: &Document) -> String {
         // Use content hash as key, or combine source + content
+        let preview = &doc.page_content[..doc.page_content.len().min(100)];
         if !doc.metadata.is_empty() {
             if let Some(source) = doc.metadata.get("source").and_then(|s| s.as_str()) {
-                format!(
-                    "{}:{}",
-                    source,
-                    doc.page_content[..doc.page_content.len().min(100)].to_string()
-                )
+                format!("{}:{}", source, preview)
             } else {
-                doc.page_content[..doc.page_content.len().min(100)].to_string()
+                preview.to_string()
             }
         } else {
-            doc.page_content[..doc.page_content.len().min(100)].to_string()
+            preview.to_string()
         }
     }
 }
@@ -178,7 +175,7 @@ impl Retriever for MergerRetriever {
         for retriever in &self.retrievers {
             match retriever.get_relevant_documents(query).await {
                 Ok(results) => all_results.push(results),
-                Err(e) => {
+                Err(_e) => {
                     log::warn!("MergerRetriever: One retriever failed, continuing with others");
                     all_results.push(Vec::new());
                 }
