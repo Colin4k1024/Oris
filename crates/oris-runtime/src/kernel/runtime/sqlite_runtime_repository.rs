@@ -1,7 +1,5 @@
 //! SQLite-backed runtime repository for Phase 3 worker APIs.
 
-#![cfg(feature = "sqlite-persistence")]
-
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};

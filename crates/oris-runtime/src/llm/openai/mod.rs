@@ -339,7 +339,6 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use tokio::test;
 
     /// Integration test requiring OpenAI API key
     ///

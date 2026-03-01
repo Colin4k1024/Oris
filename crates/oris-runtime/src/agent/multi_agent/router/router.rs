@@ -122,7 +122,7 @@ mod tests {
     fn test_keyword_router_creation() {
         let mut keyword_map = HashMap::new();
         keyword_map.insert("agent1".to_string(), vec!["test".to_string()]);
-        let router = DefaultRouter::with_keywords(keyword_map);
+        let _router = DefaultRouter::with_keywords(keyword_map);
         // Router created successfully
         assert!(true);
     }

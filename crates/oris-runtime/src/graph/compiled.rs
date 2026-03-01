@@ -548,7 +548,7 @@ impl<S: State + 'static> CompiledGraph<S> {
                     // Create stream options for subgraph
                     let subgraph_options = StreamOptions {
                         stream_modes: stream_modes.clone(),
-                        subgraphs: subgraphs, // Recursively enable subgraphs
+                        subgraphs, // Recursively enable subgraphs
                     };
 
                     // Stream subgraph execution

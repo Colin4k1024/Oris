@@ -141,7 +141,7 @@ impl WikipediaRetriever {
         if let Some(query_obj) = json.get("query") {
             if let Some(pages) = query_obj.get("pages") {
                 if let Some(pages_obj) = pages.as_object() {
-                    for (id, page) in pages_obj {
+                    if let Some((id, page)) = pages_obj.iter().next() {
                         page_id = Some(id.clone());
                         if let Some(extract) = page.get("extract").and_then(|e| e.as_str()) {
                             content = extract.to_string();
@@ -168,14 +168,15 @@ impl WikipediaRetriever {
                                             if let Some(full_pages) = full_query.get("pages") {
                                                 if let Some(full_pages_obj) = full_pages.as_object()
                                                 {
-                                                    for (_, full_page) in full_pages_obj {
+                                                    if let Some((_, full_page)) =
+                                                        full_pages_obj.iter().next()
+                                                    {
                                                         if let Some(full_extract) = full_page
                                                             .get("extract")
                                                             .and_then(|e| e.as_str())
                                                         {
                                                             content = full_extract.to_string();
                                                         }
-                                                        break;
                                                     }
                                                 }
                                             }
@@ -184,7 +185,6 @@ impl WikipediaRetriever {
                                 }
                             }
                         }
-                        break;
                     }
                 }
             }

@@ -18,16 +18,13 @@
 //! - `OLLAMA_HOST`: Ollama host URL (default: http://localhost:11434)
 
 use crate::agent::utils::convert_messages_to_prompt_args;
-use crate::error::ChainError;
 use crate::prompt_args;
 use crate::schemas::Message;
-use crate::schemas::MessageType;
 
 /// Unit tests for convert_messages_to_prompt_args function
 ///
 /// These tests verify the message-to-prompt-args conversion logic
 /// without requiring external API calls.
-
 #[cfg(test)]
 mod unit_tests {
     use super::*;

@@ -53,7 +53,6 @@ pub fn create_stream_writer() -> (StreamWriterBox, mpsc::UnboundedReceiver<Value
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn test_channel_stream_writer() {

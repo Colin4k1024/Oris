@@ -99,10 +99,10 @@ pub fn match_skills(index: &[SkillMeta], user_message: &str) -> Vec<SkillMeta> {
             .collect();
         let mut score = 0u32;
         for w in &msg_words {
-            if name_lower.contains(*w) || name_words.iter().any(|nw| *nw == *w) {
+            if name_lower.contains(*w) || name_words.contains(w) {
                 score += 2;
             }
-            if desc_lower.contains(*w) || desc_words.iter().any(|dw| *dw == *w) {
+            if desc_lower.contains(*w) || desc_words.contains(w) {
                 score += 1;
             }
         }
