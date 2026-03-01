@@ -43,7 +43,8 @@ pub use runtime::{
     InterruptListResponse, JobDetailResponse, JobHistoryItem, JobHistoryResponse, JobStateResponse,
     JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery, ListJobsResponse,
     RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest,
-    RetryPolicyRequest, RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest,
+    RetryPolicyRequest, RunJobRequest, RunJobResponse, TimeoutPolicyRequest,
+    TimelineExportResponse, WorkerAckRequest,
     WorkerAckResponse, WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse,
     WorkerPollRequest, WorkerPollResponse, WorkerReportStepRequest,
 };

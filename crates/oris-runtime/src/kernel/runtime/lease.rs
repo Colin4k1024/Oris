@@ -25,6 +25,7 @@ impl Default for LeaseConfig {
 /// Result of a periodic lease tick.
 #[derive(Clone, Debug, Default)]
 pub struct LeaseTickResult {
+    pub timed_out: u64,
     pub expired_requeued: u64,
 }
 
@@ -50,8 +51,10 @@ impl<R: RuntimeRepository> LeaseManager for RepositoryLeaseManager<R> {
         // TODO(phase1.1): use `heartbeat_grace` and lease versions to implement
         // stricter expiry semantics and split-brain protections.
         let _next_expiry_scan_cutoff = now - self.config.heartbeat_grace;
+        let timed_out = self.repository.transition_timed_out_attempts(now)?;
         let expired = self.repository.expire_leases_and_requeue(now)?;
         Ok(LeaseTickResult {
+            timed_out,
             expired_requeued: expired,
         })
     }

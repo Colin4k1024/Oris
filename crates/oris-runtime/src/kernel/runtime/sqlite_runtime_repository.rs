@@ -13,7 +13,7 @@ use crate::kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
-const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 3;
+const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone)]
 pub struct SqliteRuntimeRepository {
@@ -95,6 +95,12 @@ pub struct AttemptRetryHistorySnapshot {
     pub history: Vec<AttemptRetryHistoryRow>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimeoutPolicyConfig {
+    pub timeout_ms: i64,
+    pub on_timeout_status: AttemptExecutionStatus,
+}
+
 impl SqliteRuntimeRepository {
     pub fn new(db_path: &str) -> Result<Self, KernelError> {
         let conn = Connection::open(db_path)
@@ -131,6 +137,10 @@ impl SqliteRuntimeRepository {
             apply_sqlite_runtime_migration_v3(&conn)?;
             record_sqlite_migration(&conn, 3, "attempt_retry_policy_and_history")?;
         }
+        if current < 4 {
+            apply_sqlite_runtime_migration_v4(&conn)?;
+            record_sqlite_migration(&conn, 4, "attempt_execution_timeout_policy")?;
+        }
         Ok(())
     }
 
@@ -145,6 +155,96 @@ impl SqliteRuntimeRepository {
             params![attempt_id, run_id],
         )
         .map_err(|e| KernelError::Driver(format!("enqueue attempt: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn set_attempt_timeout_policy(
+        &self,
+        attempt_id: &str,
+        policy: &TimeoutPolicyConfig,
+    ) -> Result<(), KernelError> {
+        if policy.timeout_ms <= 0 {
+            return Err(KernelError::Driver(
+                "timeout policy timeout_ms must be > 0".to_string(),
+            ));
+        }
+        if !matches!(
+            policy.on_timeout_status,
+            AttemptExecutionStatus::Failed | AttemptExecutionStatus::Cancelled
+        ) {
+            return Err(KernelError::Driver(
+                "timeout policy terminal status must be failed or cancelled".to_string(),
+            ));
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_attempts
+                 SET execution_timeout_ms = ?2,
+                     timeout_terminal_status = ?3
+                 WHERE attempt_id = ?1",
+                params![
+                    attempt_id,
+                    policy.timeout_ms,
+                    attempt_status_to_str(&policy.on_timeout_status)
+                ],
+            )
+            .map_err(|e| KernelError::Driver(format!("set attempt timeout policy: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "attempt not found for timeout policy: {}",
+                attempt_id
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn get_attempt_status(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<(u32, AttemptExecutionStatus)>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.query_row(
+            "SELECT attempt_no, status FROM runtime_attempts WHERE attempt_id = ?1",
+            params![attempt_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? as u32,
+                    parse_attempt_status(&row.get::<_, String>(1)?),
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| KernelError::Driver(format!("get attempt status: {}", e)))
+    }
+
+    pub fn set_attempt_started_at_for_test(
+        &self,
+        attempt_id: &str,
+        started_at: Option<DateTime<Utc>>,
+    ) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_attempts SET started_at_ms = ?2 WHERE attempt_id = ?1",
+                params![attempt_id, started_at.map(dt_to_ms)],
+            )
+            .map_err(|e| KernelError::Driver(format!("set attempt started_at: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "attempt not found for started_at update: {}",
+                attempt_id
+            )));
+        }
         Ok(())
     }
 
@@ -278,7 +378,17 @@ impl SqliteRuntimeRepository {
             .lock()
             .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
         conn.execute(
-            "UPDATE runtime_attempts SET status = ?2 WHERE attempt_id = ?1",
+            "UPDATE runtime_attempts
+             SET status = ?2,
+                 retry_at_ms = CASE
+                   WHEN ?2 IN ('completed', 'failed', 'cancelled') THEN NULL
+                   ELSE retry_at_ms
+                 END,
+                 started_at_ms = CASE
+                   WHEN ?2 IN ('completed', 'failed', 'cancelled', 'queued', 'retry_backoff') THEN NULL
+                   ELSE started_at_ms
+                 END
+             WHERE attempt_id = ?1",
             params![attempt_id, status_str],
         )
         .map_err(|e| KernelError::Driver(format!("mark attempt status: {}", e)))?;
@@ -385,7 +495,8 @@ impl SqliteRuntimeRepository {
                         "UPDATE runtime_attempts
                          SET attempt_no = ?2,
                              status = 'retry_backoff',
-                             retry_at_ms = ?3
+                             retry_at_ms = ?3,
+                             started_at_ms = NULL
                          WHERE attempt_id = ?1",
                         params![attempt_id, next_attempt_no as i64, dt_to_ms(scheduled_at)],
                     )
@@ -418,7 +529,8 @@ impl SqliteRuntimeRepository {
         tx.execute(
             "UPDATE runtime_attempts
              SET status = ?2,
-                 retry_at_ms = NULL
+                 retry_at_ms = NULL,
+                 started_at_ms = NULL
              WHERE attempt_id = ?1",
             params![attempt_id, attempt_status_to_str(&status)],
         )
@@ -1121,9 +1233,10 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         let updated_attempt = tx
             .execute(
                 "UPDATE runtime_attempts
-                 SET status = 'leased'
+                 SET status = 'leased',
+                     started_at_ms = COALESCE(started_at_ms, ?2)
                  WHERE attempt_id = ?1 AND status IN ('queued', 'retry_backoff')",
-                params![attempt_id],
+                params![attempt_id, dt_to_ms(now)],
             )
             .map_err(|e| KernelError::Driver(format!("mark leased status: {}", e)))?;
         if updated_attempt == 0 {
@@ -1207,6 +1320,50 @@ impl RuntimeRepository for SqliteRuntimeRepository {
             .map_err(|e| KernelError::Driver(format!("requeue attempt: {}", e)))?;
         }
         Ok(expired_attempts.len() as u64)
+    }
+
+    fn transition_timed_out_attempts(&self, now: DateTime<Utc>) -> Result<u64, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT attempt_id, timeout_terminal_status
+                 FROM runtime_attempts
+                 WHERE started_at_ms IS NOT NULL
+                   AND execution_timeout_ms IS NOT NULL
+                   AND timeout_terminal_status IS NOT NULL
+                   AND status IN ('leased', 'running')
+                   AND (started_at_ms + execution_timeout_ms) <= ?1",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare timed-out attempts query: {}", e)))?;
+        let rows = stmt
+            .query_map(params![dt_to_ms(now)], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| KernelError::Driver(format!("query timed-out attempts: {}", e)))?;
+        let mut timed_out = Vec::new();
+        for row in rows {
+            timed_out.push(row.map_err(map_rusqlite_err)?);
+        }
+        for (attempt_id, terminal_status) in &timed_out {
+            conn.execute(
+                "DELETE FROM runtime_leases WHERE attempt_id = ?1",
+                params![attempt_id],
+            )
+            .map_err(|e| KernelError::Driver(format!("delete timed-out lease: {}", e)))?;
+            conn.execute(
+                "UPDATE runtime_attempts
+                 SET status = ?2,
+                     retry_at_ms = NULL,
+                     started_at_ms = NULL
+                 WHERE attempt_id = ?1",
+                params![attempt_id, terminal_status],
+            )
+            .map_err(|e| KernelError::Driver(format!("mark timed-out attempt status: {}", e)))?;
+        }
+        Ok(timed_out.len() as u64)
     }
 
     fn latest_seq_for_run(&self, _run_id: &RunId) -> Result<Seq, KernelError> {
@@ -1429,6 +1586,13 @@ fn apply_sqlite_runtime_migration_v3(conn: &Connection) -> Result<(), KernelErro
     Ok(())
 }
 
+fn apply_sqlite_runtime_migration_v4(conn: &Connection) -> Result<(), KernelError> {
+    add_column_if_missing(conn, "runtime_attempts", "execution_timeout_ms", "INTEGER NULL")?;
+    add_column_if_missing(conn, "runtime_attempts", "timeout_terminal_status", "TEXT NULL")?;
+    add_column_if_missing(conn, "runtime_attempts", "started_at_ms", "INTEGER NULL")?;
+    Ok(())
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -1459,14 +1623,16 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use rusqlite::{Connection, OptionalExtension};
 
     use super::{
         apply_sqlite_runtime_migration_v1, ensure_sqlite_migration_table, record_sqlite_migration,
-        RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository, SQLITE_RUNTIME_SCHEMA_VERSION,
+        RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository, TimeoutPolicyConfig,
+        SQLITE_RUNTIME_SCHEMA_VERSION,
     };
     use crate::kernel::runtime::models::AttemptExecutionStatus;
+    use crate::kernel::runtime::repository::RuntimeRepository;
 
     fn temp_sqlite_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("oris-runtime-{}-{}.db", name, uuid::Uuid::new_v4()))
@@ -1529,6 +1695,9 @@ mod tests {
         assert!(column_exists(&conn, "runtime_attempts", "retry_max_backoff_ms"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_multiplier"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_max_retries"));
+        assert!(column_exists(&conn, "runtime_attempts", "execution_timeout_ms"));
+        assert!(column_exists(&conn, "runtime_attempts", "timeout_terminal_status"));
+        assert!(column_exists(&conn, "runtime_attempts", "started_at_ms"));
         assert!(table_exists(&conn, "runtime_attempt_retry_history"));
 
         let _ = fs::remove_file(path);
@@ -1574,6 +1743,9 @@ mod tests {
         assert!(column_exists(&conn, "runtime_attempts", "retry_max_backoff_ms"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_multiplier"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_max_retries"));
+        assert!(column_exists(&conn, "runtime_attempts", "execution_timeout_ms"));
+        assert!(column_exists(&conn, "runtime_attempts", "timeout_terminal_status"));
+        assert!(column_exists(&conn, "runtime_attempts", "started_at_ms"));
         assert!(table_exists(&conn, "runtime_attempt_retry_history"));
 
         let migration_v2: Option<String> = conn
@@ -1597,6 +1769,15 @@ mod tests {
             .optional()
             .expect("query migration v3");
         assert_eq!(migration_v3.as_deref(), Some("attempt_retry_policy_and_history"));
+        let migration_v4: Option<String> = conn
+            .query_row(
+                "SELECT name FROM runtime_schema_migrations WHERE version = 4",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query migration v4");
+        assert_eq!(migration_v4.as_deref(), Some("attempt_execution_timeout_policy"));
 
         let _ = fs::remove_file(path);
     }
@@ -1658,5 +1839,44 @@ mod tests {
         assert_eq!(snapshot.history[0].backoff_ms, 100);
         assert_eq!(snapshot.history[1].attempt_no, 3);
         assert_eq!(snapshot.history[1].backoff_ms, 250);
+    }
+
+    #[test]
+    fn transition_timed_out_attempts_applies_configured_terminal_status() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        repo.enqueue_attempt("attempt-timeout-1", "run-timeout-1")
+            .expect("enqueue timeout attempt");
+        repo.set_attempt_timeout_policy(
+            "attempt-timeout-1",
+            &TimeoutPolicyConfig {
+                timeout_ms: 1_000,
+                on_timeout_status: AttemptExecutionStatus::Cancelled,
+            },
+        )
+        .expect("set timeout policy");
+        let lease = repo
+            .upsert_lease("attempt-timeout-1", "worker-timeout-1", Utc::now() + Duration::seconds(30))
+            .expect("lease timeout attempt");
+        assert!(!lease.lease_id.is_empty());
+        repo.set_attempt_started_at_for_test(
+            "attempt-timeout-1",
+            Some(Utc::now() - Duration::seconds(5)),
+        )
+        .expect("backdate started_at");
+
+        let transitioned = repo
+            .transition_timed_out_attempts(Utc::now())
+            .expect("transition timed out attempts");
+        assert_eq!(transitioned, 1);
+        assert!(repo
+            .get_lease_for_attempt("attempt-timeout-1")
+            .expect("read lease")
+            .is_none());
+        let (attempt_no, status) = repo
+            .get_attempt_status("attempt-timeout-1")
+            .expect("read attempt status")
+            .expect("attempt exists");
+        assert_eq!(attempt_no, 1);
+        assert_eq!(status, AttemptExecutionStatus::Cancelled);
     }
 }

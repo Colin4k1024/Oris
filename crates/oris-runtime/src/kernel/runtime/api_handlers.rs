@@ -27,7 +27,7 @@ use super::api_models::{
     JobHistoryItem, JobHistoryResponse, JobListItem, JobStateResponse, JobTimelineItem,
     JobTimelineResponse, ListAuditLogsQuery, ListJobsResponse, RejectInterruptRequest,
     ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest, RetryPolicyRequest, RunJobRequest,
-    RunJobResponse, TimelineExportResponse, WorkerAckRequest, WorkerAckResponse,
+    RunJobResponse, TimeoutPolicyRequest, TimelineExportResponse, WorkerAckRequest, WorkerAckResponse,
     WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest,
     WorkerPollResponse, WorkerReportStepRequest,
 };
@@ -36,7 +36,7 @@ use super::models::AttemptExecutionStatus;
 use super::scheduler::{SchedulerDecision, SkeletonScheduler};
 #[cfg(feature = "sqlite-persistence")]
 use super::sqlite_runtime_repository::{
-    AuditLogEntry, RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository,
+    AuditLogEntry, RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository, TimeoutPolicyConfig,
     StepReportWriteResult,
 };
 
@@ -369,11 +369,21 @@ fn normalize_request_id(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn payload_hash(thread_id: &str, input: &str) -> String {
+fn payload_hash(
+    thread_id: &str,
+    input: &str,
+    timeout_policy: Option<&TimeoutPolicyRequest>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(thread_id.as_bytes());
     hasher.update(b"|");
     hasher.update(input.as_bytes());
+    hasher.update(b"|");
+    if let Some(timeout_policy) = timeout_policy {
+        if let Ok(bytes) = serde_json::to_vec(timeout_policy) {
+            hasher.update(bytes);
+        }
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -826,6 +836,34 @@ fn parse_retry_policy(
     }))
 }
 
+#[cfg(feature = "sqlite-persistence")]
+fn parse_timeout_policy(
+    request: Option<&TimeoutPolicyRequest>,
+    rid: &str,
+) -> Result<Option<TimeoutPolicyConfig>, ApiError> {
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    if request.timeout_ms <= 0 {
+        return Err(ApiError::bad_request("timeout_policy.timeout_ms must be > 0")
+            .with_request_id(rid.to_string()));
+    }
+    let on_timeout_status = match request.on_timeout_status.trim().to_ascii_lowercase().as_str() {
+        "failed" => AttemptExecutionStatus::Failed,
+        "cancelled" => AttemptExecutionStatus::Cancelled,
+        _ => {
+            return Err(ApiError::bad_request(
+                "timeout_policy.on_timeout_status must be one of: failed|cancelled",
+            )
+            .with_request_id(rid.to_string()))
+        }
+    };
+    Ok(Some(TimeoutPolicyConfig {
+        timeout_ms: request.timeout_ms,
+        on_timeout_status,
+    }))
+}
+
 pub async fn run_job(
     State(state): State<ExecutionApiState>,
     headers: HeaderMap,
@@ -838,7 +876,7 @@ pub async fn run_job(
         .map_err(|e| e.with_request_id(rid.clone()))?;
 
     let input = req.input.unwrap_or_else(|| "API run".to_string());
-    let request_payload_hash = payload_hash(&req.thread_id, &input);
+    let request_payload_hash = payload_hash(&req.thread_id, &input, req.timeout_policy.as_ref());
     log::info!(
         "execution_run request_id={} thread_id={} checkpoint_id=none",
         rid,
@@ -916,14 +954,26 @@ pub async fn run_job(
     };
 
     #[cfg(feature = "sqlite-persistence")]
+    let timeout_policy = parse_timeout_policy(req.timeout_policy.as_ref(), &rid)?;
+
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        if timeout_policy.is_some() && state.runtime_repo.is_none() {
+            return Err(ApiError::internal("timeout_policy requires runtime repository")
+                .with_request_id(rid.clone()));
+        }
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
     if let Some(repo) = state.runtime_repo.as_ref() {
+        let attempt_id = format!("attempt-{}-{}", req.thread_id, uuid::Uuid::new_v4());
         let _ = repo.upsert_job(&req.thread_id, &status);
-        let _ = repo.enqueue_attempt(
-            &format!("attempt-{}-{}", req.thread_id, uuid::Uuid::new_v4()),
-            &req.thread_id,
-        );
+        let _ = repo.enqueue_attempt(&attempt_id, &req.thread_id);
+        if let Some(policy) = timeout_policy.as_ref() {
+            let _ = repo.set_attempt_timeout_policy(&attempt_id, policy);
+        }
         if !interrupts.is_empty() {
-            let attempt_id = format!("attempt-{}-main", req.thread_id);
+            let interrupt_attempt_id = format!("attempt-{}-main", req.thread_id);
             for (i, iv) in interrupts.iter().enumerate() {
                 let interrupt_id = format!("int-{}-{}", req.thread_id, i);
                 let value_json = serde_json::to_string(iv).unwrap_or_default();
@@ -931,7 +981,7 @@ pub async fn run_job(
                     &interrupt_id,
                     &req.thread_id,
                     &req.thread_id,
-                    &attempt_id,
+                    &interrupt_attempt_id,
                     &value_json,
                 );
             }
@@ -2101,7 +2151,10 @@ mod tests {
     use crate::graph::{
         function_node, interrupt, GraphError, InMemorySaver, MessagesState, StateGraph, END, START,
     };
+    use crate::kernel::runtime::models::AttemptExecutionStatus;
     use crate::kernel::runtime::repository::RuntimeRepository;
+    #[cfg(feature = "sqlite-persistence")]
+    use crate::kernel::runtime::sqlite_runtime_repository::TimeoutPolicyConfig;
     use crate::schemas::messages::Message;
 
     use super::{build_router, ApiRole, ExecutionApiState};
@@ -3454,6 +3507,75 @@ mod tests {
         assert_eq!(history_json["data"]["history"][0]["attempt_no"], 2);
         assert_eq!(history_json["data"]["history"][0]["strategy"], "fixed");
         assert_eq!(history_json["data"]["history"][0]["backoff_ms"], 1000);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn worker_poll_tick_transitions_timed_out_attempts() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.enqueue_attempt("attempt-worker-timeout-1", "run-worker-timeout-1")
+            .expect("enqueue timeout attempt");
+        repo.set_attempt_timeout_policy(
+            "attempt-worker-timeout-1",
+            &TimeoutPolicyConfig {
+                timeout_ms: 1_000,
+                on_timeout_status: AttemptExecutionStatus::Failed,
+            },
+        )
+        .expect("set timeout policy");
+        let router = build_router(state);
+
+        let first_poll_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-timeout-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_poll_resp = router.clone().oneshot(first_poll_req).await.unwrap();
+        assert_eq!(first_poll_resp.status(), StatusCode::OK);
+
+        repo.set_attempt_started_at_for_test(
+            "attempt-worker-timeout-1",
+            Some(Utc::now() - Duration::seconds(5)),
+        )
+        .expect("backdate started_at");
+
+        let second_poll_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-timeout-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_poll_resp = router.oneshot(second_poll_req).await.unwrap();
+        assert_eq!(second_poll_resp.status(), StatusCode::OK);
+        let second_poll_body = axum::body::to_bytes(second_poll_resp.into_body(), usize::MAX)
+            .await
+            .expect("second poll body");
+        let second_poll_json: serde_json::Value =
+            serde_json::from_slice(&second_poll_body).expect("second poll json");
+        assert_eq!(second_poll_json["data"]["decision"], "noop");
+
+        assert!(repo
+            .get_lease_for_attempt("attempt-worker-timeout-1")
+            .expect("read timeout lease")
+            .is_none());
+        let (_, status) = repo
+            .get_attempt_status("attempt-worker-timeout-1")
+            .expect("read timeout status")
+            .expect("timeout attempt exists");
+        assert_eq!(status, AttemptExecutionStatus::Failed);
     }
 
     #[cfg(feature = "sqlite-persistence")]

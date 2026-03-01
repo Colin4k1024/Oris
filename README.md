@@ -310,6 +310,7 @@ Attempt retry API:
 Execution server endpoints (v1 runtime-bin):
 
 - `POST /v1/jobs/run`
+  Optional request field: `timeout_policy` with `{ "timeout_ms": <positive>, "on_timeout_status": "failed"|"cancelled" }`
 - `GET /v1/jobs` — list jobs (query: `status`, `limit`, `offset`)
 - `GET /v1/jobs/:thread_id`
 - `GET /v1/jobs/:thread_id/detail` — run drill-down (status, attempts, checkpoint, pending interrupt)
@@ -339,6 +340,7 @@ Worker endpoints (Phase 3 baseline):
 Lease/failover/backpressure baseline behavior:
 
 - `poll` first runs a lease-expiry tick (`expire_leases_and_requeue`) before dispatching.
+- The same tick also transitions attempts that exceeded `started_at + timeout_ms` into their configured terminal status (`failed` or `cancelled`) before any requeue/dispatch.
 - `poll` enforces per-worker active-lease guardrail via `max_active_leases` (request) or server default.
 - `poll` returns `decision` as `dispatched`, `noop`, or `backpressure`.
 - `heartbeat` / `extend-lease` enforce lease ownership (`worker_id` must match lease owner), otherwise `409 conflict`.

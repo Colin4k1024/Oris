@@ -30,6 +30,7 @@ pub struct RunJobRequest {
     pub thread_id: String,
     pub input: Option<String>,
     pub idempotency_key: Option<String>,
+    pub timeout_policy: Option<TimeoutPolicyRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -155,6 +156,12 @@ pub struct RetryPolicyRequest {
     pub max_backoff_ms: Option<i64>,
     pub multiplier: Option<f64>,
     pub max_retries: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimeoutPolicyRequest {
+    pub timeout_ms: i64,
+    pub on_timeout_status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
