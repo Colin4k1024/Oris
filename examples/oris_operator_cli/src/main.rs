@@ -64,13 +64,11 @@ async fn main() -> Result<()> {
             input,
             idempotency_key,
         } => {
-            let req = client
-                .post(format!("{}/v1/jobs/run", base))
-                .json(&json!({
-                    "thread_id": thread_id,
-                    "input": input,
-                    "idempotency_key": idempotency_key
-                }));
+            let req = client.post(format!("{}/v1/jobs/run", base)).json(&json!({
+                "thread_id": thread_id,
+                "input": input,
+                "idempotency_key": idempotency_key
+            }));
             send_and_decode(req).await?
         }
         Command::List {
@@ -78,10 +76,8 @@ async fn main() -> Result<()> {
             limit,
             offset,
         } => {
-            let mut query: Vec<(&str, String)> = vec![
-                ("limit", limit.to_string()),
-                ("offset", offset.to_string()),
-            ];
+            let mut query: Vec<(&str, String)> =
+                vec![("limit", limit.to_string()), ("offset", offset.to_string())];
             if let Some(status) = status {
                 query.push(("status", status));
             }
