@@ -21,21 +21,24 @@ use super::api_errors::ApiError;
 #[cfg(feature = "sqlite-persistence")]
 use super::api_idempotency::{IdempotencyRecord, SqliteIdempotencyStore};
 use super::api_models::{
-    ApiEnvelope, ApiMeta, AuditLogItem, AuditLogListResponse, CancelJobRequest, CancelJobResponse,
-    CheckpointInspectResponse, InterruptDetailResponse, InterruptListItem, InterruptListResponse,
-    JobDetailResponse, JobHistoryItem, JobHistoryResponse, JobListItem, JobStateResponse,
-    JobTimelineItem, JobTimelineResponse, ListAuditLogsQuery, ListJobsResponse,
-    RejectInterruptRequest, ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest,
-    RunJobRequest, RunJobResponse, TimelineExportResponse, WorkerAckRequest, WorkerAckResponse,
-    WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse, WorkerPollRequest,
-    WorkerPollResponse, WorkerReportStepRequest,
+    ApiEnvelope, ApiMeta, AttemptRetryHistoryItem, AttemptRetryHistoryResponse, AuditLogItem,
+    AuditLogListResponse, CancelJobRequest, CancelJobResponse, CheckpointInspectResponse,
+    DeadLetterItem, DeadLetterListResponse, DeadLetterReplayResponse, InterruptDetailResponse,
+    InterruptListItem, InterruptListResponse, JobDetailResponse, JobHistoryItem,
+    JobHistoryResponse, JobListItem, JobStateResponse, JobTimelineItem, JobTimelineResponse,
+    ListAuditLogsQuery, ListDeadLettersQuery, ListJobsResponse, RejectInterruptRequest,
+    ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest, RetryPolicyRequest, RunJobRequest,
+    RunJobResponse, TimeoutPolicyRequest, TimelineExportResponse, WorkerAckRequest,
+    WorkerAckResponse, WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse,
+    WorkerPollRequest, WorkerPollResponse, WorkerReportStepRequest,
 };
 use super::lease::{LeaseConfig, LeaseManager, RepositoryLeaseManager};
 use super::models::AttemptExecutionStatus;
 use super::scheduler::{SchedulerDecision, SkeletonScheduler};
 #[cfg(feature = "sqlite-persistence")]
 use super::sqlite_runtime_repository::{
-    AuditLogEntry, SqliteRuntimeRepository, StepReportWriteResult,
+    AuditLogEntry, DeadLetterRow, RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository,
+    StepReportWriteResult, TimeoutPolicyConfig,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -303,6 +306,10 @@ impl ExecutionApiState {
 pub fn build_router(state: ExecutionApiState) -> Router {
     Router::new()
         .route("/v1/audit/logs", get(list_audit_logs))
+        .route("/v1/attempts/:attempt_id/retries", get(list_attempt_retries))
+        .route("/v1/dlq", get(list_dead_letters))
+        .route("/v1/dlq/:attempt_id", get(get_dead_letter))
+        .route("/v1/dlq/:attempt_id/replay", post(replay_dead_letter))
         .route("/v1/jobs", get(list_jobs).post(run_job))
         .route("/v1/jobs/run", post(run_job))
         .route("/v1/jobs/:thread_id", get(inspect_job))
@@ -366,11 +373,21 @@ fn normalize_request_id(raw: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-fn payload_hash(thread_id: &str, input: &str) -> String {
+fn payload_hash(
+    thread_id: &str,
+    input: &str,
+    timeout_policy: Option<&TimeoutPolicyRequest>,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(thread_id.as_bytes());
     hasher.update(b"|");
     hasher.update(input.as_bytes());
+    hasher.update(b"|");
+    if let Some(timeout_policy) = timeout_policy {
+        if let Ok(bytes) = serde_json::to_vec(timeout_policy) {
+            hasher.update(bytes);
+        }
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -380,6 +397,21 @@ fn json_hash(value: &Value) -> Result<String, ApiError> {
     let mut hasher = Sha256::new();
     hasher.update(&json);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(feature = "sqlite-persistence")]
+fn map_dead_letter_item(row: DeadLetterRow) -> DeadLetterItem {
+    DeadLetterItem {
+        attempt_id: row.attempt_id,
+        run_id: row.run_id,
+        attempt_no: row.attempt_no,
+        terminal_status: row.terminal_status,
+        reason: row.reason,
+        dead_at: row.dead_at.to_rfc3339(),
+        replay_status: row.replay_status,
+        replay_count: row.replay_count,
+        last_replayed_at: row.last_replayed_at.map(|value| value.to_rfc3339()),
+    }
 }
 
 fn bearer_token_from_headers(headers: &HeaderMap) -> Option<&str> {
@@ -564,6 +596,11 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
             resource_type: "interrupt",
             resource_id: Some((*interrupt_id).to_string()),
         }),
+        ("dlq", ["v1", "dlq", attempt_id, "replay"]) => Some(AuditTarget {
+            action: "dlq.replay",
+            resource_type: "attempt",
+            resource_id: Some((*attempt_id).to_string()),
+        }),
         _ => None,
     }
 }
@@ -651,9 +688,14 @@ fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> b
     let is_jobs_or_interrupts = path.starts_with("/v1/jobs") || path.starts_with("/v1/interrupts");
     let is_workers = path.starts_with("/v1/workers");
     let is_audit = path.starts_with("/v1/audit");
+    let is_attempts = path.starts_with("/v1/attempts");
+    let is_dlq = path.starts_with("/v1/dlq");
     match role {
         ApiRole::Operator => {
-            is_jobs_or_interrupts || (is_audit && *method == axum::http::Method::GET)
+            is_jobs_or_interrupts
+                || (is_audit && *method == axum::http::Method::GET)
+                || (is_attempts && *method == axum::http::Method::GET)
+                || is_dlq
         }
         ApiRole::Worker => {
             // Worker role can only call worker control/data-plane endpoints.
@@ -767,6 +809,87 @@ fn runtime_repo<'a>(
     })
 }
 
+#[cfg(feature = "sqlite-persistence")]
+fn parse_retry_policy(
+    request: Option<&RetryPolicyRequest>,
+    rid: &str,
+) -> Result<Option<RetryPolicyConfig>, ApiError> {
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    if request.backoff_ms <= 0 {
+        return Err(ApiError::bad_request("retry_policy.backoff_ms must be > 0")
+            .with_request_id(rid.to_string()));
+    }
+    let strategy = RetryStrategy::from_str(&request.strategy).ok_or_else(|| {
+        ApiError::bad_request("retry_policy.strategy must be one of: fixed|exponential")
+            .with_request_id(rid.to_string())
+    })?;
+    let max_backoff_ms = match request.max_backoff_ms {
+        Some(value) if value <= 0 => {
+            return Err(ApiError::bad_request("retry_policy.max_backoff_ms must be > 0")
+                .with_request_id(rid.to_string()))
+        }
+        Some(value) if value < request.backoff_ms => {
+            return Err(
+                ApiError::bad_request(
+                    "retry_policy.max_backoff_ms must be >= retry_policy.backoff_ms",
+                )
+                .with_request_id(rid.to_string()),
+            )
+        }
+        value => value,
+    };
+    let multiplier = match strategy {
+        RetryStrategy::Fixed => None,
+        RetryStrategy::Exponential => {
+            let value = request.multiplier.unwrap_or(2.0);
+            if value <= 1.0 {
+                return Err(ApiError::bad_request(
+                    "retry_policy.multiplier must be > 1.0 for exponential backoff",
+                )
+                .with_request_id(rid.to_string()));
+            }
+            Some(value)
+        }
+    };
+    Ok(Some(RetryPolicyConfig {
+        strategy,
+        backoff_ms: request.backoff_ms,
+        max_backoff_ms,
+        multiplier,
+        max_retries: request.max_retries,
+    }))
+}
+
+#[cfg(feature = "sqlite-persistence")]
+fn parse_timeout_policy(
+    request: Option<&TimeoutPolicyRequest>,
+    rid: &str,
+) -> Result<Option<TimeoutPolicyConfig>, ApiError> {
+    let Some(request) = request else {
+        return Ok(None);
+    };
+    if request.timeout_ms <= 0 {
+        return Err(ApiError::bad_request("timeout_policy.timeout_ms must be > 0")
+            .with_request_id(rid.to_string()));
+    }
+    let on_timeout_status = match request.on_timeout_status.trim().to_ascii_lowercase().as_str() {
+        "failed" => AttemptExecutionStatus::Failed,
+        "cancelled" => AttemptExecutionStatus::Cancelled,
+        _ => {
+            return Err(ApiError::bad_request(
+                "timeout_policy.on_timeout_status must be one of: failed|cancelled",
+            )
+            .with_request_id(rid.to_string()))
+        }
+    };
+    Ok(Some(TimeoutPolicyConfig {
+        timeout_ms: request.timeout_ms,
+        on_timeout_status,
+    }))
+}
+
 pub async fn run_job(
     State(state): State<ExecutionApiState>,
     headers: HeaderMap,
@@ -779,7 +902,7 @@ pub async fn run_job(
         .map_err(|e| e.with_request_id(rid.clone()))?;
 
     let input = req.input.unwrap_or_else(|| "API run".to_string());
-    let request_payload_hash = payload_hash(&req.thread_id, &input);
+    let request_payload_hash = payload_hash(&req.thread_id, &input, req.timeout_policy.as_ref());
     log::info!(
         "execution_run request_id={} thread_id={} checkpoint_id=none",
         rid,
@@ -857,14 +980,26 @@ pub async fn run_job(
     };
 
     #[cfg(feature = "sqlite-persistence")]
+    let timeout_policy = parse_timeout_policy(req.timeout_policy.as_ref(), &rid)?;
+
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        if timeout_policy.is_some() && state.runtime_repo.is_none() {
+            return Err(ApiError::internal("timeout_policy requires runtime repository")
+                .with_request_id(rid.clone()));
+        }
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
     if let Some(repo) = state.runtime_repo.as_ref() {
+        let attempt_id = format!("attempt-{}-{}", req.thread_id, uuid::Uuid::new_v4());
         let _ = repo.upsert_job(&req.thread_id, &status);
-        let _ = repo.enqueue_attempt(
-            &format!("attempt-{}-{}", req.thread_id, uuid::Uuid::new_v4()),
-            &req.thread_id,
-        );
+        let _ = repo.enqueue_attempt(&attempt_id, &req.thread_id);
+        if let Some(policy) = timeout_policy.as_ref() {
+            let _ = repo.set_attempt_timeout_policy(&attempt_id, policy);
+        }
         if !interrupts.is_empty() {
-            let attempt_id = format!("attempt-{}-main", req.thread_id);
+            let interrupt_attempt_id = format!("attempt-{}-main", req.thread_id);
             for (i, iv) in interrupts.iter().enumerate() {
                 let interrupt_id = format!("int-{}-{}", req.thread_id, i);
                 let value_json = serde_json::to_string(iv).unwrap_or_default();
@@ -872,7 +1007,7 @@ pub async fn run_job(
                     &interrupt_id,
                     &req.thread_id,
                     &req.thread_id,
-                    &attempt_id,
+                    &interrupt_attempt_id,
                     &value_json,
                 );
             }
@@ -1393,6 +1528,161 @@ pub async fn list_audit_logs(
     }
 }
 
+pub async fn list_attempt_retries(
+    State(state): State<ExecutionApiState>,
+    Path(attempt_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<AttemptRetryHistoryResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    if attempt_id.trim().is_empty() {
+        return Err(ApiError::bad_request("attempt_id must not be empty").with_request_id(rid));
+    }
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?.clone();
+        let snapshot = repo
+            .get_attempt_retry_history(&attempt_id)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
+            .ok_or_else(|| {
+                ApiError::not_found("attempt not found").with_request_id(rid.clone())
+            })?;
+        let history = snapshot
+            .history
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| AttemptRetryHistoryItem {
+                retry_no: (idx + 1) as u32,
+                attempt_no: row.attempt_no,
+                strategy: row.strategy,
+                backoff_ms: row.backoff_ms,
+                max_retries: row.max_retries,
+                scheduled_at: row.scheduled_at.to_rfc3339(),
+            })
+            .collect();
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: AttemptRetryHistoryResponse {
+                attempt_id: snapshot.attempt_id,
+                current_attempt_no: snapshot.current_attempt_no,
+                current_status: match snapshot.current_status {
+                    AttemptExecutionStatus::Queued => "queued".to_string(),
+                    AttemptExecutionStatus::Leased => "leased".to_string(),
+                    AttemptExecutionStatus::Running => "running".to_string(),
+                    AttemptExecutionStatus::RetryBackoff => "retry_backoff".to_string(),
+                    AttemptExecutionStatus::Completed => "completed".to_string(),
+                    AttemptExecutionStatus::Failed => "failed".to_string(),
+                    AttemptExecutionStatus::Cancelled => "cancelled".to_string(),
+                },
+                history,
+            },
+        }));
+    }
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let _ = attempt_id;
+        Err(ApiError::internal("attempt retry APIs require sqlite-persistence").with_request_id(rid))
+    }
+}
+
+pub async fn list_dead_letters(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<ListDeadLettersQuery>,
+) -> Result<Json<ApiEnvelope<DeadLetterListResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?.clone();
+        let limit = q.limit.unwrap_or(100).clamp(1, 500);
+        let status_filter = q.status.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let rows = repo
+            .list_dead_letters(status_filter, limit)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+        let entries = rows.into_iter().map(map_dead_letter_item).collect();
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: DeadLetterListResponse { entries },
+        }));
+    }
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let _ = q;
+        Err(ApiError::internal("dlq APIs require sqlite-persistence").with_request_id(rid))
+    }
+}
+
+pub async fn get_dead_letter(
+    State(state): State<ExecutionApiState>,
+    Path(attempt_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<DeadLetterItem>>, ApiError> {
+    let rid = request_id(&headers);
+    if attempt_id.trim().is_empty() {
+        return Err(ApiError::bad_request("attempt_id must not be empty").with_request_id(rid));
+    }
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?.clone();
+        let row = repo
+            .get_dead_letter(&attempt_id)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
+            .ok_or_else(|| ApiError::not_found("dead letter not found").with_request_id(rid.clone()))?;
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: map_dead_letter_item(row),
+        }));
+    }
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let _ = attempt_id;
+        Err(ApiError::internal("dlq APIs require sqlite-persistence").with_request_id(rid))
+    }
+}
+
+pub async fn replay_dead_letter(
+    State(state): State<ExecutionApiState>,
+    Path(attempt_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<DeadLetterReplayResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    if attempt_id.trim().is_empty() {
+        return Err(ApiError::bad_request("attempt_id must not be empty").with_request_id(rid));
+    }
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?.clone();
+        let row = repo
+            .replay_dead_letter(&attempt_id, Utc::now())
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("not found") {
+                    ApiError::not_found(msg).with_request_id(rid.clone())
+                } else if msg.contains("already replayed") {
+                    ApiError::conflict(msg).with_request_id(rid.clone())
+                } else {
+                    ApiError::internal(msg).with_request_id(rid.clone())
+                }
+            })?;
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: DeadLetterReplayResponse {
+                attempt_id: row.attempt_id,
+                status: "requeued".to_string(),
+                replay_count: row.replay_count,
+            },
+        }));
+    }
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let _ = attempt_id;
+        Err(ApiError::internal("dlq APIs require sqlite-persistence").with_request_id(rid))
+    }
+}
+
 pub async fn get_interrupt(
     State(state): State<ExecutionApiState>,
     Path(interrupt_id): Path<String>,
@@ -1909,6 +2199,8 @@ pub async fn worker_report_step(
         data: WorkerAckResponse {
             attempt_id: req.attempt_id,
             status: report_status,
+            next_retry_at: None,
+            next_attempt_no: None,
         },
     }))
 }
@@ -1928,6 +2220,7 @@ pub async fn worker_ack(
     #[cfg(feature = "sqlite-persistence")]
     {
         let repo = runtime_repo(&state, &rid)?;
+        let retry_policy = parse_retry_policy(req.retry_policy.as_ref(), &rid)?;
         let status = match req.terminal_status.as_str() {
             "completed" => AttemptExecutionStatus::Completed,
             "failed" => AttemptExecutionStatus::Failed,
@@ -1939,14 +2232,26 @@ pub async fn worker_ack(
                 .with_request_id(rid))
             }
         };
-        repo.mark_attempt_status(&req.attempt_id, status)
+        let outcome = repo
+            .ack_attempt(&req.attempt_id, status, retry_policy.as_ref(), Utc::now())
             .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+        let response_status = match outcome.status {
+            AttemptExecutionStatus::RetryBackoff => "retry_scheduled".to_string(),
+            AttemptExecutionStatus::Completed => "completed".to_string(),
+            AttemptExecutionStatus::Failed => "failed".to_string(),
+            AttemptExecutionStatus::Cancelled => "cancelled".to_string(),
+            AttemptExecutionStatus::Queued => "queued".to_string(),
+            AttemptExecutionStatus::Leased => "leased".to_string(),
+            AttemptExecutionStatus::Running => "running".to_string(),
+        };
         return Ok(Json(ApiEnvelope {
             meta: ApiMeta::ok(),
             request_id: rid,
             data: WorkerAckResponse {
                 attempt_id: req.attempt_id,
-                status: req.terminal_status,
+                status: response_status,
+                next_retry_at: outcome.next_retry_at.map(|value| value.to_rfc3339()),
+                next_attempt_no: Some(outcome.next_attempt_no),
             },
         }));
     }
@@ -1970,7 +2275,10 @@ mod tests {
     use crate::graph::{
         function_node, interrupt, GraphError, InMemorySaver, MessagesState, StateGraph, END, START,
     };
+    use crate::kernel::runtime::models::AttemptExecutionStatus;
     use crate::kernel::runtime::repository::RuntimeRepository;
+    #[cfg(feature = "sqlite-persistence")]
+    use crate::kernel::runtime::sqlite_runtime_repository::TimeoutPolicyConfig;
     use crate::schemas::messages::Message;
 
     use super::{build_router, ApiRole, ExecutionApiState};
@@ -3238,6 +3546,350 @@ mod tests {
             .unwrap();
         let ack_resp = router.oneshot(ack_req).await.unwrap();
         assert_eq!(ack_resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn worker_failed_ack_schedules_retry_and_history_is_queryable() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.enqueue_attempt("attempt-worker-retry-1", "run-worker-retry-1")
+            .expect("enqueue retry attempt");
+        let router = build_router(state);
+
+        let poll_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-retry-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let poll_resp = router.clone().oneshot(poll_req).await.unwrap();
+        assert_eq!(poll_resp.status(), StatusCode::OK);
+
+        let ack_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/worker-retry-1/ack")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "attempt_id": "attempt-worker-retry-1",
+                    "terminal_status": "failed",
+                    "retry_policy": {
+                        "strategy": "fixed",
+                        "backoff_ms": 1000,
+                        "max_retries": 2
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let ack_resp = router.clone().oneshot(ack_req).await.unwrap();
+        assert_eq!(ack_resp.status(), StatusCode::OK);
+        let ack_body = axum::body::to_bytes(ack_resp.into_body(), usize::MAX)
+            .await
+            .expect("ack body");
+        let ack_json: serde_json::Value = serde_json::from_slice(&ack_body).expect("ack json");
+        assert_eq!(ack_json["data"]["status"], "retry_scheduled");
+        assert_eq!(ack_json["data"]["next_attempt_no"], 2);
+        assert!(ack_json["data"]["next_retry_at"].is_string());
+
+        let ready_now = repo
+            .list_dispatchable_attempts(Utc::now(), 10)
+            .expect("list dispatchable now");
+        assert!(!ready_now
+            .iter()
+            .any(|row| row.attempt_id == "attempt-worker-retry-1"));
+
+        let ready_later = repo
+            .list_dispatchable_attempts(Utc::now() + Duration::seconds(2), 10)
+            .expect("list dispatchable later");
+        assert!(ready_later
+            .iter()
+            .any(|row| row.attempt_id == "attempt-worker-retry-1"));
+
+        let history_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/attempts/attempt-worker-retry-1/retries")
+            .body(Body::empty())
+            .unwrap();
+        let history_resp = router.oneshot(history_req).await.unwrap();
+        assert_eq!(history_resp.status(), StatusCode::OK);
+        let history_body = axum::body::to_bytes(history_resp.into_body(), usize::MAX)
+            .await
+            .expect("history body");
+        let history_json: serde_json::Value =
+            serde_json::from_slice(&history_body).expect("history json");
+        assert_eq!(history_json["data"]["current_status"], "retry_backoff");
+        assert_eq!(history_json["data"]["current_attempt_no"], 2);
+        assert_eq!(history_json["data"]["history"][0]["retry_no"], 1);
+        assert_eq!(history_json["data"]["history"][0]["attempt_no"], 2);
+        assert_eq!(history_json["data"]["history"][0]["strategy"], "fixed");
+        assert_eq!(history_json["data"]["history"][0]["backoff_ms"], 1000);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn worker_poll_tick_transitions_timed_out_attempts() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.enqueue_attempt("attempt-worker-timeout-1", "run-worker-timeout-1")
+            .expect("enqueue timeout attempt");
+        repo.set_attempt_timeout_policy(
+            "attempt-worker-timeout-1",
+            &TimeoutPolicyConfig {
+                timeout_ms: 1_000,
+                on_timeout_status: AttemptExecutionStatus::Failed,
+            },
+        )
+        .expect("set timeout policy");
+        let router = build_router(state);
+
+        let first_poll_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-timeout-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_poll_resp = router.clone().oneshot(first_poll_req).await.unwrap();
+        assert_eq!(first_poll_resp.status(), StatusCode::OK);
+
+        repo.set_attempt_started_at_for_test(
+            "attempt-worker-timeout-1",
+            Some(Utc::now() - Duration::seconds(5)),
+        )
+        .expect("backdate started_at");
+
+        let second_poll_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-timeout-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_poll_resp = router.oneshot(second_poll_req).await.unwrap();
+        assert_eq!(second_poll_resp.status(), StatusCode::OK);
+        let second_poll_body = axum::body::to_bytes(second_poll_resp.into_body(), usize::MAX)
+            .await
+            .expect("second poll body");
+        let second_poll_json: serde_json::Value =
+            serde_json::from_slice(&second_poll_body).expect("second poll json");
+        assert_eq!(second_poll_json["data"]["decision"], "noop");
+
+        assert!(repo
+            .get_lease_for_attempt("attempt-worker-timeout-1")
+            .expect("read timeout lease")
+            .is_none());
+        let (_, status) = repo
+            .get_attempt_status("attempt-worker-timeout-1")
+            .expect("read timeout status")
+            .expect("timeout attempt exists");
+        assert_eq!(status, AttemptExecutionStatus::Failed);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn final_failed_attempts_are_visible_in_dlq_and_replayable_via_api() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.enqueue_attempt("attempt-dlq-api-1", "run-dlq-api-1")
+            .expect("enqueue dlq api attempt");
+        let router = build_router(state);
+
+        let poll_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-dlq-api-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let poll_resp = router.clone().oneshot(poll_req).await.unwrap();
+        assert_eq!(poll_resp.status(), StatusCode::OK);
+
+        let ack_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/worker-dlq-api-1/ack")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "attempt_id": "attempt-dlq-api-1",
+                    "terminal_status": "failed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let ack_resp = router.clone().oneshot(ack_req).await.unwrap();
+        assert_eq!(ack_resp.status(), StatusCode::OK);
+        let ack_body = axum::body::to_bytes(ack_resp.into_body(), usize::MAX)
+            .await
+            .expect("ack body");
+        let ack_json: serde_json::Value = serde_json::from_slice(&ack_body).expect("ack json");
+        assert_eq!(ack_json["data"]["status"], "failed");
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/dlq?status=pending")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .expect("dlq list body");
+        let list_json: serde_json::Value = serde_json::from_slice(&list_body).expect("dlq list json");
+        assert_eq!(list_json["data"]["entries"][0]["attempt_id"], "attempt-dlq-api-1");
+        assert_eq!(list_json["data"]["entries"][0]["replay_status"], "pending");
+
+        let detail_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/dlq/attempt-dlq-api-1")
+            .body(Body::empty())
+            .unwrap();
+        let detail_resp = router.clone().oneshot(detail_req).await.unwrap();
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = axum::body::to_bytes(detail_resp.into_body(), usize::MAX)
+            .await
+            .expect("dlq detail body");
+        let detail_json: serde_json::Value =
+            serde_json::from_slice(&detail_body).expect("dlq detail json");
+        assert_eq!(detail_json["data"]["terminal_status"], "failed");
+
+        let replay_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/dlq/attempt-dlq-api-1/replay")
+            .body(Body::empty())
+            .unwrap();
+        let replay_resp = router.clone().oneshot(replay_req).await.unwrap();
+        assert_eq!(replay_resp.status(), StatusCode::OK);
+        let replay_body = axum::body::to_bytes(replay_resp.into_body(), usize::MAX)
+            .await
+            .expect("dlq replay body");
+        let replay_json: serde_json::Value =
+            serde_json::from_slice(&replay_body).expect("dlq replay json");
+        assert_eq!(replay_json["data"]["status"], "requeued");
+        assert_eq!(replay_json["data"]["replay_count"], 1);
+
+        let replay_again_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/dlq/attempt-dlq-api-1/replay")
+            .body(Body::empty())
+            .unwrap();
+        let replay_again_resp = router.clone().oneshot(replay_again_req).await.unwrap();
+        assert_eq!(replay_again_resp.status(), StatusCode::CONFLICT);
+
+        let second_poll_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "worker-dlq-api-2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_poll_resp = router.oneshot(second_poll_req).await.unwrap();
+        assert_eq!(second_poll_resp.status(), StatusCode::OK);
+        let second_poll_body = axum::body::to_bytes(second_poll_resp.into_body(), usize::MAX)
+            .await
+            .expect("second poll body");
+        let second_poll_json: serde_json::Value =
+            serde_json::from_slice(&second_poll_body).expect("second poll json");
+        assert_eq!(second_poll_json["data"]["decision"], "dispatched");
+        assert_eq!(second_poll_json["data"]["attempt_id"], "attempt-dlq-api-1");
+
+        let dlq_row = repo
+            .get_dead_letter("attempt-dlq-api-1")
+            .expect("read dlq row")
+            .expect("dlq row exists");
+        assert_eq!(dlq_row.replay_status, "replayed");
+        assert_eq!(dlq_row.replay_count, 1);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_worker_role_cannot_access_dlq_endpoints() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "worker-key-dlq",
+                    "worker-secret-dlq",
+                    true,
+                    ApiRole::Worker,
+                );
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.enqueue_attempt("attempt-dlq-rbac", "run-dlq-rbac")
+            .expect("enqueue dlq rbac attempt");
+        repo.ack_attempt("attempt-dlq-rbac", AttemptExecutionStatus::Failed, None, Utc::now())
+            .expect("move attempt to dlq");
+        let router = build_router(state);
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/dlq")
+            .header("x-api-key-id", "worker-key-dlq")
+            .header("x-api-key", "worker-secret-dlq")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::FORBIDDEN);
+
+        let replay_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/dlq/attempt-dlq-rbac/replay")
+            .header("x-api-key-id", "worker-key-dlq")
+            .header("x-api-key", "worker-secret-dlq")
+            .body(Body::empty())
+            .unwrap();
+        let replay_resp = router.oneshot(replay_req).await.unwrap();
+        assert_eq!(replay_resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
+    async fn auth_worker_role_cannot_access_attempt_retry_history() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_record_with_role(
+                    "worker-key-retry",
+                    "worker-secret-retry",
+                    true,
+                    ApiRole::Worker,
+                );
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.enqueue_attempt("attempt-worker-retry-rbac", "run-worker-retry-rbac")
+            .expect("enqueue retry rbac attempt");
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/attempts/attempt-worker-retry-rbac/retries")
+            .header("x-api-key-id", "worker-key-retry")
+            .header("x-api-key", "worker-secret-retry")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[cfg(feature = "sqlite-persistence")]

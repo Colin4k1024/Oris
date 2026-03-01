@@ -30,6 +30,7 @@ pub struct RunJobRequest {
     pub thread_id: String,
     pub input: Option<String>,
     pub idempotency_key: Option<String>,
+    pub timeout_policy: Option<TimeoutPolicyRequest>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -145,6 +146,22 @@ pub struct WorkerReportStepRequest {
 pub struct WorkerAckRequest {
     pub attempt_id: String,
     pub terminal_status: String,
+    pub retry_policy: Option<RetryPolicyRequest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RetryPolicyRequest {
+    pub strategy: String,
+    pub backoff_ms: i64,
+    pub max_backoff_ms: Option<i64>,
+    pub multiplier: Option<f64>,
+    pub max_retries: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimeoutPolicyRequest {
+    pub timeout_ms: i64,
+    pub on_timeout_status: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -158,6 +175,8 @@ pub struct WorkerLeaseResponse {
 pub struct WorkerAckResponse {
     pub attempt_id: String,
     pub status: String,
+    pub next_retry_at: Option<String>,
+    pub next_attempt_no: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -193,6 +212,12 @@ pub struct ListAuditLogsQuery {
     pub action: Option<String>,
     pub from_ms: Option<i64>,
     pub to_ms: Option<i64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct ListDeadLettersQuery {
+    pub status: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -253,4 +278,47 @@ pub struct TimelineExportResponse {
     pub thread_id: String,
     pub timeline: Vec<JobTimelineItem>,
     pub history: Vec<JobHistoryItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptRetryHistoryItem {
+    pub retry_no: u32,
+    pub attempt_no: u32,
+    pub strategy: String,
+    pub backoff_ms: i64,
+    pub max_retries: u32,
+    pub scheduled_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AttemptRetryHistoryResponse {
+    pub attempt_id: String,
+    pub current_attempt_no: u32,
+    pub current_status: String,
+    pub history: Vec<AttemptRetryHistoryItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeadLetterItem {
+    pub attempt_id: String,
+    pub run_id: String,
+    pub attempt_no: u32,
+    pub terminal_status: String,
+    pub reason: Option<String>,
+    pub dead_at: String,
+    pub replay_status: String,
+    pub replay_count: u32,
+    pub last_replayed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeadLetterListResponse {
+    pub entries: Vec<DeadLetterItem>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeadLetterReplayResponse {
+    pub attempt_id: String,
+    pub status: String,
+    pub replay_count: u32,
 }

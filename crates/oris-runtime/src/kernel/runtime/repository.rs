@@ -38,6 +38,11 @@ pub trait RuntimeRepository: Send + Sync {
     /// Expire stale leases and requeue affected attempts.
     fn expire_leases_and_requeue(&self, now: DateTime<Utc>) -> Result<u64, KernelError>;
 
+    /// Transition attempts that exceeded their configured execution timeout.
+    fn transition_timed_out_attempts(&self, _now: DateTime<Utc>) -> Result<u64, KernelError> {
+        Ok(0)
+    }
+
     /// Returns latest persisted sequence for a run (used by replay wiring).
     fn latest_seq_for_run(&self, run_id: &RunId) -> Result<Seq, KernelError>;
 }

@@ -297,15 +297,26 @@ Optional auth secrets: `ORIS_API_AUTH_BEARER_TOKEN`, `ORIS_API_AUTH_API_KEY`
 Optional keyed API key id: `ORIS_API_AUTH_API_KEY_ID` (use with `ORIS_API_AUTH_API_KEY`)
 Bad backend config/health now fails startup with actionable error and non-zero exit.
 When `ORIS_API_AUTH_API_KEY_ID` is set with SQLite persistence, the key record is persisted in `runtime_api_keys`.
-RBAC baseline: `admin` can access all APIs; `operator` can access `/v1/jobs*`, `/v1/interrupts*`, and `GET /v1/audit/logs`; `worker` can access `/v1/workers*`.
+RBAC baseline: `admin` can access all APIs; `operator` can access `/v1/jobs*`, `/v1/interrupts*`, `/v1/dlq*`, `GET /v1/audit/logs`, and `GET /v1/attempts/:attempt_id/retries`; `worker` can access `/v1/workers*`.
 
 Audit API:
 
 - `GET /v1/audit/logs` — list control-plane audit logs (query: `request_id`, `action`, `from_ms`, `to_ms`, `limit`)
 
+Attempt retry API:
+
+- `GET /v1/attempts/:attempt_id/retries` — inspect retry scheduling history for an attempt
+
+Dead-letter queue API:
+
+- `GET /v1/dlq` — list dead-lettered attempts (query: `status`, `limit`)
+- `GET /v1/dlq/:attempt_id` — inspect a dead-lettered attempt
+- `POST /v1/dlq/:attempt_id/replay` — requeue a dead-lettered attempt for another dispatch cycle
+
 Execution server endpoints (v1 runtime-bin):
 
 - `POST /v1/jobs/run`
+  Optional request field: `timeout_policy` with `{ "timeout_ms": <positive>, "on_timeout_status": "failed"|"cancelled" }`
 - `GET /v1/jobs` — list jobs (query: `status`, `limit`, `offset`)
 - `GET /v1/jobs/:thread_id`
 - `GET /v1/jobs/:thread_id/detail` — run drill-down (status, attempts, checkpoint, pending interrupt)
@@ -330,16 +341,18 @@ Worker endpoints (Phase 3 baseline):
 - `POST /v1/workers/:worker_id/heartbeat`
 - `POST /v1/workers/:worker_id/extend-lease`
 - `POST /v1/workers/:worker_id/report-step`
-- `POST /v1/workers/:worker_id/ack`
+- `POST /v1/workers/:worker_id/ack` — accepts optional `retry_policy` (`fixed` or `exponential`) on failed ack to schedule bounded retries
 
 Lease/failover/backpressure baseline behavior:
 
 - `poll` first runs a lease-expiry tick (`expire_leases_and_requeue`) before dispatching.
+- The same tick also transitions attempts that exceeded `started_at + timeout_ms` into their configured terminal status (`failed` or `cancelled`) before any requeue/dispatch.
 - `poll` enforces per-worker active-lease guardrail via `max_active_leases` (request) or server default.
 - `poll` returns `decision` as `dispatched`, `noop`, or `backpressure`.
 - `heartbeat` / `extend-lease` enforce lease ownership (`worker_id` must match lease owner), otherwise `409 conflict`.
 - Expired leases are requeued automatically and become dispatchable again on subsequent polls.
-- `ack` marks terminal attempt status (`completed` / `failed` / `cancelled`) with idempotent update semantics.
+- `ack` marks terminal attempt status (`completed` / `failed` / `cancelled`); failed ack can optionally schedule retry backoff and returns `retry_scheduled` with `next_retry_at`.
+- Final failed attempts (including timeout-to-`failed`) are persisted into the DLQ and can be replayed through `/v1/dlq/:attempt_id/replay`.
 
 Run idempotency contract (`POST /v1/jobs/run`):
 

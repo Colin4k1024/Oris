@@ -121,11 +121,75 @@ jobs:
           command: test
           args: -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::security_ -- --nocapture --test-threads=1
 
+  runtime_backends:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - sqlite
+          - postgres
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_BUILD_JOBS: 2
+      ORIS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/oris_test
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: oris_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d oris_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-runtime-backends-${{ matrix.backend }}"
+      - name: Run crash recovery regression
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime graph::persistence::tests::time_travel_tests::test_resume_from_latest_checkpoint -- --nocapture --test-threads=1
+      - name: Run sqlite runtime regression suite
+        if: matrix.backend == 'sqlite'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --features "sqlite-persistence" kernel::runtime::sqlite_runtime_repository::tests::schema_migration -- --nocapture --test-threads=1
+      - name: Run postgres store regression suite
+        if: matrix.backend == 'postgres'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --features "kernel-postgres" kernel::postgres_store::tests::postgres_ -- --nocapture --test-threads=1
+      - name: Run postgres runtime regression suite
+        if: matrix.backend == 'postgres'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::postgres_runtime_repository::tests:: -- --nocapture --test-threads=1
+
   publish_crate:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
       - build
       - security
+      - runtime_backends
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
