@@ -130,6 +130,33 @@ jobs:
           command: test
           args: -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::security_ -- --nocapture --test-threads=1
 
+  supply_chain:
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-supply-chain"
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Run supply-chain policy checks
+        shell: bash
+        run: |
+          bash scripts/run_supply_chain_checks.sh
+
   runtime_backends:
     runs-on: ubuntu-latest
     strategy:
@@ -198,6 +225,7 @@ jobs:
     needs:
       - build
       - security
+      - supply_chain
       - runtime_backends
     runs-on: ubuntu-latest
     steps:
