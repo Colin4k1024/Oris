@@ -4,7 +4,7 @@ use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::{json, Value};
 
 #[derive(Debug, Parser)]
-#[command(name = "__CRATE_NAME__")]
+#[command(name = "{{project-name}}")]
 #[command(about = "Operator CLI for Oris execution APIs")]
 struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:8080")]

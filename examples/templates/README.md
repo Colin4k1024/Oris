@@ -1,6 +1,6 @@
 # Example Template Matrix
 
-This directory contains reusable project skeletons for external Oris users.
+This directory contains reusable `cargo-generate` project skeletons for external Oris users.
 
 ## Templates
 
@@ -12,18 +12,40 @@ This directory contains reusable project skeletons for external Oris users.
 
 ## Scaffold command
 
-From repository root:
+Install the standard template tool once:
+
+```bash
+cargo install cargo-generate
+```
+
+Generate directly from a local checkout:
+
+```bash
+cargo generate --path examples/templates/axum_service --name my-oris-service
+cargo generate --path examples/templates/worker_only --name my-oris-worker
+cargo generate --path examples/templates/operator_cli --name my-oris-ops
+```
+
+Generate from GitHub without cloning the repo first:
+
+```bash
+cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/axum_service --name my-oris-service
+cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/worker_only --name my-oris-worker
+cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/operator_cli --name my-oris-ops
+```
+
+## Repository-local fallback
+
+If you are contributing inside this repository and do not want to install `cargo-generate`, use the compatibility renderer:
 
 ```bash
 bash scripts/scaffold_example_template.sh <template> <target-dir>
 ```
 
-Examples:
+The compatibility script renders the same `{{project-name}}` / `{{crate_name}}` placeholders used by `cargo-generate`.
 
-```bash
-bash scripts/scaffold_example_template.sh axum_service /tmp/my-oris-service
-bash scripts/scaffold_example_template.sh worker_only /tmp/my-oris-worker
-bash scripts/scaffold_example_template.sh operator_cli /tmp/my-oris-ops
-```
+## Run after scaffold
 
-The script replaces `__CRATE_NAME__` automatically based on `<target-dir>` basename.
+- `axum_service`: `cargo run`
+- `worker_only`: `cargo run`
+- `operator_cli`: `cargo run -- --help`

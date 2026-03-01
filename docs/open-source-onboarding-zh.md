@@ -64,12 +64,13 @@ curl -s http://127.0.0.1:8080/v1/jobs/starter-1
 curl -s http://127.0.0.1:8080/v1/jobs
 ```
 
-如果希望直接生成你自己的项目骨架：
+如果希望直接生成你自己的项目骨架，推荐使用 `cargo-generate`：
 
 ```bash
-bash scripts/scaffold_example_template.sh axum_service /tmp/my-oris-service
-bash scripts/scaffold_example_template.sh worker_only /tmp/my-oris-worker
-bash scripts/scaffold_example_template.sh operator_cli /tmp/my-oris-ops
+cargo install cargo-generate
+cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/axum_service --name my-oris-service
+cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/worker_only --name my-oris-worker
+cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/operator_cli --name my-oris-ops
 ```
 
 ## 3. 如何接入现有 Rust 服务

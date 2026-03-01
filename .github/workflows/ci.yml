@@ -101,6 +101,10 @@ jobs:
         with:
           command: test
           args: -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::scheduler_stress_ -- --nocapture --test-threads=1
+      - name: Verify cargo-generate templates
+        shell: bash
+        run: |
+          bash scripts/verify_cargo_generate_templates.sh
 
   security:
     runs-on: ubuntu-latest

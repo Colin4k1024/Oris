@@ -64,7 +64,7 @@ This guide explains how to integrate Oris into common Rust stacks and how downst
 
 - Runtime examples: `crates/oris-runtime/examples/`
 - Starter project: `examples/oris_starter_axum`
-- Template matrix: `examples/templates/`
+- Template matrix: `examples/templates/` (`cargo generate --path ... --name ...`)
 - Durable execution docs: `docs/durable-execution.md`
 - Kernel contract docs: `docs/kernel-api.md`
 

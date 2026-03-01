@@ -13,6 +13,10 @@ Templates:
 EOF
 }
 
+escape_sed_replacement() {
+  printf '%s' "$1" | sed -e 's/[\/&|]/\\&/g'
+}
+
 if [[ $# -ne 2 ]]; then
   usage
   exit 1
@@ -34,31 +38,32 @@ if [[ -e "${target_dir}" ]]; then
   exit 1
 fi
 
-crate_name="$(basename "${target_dir}")"
+project_name="$(basename "${target_dir}")"
+crate_name="$(printf '%s' "${project_name}" | tr '[:upper:]-' '[:lower:]_' | tr -c '[:alnum:]_' '_')"
+project_name_escaped="$(escape_sed_replacement "${project_name}")"
+crate_name_escaped="$(escape_sed_replacement "${crate_name}")"
 mkdir -p "${target_dir}"
 
 while IFS= read -r -d '' src; do
   rel="${src#${template_dir}/}"
   dst_rel="${rel}"
-  use_template=0
   if [[ "${rel}" == *.tmpl ]]; then
     dst_rel="${rel%.tmpl}"
-    use_template=1
   fi
   dst="${target_dir}/${dst_rel}"
   mkdir -p "$(dirname "${dst}")"
-
-  if [[ ${use_template} -eq 1 ]]; then
-    sed "s/__CRATE_NAME__/${crate_name}/g" "${src}" > "${dst}"
-  else
-    cp "${src}" "${dst}"
-  fi
+  sed \
+    -e "s|__CRATE_NAME__|${crate_name_escaped}|g" \
+    -e "s|{{project-name}}|${project_name_escaped}|g" \
+    -e "s|{{crate_name}}|${crate_name_escaped}|g" \
+    "${src}" > "${dst}"
 done < <(find "${template_dir}" -type f -print0)
 
 cat <<EOF
 Scaffold created:
   template: ${template}
   target:   ${target_dir}
+  project:  ${project_name}
   crate:    ${crate_name}
 
 Next steps:
