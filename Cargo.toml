@@ -6,4 +6,5 @@ members = [
     "examples/oris_starter_axum",
     "examples/oris_worker_tokio",
     "examples/oris_operator_cli",
+    "examples/plugin_reference",
 ]
