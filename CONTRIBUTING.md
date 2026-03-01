@@ -49,6 +49,8 @@ cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kern
 cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::metrics_endpoint_is_scrape_ready_and_exposes_runtime_metrics -- --nocapture --test-threads=1
 cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::observability_assets_reference_metrics_present_in_sample_workload -- --nocapture --test-threads=1
 cargo test -p oris-runtime agent::checkpoint::tests:: -- --nocapture
+cargo test -p oris-runtime graph::plugin::tests:: -- --nocapture
+cargo check -p oris-runtime --example custom_node_plugins --offline
 bash scripts/verify_cargo_generate_templates.sh
 ```
 

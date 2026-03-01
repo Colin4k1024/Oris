@@ -7,6 +7,7 @@ use super::{
     error::GraphError,
     node::{Node, SubgraphNode, SubgraphNodeWithTransform},
     persistence::{checkpointer::CheckpointerBox, store::StoreBox},
+    plugin::NodePluginRegistry,
     state::{State, StateUpdate},
 };
 
@@ -58,24 +59,39 @@ impl<S: State + 'static> StateGraph<S> {
         name: impl Into<String>,
         node: N,
     ) -> Result<&mut Self, GraphError> {
+        self.add_shared_node(name, Arc::new(node))
+    }
+
+    /// Add a pre-built shared node instance to the graph.
+    ///
+    /// This is mainly used by runtime plugin registries that construct nodes
+    /// dynamically and return trait objects.
+    pub fn add_shared_node(
+        &mut self,
+        name: impl Into<String>,
+        node: Arc<dyn Node<S>>,
+    ) -> Result<&mut Self, GraphError> {
         let name = name.into();
-
-        if self.nodes.contains_key(&name) {
-            return Err(GraphError::CompilationError(format!(
-                "Node '{}' already exists",
-                name
-            )));
-        }
-
-        if name == START || name == END {
-            return Err(GraphError::CompilationError(format!(
-                "Cannot add node with reserved name '{}'",
-                name
-            )));
-        }
-
-        self.nodes.insert(name, Arc::new(node));
+        self.validate_new_node_name(&name)?;
+        self.nodes.insert(name, node);
         Ok(self)
+    }
+
+    /// Add a node by resolving a registered runtime plugin and config payload.
+    ///
+    /// The plugin is responsible for validating the payload and constructing a
+    /// concrete node implementation.
+    pub fn add_plugin_node(
+        &mut self,
+        name: impl Into<String>,
+        plugin_type: &str,
+        config: impl Into<serde_json::Value>,
+        registry: &NodePluginRegistry<S>,
+    ) -> Result<&mut Self, GraphError> {
+        let name = name.into();
+        let config = config.into();
+        let node = registry.create_node(&name, plugin_type, &config)?;
+        self.add_shared_node(name, node)
     }
 
     /// Add a subgraph as a node (shared state type)
@@ -258,6 +274,24 @@ impl<S: State + 'static> StateGraph<S> {
         // When a subgraph is invoked with config, it will use the parent's
         // checkpointer if available. This matches Python LangGraph behavior.
         Ok(nodes)
+    }
+
+    fn validate_new_node_name(&self, name: &str) -> Result<(), GraphError> {
+        if self.nodes.contains_key(name) {
+            return Err(GraphError::CompilationError(format!(
+                "Node '{}' already exists",
+                name
+            )));
+        }
+
+        if name == START || name == END {
+            return Err(GraphError::CompilationError(format!(
+                "Cannot add node with reserved name '{}'",
+                name
+            )));
+        }
+
+        Ok(())
     }
 
     /// Validate the graph structure

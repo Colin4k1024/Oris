@@ -235,7 +235,7 @@ The following modules are the **stable surface** for building on Oris. Prefer th
 
 | Entry | Purpose |
 |-------|---------|
-| `oris_runtime::graph` | State graphs, execution, persistence, interrupts, trace (`StateGraph`, `MessagesState`, checkpointer, `interrupt`/resume, `InvokeResult.trace`, `TraceEvent`) |
+| `oris_runtime::graph` | State graphs, execution, persistence, interrupts, trace (`StateGraph`, `MessagesState`, checkpointer, `NodePluginRegistry`, `interrupt`/resume, `InvokeResult.trace`, `TraceEvent`) |
 | `oris_runtime::agent` | Agent loop, tools, Deep Agent (planning, skills) |
 | `oris_runtime::tools` | Tool trait and built-in tools |
 
@@ -244,6 +244,9 @@ State types (e.g. `graph::MessagesState`, `graph::State`) are part of the stable
 For human-in-the-loop checkpoint persistence in async runtimes, `oris_runtime::agent::AgentCheckpointer`
 now exposes async-compatible `put_async` / `get_async` helpers while keeping the existing synchronous
 `put` / `get` methods for backward compatibility.
+
+For runtime-extensible graphs, `oris_runtime::graph::NodePluginRegistry` and `typed_node_plugin`
+allow you to register custom node factories and add them to a `StateGraph` from validated JSON config.
 
 ## Install and config
 
@@ -270,6 +273,7 @@ Common environment variables:
 ## Examples and docs
 
 - [Hello World graph](crates/oris-runtime/examples/graph_hello_world.rs)
+- [Custom node plugins](crates/oris-runtime/examples/custom_node_plugins.rs) — register a typed runtime plugin and add a node from JSON config.
 - [Starter service project (Axum)](examples/oris_starter_axum/README.md) — standalone workspace example for integrating Oris into a Rust backend.
 - [Template matrix (service/worker/operator)](examples/templates/README.md) — `cargo-generate`-ready skeletons for external users.
 

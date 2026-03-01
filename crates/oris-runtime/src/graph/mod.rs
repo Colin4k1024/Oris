@@ -6,6 +6,7 @@ mod graph;
 mod interrupts;
 mod node;
 mod persistence;
+mod plugin;
 mod state;
 mod step_adapter;
 mod step_result;
@@ -18,6 +19,7 @@ pub use edge::*;
 pub use error::*;
 pub use graph::*;
 pub use node::*;
+pub use plugin::*;
 pub use state::*;
 // StreamEvent and StreamOptions are re-exported from compiled module
 pub use compiled::{StreamEvent, StreamOptions};
