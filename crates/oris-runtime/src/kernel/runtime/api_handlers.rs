@@ -32,18 +32,17 @@ use super::api_models::{
     JobHistoryResponse, JobListItem, JobStateResponse, JobTimelineItem, JobTimelineResponse,
     ListAuditLogsQuery, ListDeadLettersQuery, ListJobsResponse, RejectInterruptRequest,
     ReplayJobRequest, ResumeInterruptRequest, ResumeJobRequest, RetryPolicyRequest, RunJobRequest,
-    RunJobResponse, TimeoutPolicyRequest, TimelineExportResponse, TraceContextResponse,
-    WorkerAckRequest,
-    WorkerAckResponse, WorkerExtendLeaseRequest, WorkerHeartbeatRequest, WorkerLeaseResponse,
-    WorkerPollRequest, WorkerPollResponse, WorkerReportStepRequest,
+    RunJobResponse, TimelineExportResponse, TimeoutPolicyRequest, TraceContextResponse,
+    WorkerAckRequest, WorkerAckResponse, WorkerExtendLeaseRequest, WorkerHeartbeatRequest,
+    WorkerLeaseResponse, WorkerPollRequest, WorkerPollResponse, WorkerReportStepRequest,
 };
 use super::lease::{LeaseConfig, LeaseManager, RepositoryLeaseManager};
 use super::models::AttemptExecutionStatus;
 use super::repository::RuntimeRepository;
 #[cfg(feature = "sqlite-persistence")]
 use super::sqlite_runtime_repository::{
-    AttemptTraceContextRow, AuditLogEntry, DeadLetterRow, RetryPolicyConfig, RetryStrategy,
-    SqliteRuntimeRepository, StepReportWriteResult, TimeoutPolicyConfig,
+    AttemptTraceContextRow, AuditLogEntry, DeadLetterRow, ReplayEffectClaim, RetryPolicyConfig,
+    RetryStrategy, SqliteRuntimeRepository, StepReportWriteResult, TimeoutPolicyConfig,
 };
 use tracing::{info_span, Instrument};
 
@@ -269,7 +268,9 @@ impl RuntimeMetrics {
         };
 
         let mut out = String::new();
-        out.push_str("# HELP oris_runtime_queue_depth Number of dispatchable attempts currently queued.\n");
+        out.push_str(
+            "# HELP oris_runtime_queue_depth Number of dispatchable attempts currently queued.\n",
+        );
         out.push_str("# TYPE oris_runtime_queue_depth gauge\n");
         out.push_str(&format!("oris_runtime_queue_depth {}\n", queue_depth));
         out.push_str("# HELP oris_runtime_lease_operations_total Total lease-sensitive operations observed.\n");
@@ -286,7 +287,10 @@ impl RuntimeMetrics {
         ));
         out.push_str("# HELP oris_runtime_lease_conflict_rate Lease conflicts divided by lease operations.\n");
         out.push_str("# TYPE oris_runtime_lease_conflict_rate gauge\n");
-        out.push_str(&format!("oris_runtime_lease_conflict_rate {:.6}\n", conflict_rate));
+        out.push_str(&format!(
+            "oris_runtime_lease_conflict_rate {:.6}\n",
+            conflict_rate
+        ));
         out.push_str("# HELP oris_runtime_backpressure_total Total worker poll backpressure decisions by reason.\n");
         out.push_str("# TYPE oris_runtime_backpressure_total counter\n");
         out.push_str(&format!(
@@ -361,7 +365,10 @@ fn render_histogram(
             metric_name, upper_bound, buckets[idx]
         ));
     }
-    out.push_str(&format!("{}_bucket{{le=\"+Inf\"}} {}\n", metric_name, count));
+    out.push_str(&format!(
+        "{}_bucket{{le=\"+Inf\"}} {}\n",
+        metric_name, count
+    ));
     out.push_str(&format!("{}_sum {:.6}\n", metric_name, sum));
     out.push_str(&format!("{}_count {}\n", metric_name, count));
 }
@@ -580,7 +587,10 @@ impl ExecutionApiState {
 pub fn build_router(state: ExecutionApiState) -> Router {
     let secured = Router::new()
         .route("/v1/audit/logs", get(list_audit_logs))
-        .route("/v1/attempts/:attempt_id/retries", get(list_attempt_retries))
+        .route(
+            "/v1/attempts/:attempt_id/retries",
+            get(list_attempt_retries),
+        )
         .route("/v1/dlq", get(list_dead_letters))
         .route("/v1/dlq/:attempt_id", get(get_dead_letter))
         .route("/v1/dlq/:attempt_id/replay", post(replay_dead_letter))
@@ -682,7 +692,8 @@ struct TraceContextState {
 
 impl TraceContextState {
     fn new_from_headers(headers: &HeaderMap, rid: &str) -> Result<Self, ApiError> {
-        let (trace_id, parent_span_id, trace_flags) = match parse_traceparent_header(headers, rid)? {
+        let (trace_id, parent_span_id, trace_flags) = match parse_traceparent_header(headers, rid)?
+        {
             Some((trace_id, parent_span_id, trace_flags)) => {
                 (trace_id, Some(parent_span_id), trace_flags)
             }
@@ -821,6 +832,35 @@ fn json_hash(value: &Value) -> Result<String, ApiError> {
     let mut hasher = Sha256::new();
     hasher.update(&json);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn replay_effect_fingerprint(thread_id: &str, replay_target: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(thread_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(replay_target.as_bytes());
+    hasher.update(b"|job_replay_effect");
+    format!("{:x}", hasher.finalize())
+}
+
+async fn resolve_replay_guard_target(
+    state: &ExecutionApiState,
+    thread_id: &str,
+    requested_checkpoint_id: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    if let Some(checkpoint_id) = requested_checkpoint_id {
+        return Ok(Some(format!("checkpoint:{}", checkpoint_id)));
+    }
+    let config = RunnableConfig::with_thread_id(thread_id);
+    let snapshot = match state.compiled.get_state(&config).await {
+        Ok(snapshot) => snapshot,
+        Err(_) => return Ok(None),
+    };
+    let values = serde_json::to_vec(&snapshot.values)
+        .map_err(|e| ApiError::internal(format!("serialize replay target state failed: {}", e)))?;
+    let mut hasher = Sha256::new();
+    hasher.update(values);
+    Ok(Some(format!("latest_state:{:x}", hasher.finalize())))
 }
 
 #[cfg(feature = "sqlite-persistence")]
@@ -1251,16 +1291,16 @@ fn parse_retry_policy(
     })?;
     let max_backoff_ms = match request.max_backoff_ms {
         Some(value) if value <= 0 => {
-            return Err(ApiError::bad_request("retry_policy.max_backoff_ms must be > 0")
-                .with_request_id(rid.to_string()))
+            return Err(
+                ApiError::bad_request("retry_policy.max_backoff_ms must be > 0")
+                    .with_request_id(rid.to_string()),
+            )
         }
         Some(value) if value < request.backoff_ms => {
-            return Err(
-                ApiError::bad_request(
-                    "retry_policy.max_backoff_ms must be >= retry_policy.backoff_ms",
-                )
-                .with_request_id(rid.to_string()),
+            return Err(ApiError::bad_request(
+                "retry_policy.max_backoff_ms must be >= retry_policy.backoff_ms",
             )
+            .with_request_id(rid.to_string()))
         }
         value => value,
     };
@@ -1295,10 +1335,17 @@ fn parse_timeout_policy(
         return Ok(None);
     };
     if request.timeout_ms <= 0 {
-        return Err(ApiError::bad_request("timeout_policy.timeout_ms must be > 0")
-            .with_request_id(rid.to_string()));
+        return Err(
+            ApiError::bad_request("timeout_policy.timeout_ms must be > 0")
+                .with_request_id(rid.to_string()),
+        );
     }
-    let on_timeout_status = match request.on_timeout_status.trim().to_ascii_lowercase().as_str() {
+    let on_timeout_status = match request
+        .on_timeout_status
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "failed" => AttemptExecutionStatus::Failed,
         "cancelled" => AttemptExecutionStatus::Cancelled,
         _ => {
@@ -1328,17 +1375,19 @@ fn parse_tenant_id(tenant_id: Option<&str>, rid: &str) -> Result<Option<String>,
         return Ok(None);
     };
     if tenant_id.len() > 128 {
-        return Err(ApiError::bad_request("tenant_id must be 128 characters or fewer")
-            .with_request_id(rid.to_string()));
+        return Err(
+            ApiError::bad_request("tenant_id must be 128 characters or fewer")
+                .with_request_id(rid.to_string()),
+        );
     }
     if !tenant_id
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
     {
-        return Err(ApiError::bad_request(
-            "tenant_id contains unsupported characters",
-        )
-        .with_request_id(rid.to_string()));
+        return Err(
+            ApiError::bad_request("tenant_id contains unsupported characters")
+                .with_request_id(rid.to_string()),
+        );
     }
     Ok(Some(tenant_id.to_string()))
 }
@@ -1411,7 +1460,14 @@ pub async fn run_job(
     }
 
     let run_trace = TraceContextState::new_from_headers(&headers, &rid)?;
-    let run_span = lifecycle_span("job.run", &rid, Some(&req.thread_id), None, None, Some(&run_trace));
+    let run_span = lifecycle_span(
+        "job.run",
+        &rid,
+        Some(&req.thread_id),
+        None,
+        None,
+        Some(&run_trace),
+    );
 
     let initial = MessagesState::with_messages(vec![Message::new_human_message(input)]);
     let config = RunnableConfig::with_thread_id(&req.thread_id);
@@ -1453,8 +1509,10 @@ pub async fn run_job(
         if (timeout_policy.is_some() || priority != 0 || tenant_id.is_some())
             && state.runtime_repo.is_none()
         {
-            return Err(ApiError::internal("runtime scheduling options require runtime repository")
-                .with_request_id(rid.clone()));
+            return Err(ApiError::internal(
+                "runtime scheduling options require runtime repository",
+            )
+            .with_request_id(rid.clone()));
         }
     }
 
@@ -1784,6 +1842,52 @@ pub async fn replay_job(
         .await
         .map_err(|e| e.with_request_id(rid.clone()))?;
 
+    #[cfg(feature = "sqlite-persistence")]
+    let replay_guard = if let Some(repo) = state.runtime_repo.as_ref() {
+        let replay_target =
+            resolve_replay_guard_target(&state, &thread_id, req.checkpoint_id.as_deref())
+                .await
+                .map_err(|e| e.with_request_id(rid.clone()))?;
+        if let Some(replay_target) = replay_target {
+            let fingerprint = replay_effect_fingerprint(&thread_id, &replay_target);
+            match repo.claim_replay_effect(&thread_id, &replay_target, &fingerprint, Utc::now()) {
+                Ok(ReplayEffectClaim::Acquired) => Some(fingerprint),
+                Ok(ReplayEffectClaim::InProgress) => {
+                    return Err(
+                        ApiError::conflict("replay already in progress for this target")
+                            .with_request_id(rid.clone()),
+                    );
+                }
+                Ok(ReplayEffectClaim::Completed(response_json)) => {
+                    let mut response: RunJobResponse = serde_json::from_str(&response_json)
+                        .map_err(|e| {
+                            ApiError::internal(format!(
+                                "decode stored replay response failed: {}",
+                                e
+                            ))
+                            .with_request_id(rid.clone())
+                        })?;
+                    response.idempotent_replay = true;
+                    return Ok(Json(ApiEnvelope {
+                        meta: ApiMeta::ok(),
+                        request_id: rid,
+                        data: response,
+                    }));
+                }
+                Err(e) => {
+                    return Err(
+                        ApiError::internal(format!("replay effect guard failed: {}", e))
+                            .with_request_id(rid.clone()),
+                    );
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let config = if let Some(cp) = req.checkpoint_id.as_ref() {
         RunnableConfig::with_checkpoint(&thread_id, cp)
     } else {
@@ -1798,25 +1902,48 @@ pub async fn replay_job(
             .unwrap_or_else(|| "none".to_string())
     );
 
-    let _state = state
-        .compiled
-        .invoke_with_config(None, &config)
-        .await
-        .map_err(|e| {
-            ApiError::internal(format!("replay failed: {}", e)).with_request_id(rid.clone())
+    let _state = match state.compiled.invoke_with_config(None, &config).await {
+        Ok(executed_state) => executed_state,
+        Err(e) => {
+            #[cfg(feature = "sqlite-persistence")]
+            if let (Some(repo), Some(fingerprint)) =
+                (state.runtime_repo.as_ref(), replay_guard.as_deref())
+            {
+                let _ = repo.abandon_replay_effect(fingerprint);
+            }
+            return Err(
+                ApiError::internal(format!("replay failed: {}", e)).with_request_id(rid.clone())
+            );
+        }
+    };
+
+    let response = RunJobResponse {
+        thread_id: thread_id.clone(),
+        status: "completed".to_string(),
+        interrupts: Vec::new(),
+        idempotency_key: None,
+        idempotent_replay: false,
+        trace: None,
+    };
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let (Some(repo), Some(fingerprint)) = (state.runtime_repo.as_ref(), replay_guard.as_deref())
+    {
+        let response_json = serde_json::to_string(&response).map_err(|e| {
+            ApiError::internal(format!("encode replay response failed: {}", e))
+                .with_request_id(rid.clone())
         })?;
+        repo.complete_replay_effect(fingerprint, &response_json, Utc::now())
+            .map_err(|e| {
+                ApiError::internal(format!("persist replay effect failed: {}", e))
+                    .with_request_id(rid.clone())
+            })?;
+    }
 
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
-        data: RunJobResponse {
-            thread_id,
-            status: "completed".to_string(),
-            interrupts: Vec::new(),
-            idempotency_key: None,
-            idempotent_replay: false,
-            trace: None,
-        },
+        data: response,
     }))
 }
 
@@ -2022,9 +2149,7 @@ pub async fn list_attempt_retries(
         let snapshot = repo
             .get_attempt_retry_history(&attempt_id)
             .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
-            .ok_or_else(|| {
-                ApiError::not_found("attempt not found").with_request_id(rid.clone())
-            })?;
+            .ok_or_else(|| ApiError::not_found("attempt not found").with_request_id(rid.clone()))?;
         let history = snapshot
             .history
             .into_iter()
@@ -2060,7 +2185,10 @@ pub async fn list_attempt_retries(
     #[cfg(not(feature = "sqlite-persistence"))]
     {
         let _ = attempt_id;
-        Err(ApiError::internal("attempt retry APIs require sqlite-persistence").with_request_id(rid))
+        Err(
+            ApiError::internal("attempt retry APIs require sqlite-persistence")
+                .with_request_id(rid),
+        )
     }
 }
 
@@ -2107,7 +2235,9 @@ pub async fn get_dead_letter(
         let row = repo
             .get_dead_letter(&attempt_id)
             .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
-            .ok_or_else(|| ApiError::not_found("dead letter not found").with_request_id(rid.clone()))?;
+            .ok_or_else(|| {
+                ApiError::not_found("dead letter not found").with_request_id(rid.clone())
+            })?;
         return Ok(Json(ApiEnvelope {
             meta: ApiMeta::ok(),
             request_id: rid,
@@ -2430,8 +2560,15 @@ pub async fn job_detail(
             None
         }
     };
-    let _span = lifecycle_span("job.detail", &rid, Some(&thread_id), None, None, trace.as_ref())
-        .entered();
+    let _span = lifecycle_span(
+        "job.detail",
+        &rid,
+        Some(&thread_id),
+        None,
+        None,
+        trace.as_ref(),
+    )
+    .entered();
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -2582,7 +2719,9 @@ pub async fn worker_poll(
                     }
                     let dispatch_trace = repo
                         .advance_attempt_trace(&candidate.attempt_id, &generate_span_id())
-                        .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
+                        .map_err(|e| {
+                            ApiError::internal(e.to_string()).with_request_id(rid.clone())
+                        })?
                         .map(TraceContextState::from_row);
                     let _span = lifecycle_span(
                         "attempt.dispatch",
@@ -2699,9 +2838,13 @@ pub async fn worker_heartbeat(
         let ttl = req.lease_ttl_seconds.unwrap_or(30).max(1);
         let now = Utc::now();
         let expires = now + Duration::seconds(ttl);
-        if let Err(err) =
-            repo.heartbeat_lease_with_version(&req.lease_id, &worker_id, lease.version, now, expires)
-        {
+        if let Err(err) = repo.heartbeat_lease_with_version(
+            &req.lease_id,
+            &worker_id,
+            lease.version,
+            now,
+            expires,
+        ) {
             if err.to_string().contains("lease heartbeat version conflict") {
                 state.runtime_metrics.record_lease_conflict();
             }
@@ -2909,6 +3052,7 @@ pub async fn worker_ack(
 #[cfg(all(test, feature = "execution-server"))]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -2965,6 +3109,37 @@ mod tests {
         graph.add_node("approval", node).unwrap();
         graph.add_edge(START, "approval");
         graph.add_edge("approval", END);
+        let saver = Arc::new(InMemorySaver::new());
+        Arc::new(graph.compile_with_persistence(Some(saver), None).unwrap())
+    }
+
+    async fn build_side_effect_graph(
+        effect_counter: Arc<AtomicUsize>,
+    ) -> Arc<crate::graph::CompiledGraph<MessagesState>> {
+        let prepare = function_node("prepare", |_state: &MessagesState| async move {
+            Ok(HashMap::new())
+        });
+        let effect = function_node("effect", move |_state: &MessagesState| {
+            let effect_counter = Arc::clone(&effect_counter);
+            async move {
+                effect_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(HashMap::new())
+            }
+        });
+        let wait = function_node("wait", |_state: &MessagesState| async move {
+            let _ = interrupt("confirm replay")
+                .await
+                .map_err(GraphError::InterruptError)?;
+            Ok(HashMap::new())
+        });
+        let mut graph = StateGraph::<MessagesState>::new();
+        graph.add_node("prepare", prepare).unwrap();
+        graph.add_node("effect", effect).unwrap();
+        graph.add_node("wait", wait).unwrap();
+        graph.add_edge(START, "prepare");
+        graph.add_edge("prepare", "effect");
+        graph.add_edge("effect", "wait");
+        graph.add_edge("wait", END);
         let saver = Arc::new(InMemorySaver::new());
         Arc::new(graph.compile_with_persistence(Some(saver), None).unwrap())
     }
@@ -4062,6 +4237,76 @@ mod tests {
 
     #[cfg(feature = "sqlite-persistence")]
     #[tokio::test]
+    async fn replay_guard_dedupes_duplicate_replay_side_effects() {
+        let effect_counter = Arc::new(AtomicUsize::new(0));
+        let state = ExecutionApiState::with_sqlite_idempotency(
+            build_side_effect_graph(Arc::clone(&effect_counter)).await,
+            ":memory:",
+        );
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "replay-guard-1",
+                    "input": "seed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+        assert_eq!(effect_counter.load(Ordering::SeqCst), 1);
+        let replay_body = serde_json::json!({}).to_string();
+        let first_replay_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/replay-guard-1/replay")
+            .header("content-type", "application/json")
+            .body(Body::from(replay_body.clone()))
+            .unwrap();
+        let first_replay_resp = router.clone().oneshot(first_replay_req).await.unwrap();
+        let first_replay_status = first_replay_resp.status();
+        let first_replay_body = axum::body::to_bytes(first_replay_resp.into_body(), usize::MAX)
+            .await
+            .expect("first replay body");
+        assert_eq!(
+            first_replay_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&first_replay_body)
+        );
+        assert_eq!(effect_counter.load(Ordering::SeqCst), 2);
+
+        let second_replay_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/replay-guard-1/replay")
+            .header("content-type", "application/json")
+            .body(Body::from(replay_body))
+            .unwrap();
+        let second_replay_resp = router.oneshot(second_replay_req).await.unwrap();
+        assert_eq!(second_replay_resp.status(), StatusCode::OK);
+        let second_replay_body = axum::body::to_bytes(second_replay_resp.into_body(), usize::MAX)
+            .await
+            .expect("second replay body");
+        let second_replay_json: serde_json::Value =
+            serde_json::from_slice(&second_replay_body).expect("second replay json");
+        assert_eq!(second_replay_json["data"]["idempotent_replay"], true);
+        assert_eq!(effect_counter.load(Ordering::SeqCst), 2);
+
+        let replay_effects = repo
+            .list_replay_effects_for_thread("replay-guard-1")
+            .expect("list replay effects");
+        assert_eq!(replay_effects.len(), 1);
+        assert_eq!(replay_effects[0].status, "completed");
+        assert_eq!(replay_effects[0].execution_count, 1);
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    #[tokio::test]
     async fn worker_report_step_dedupe_is_enforced() {
         let router = build_router(ExecutionApiState::with_sqlite_idempotency(
             build_test_graph().await,
@@ -4222,18 +4467,12 @@ mod tests {
             .expect("run body");
         let run_json: serde_json::Value = serde_json::from_slice(&run_body).expect("run json");
         let run_trace = run_json["data"]["trace"].clone();
-        assert_eq!(
-            run_trace["trace_id"],
-            "0123456789abcdef0123456789abcdef"
-        );
+        assert_eq!(run_trace["trace_id"], "0123456789abcdef0123456789abcdef");
         assert_eq!(run_trace["parent_span_id"], "1111111111111111");
         let run_span_id = run_trace["span_id"].as_str().expect("run span").to_string();
         let expected_run_traceparent =
             format!("00-0123456789abcdef0123456789abcdef-{}-01", run_span_id);
-        assert_eq!(
-            run_trace["traceparent"],
-            expected_run_traceparent.as_str()
-        );
+        assert_eq!(run_trace["traceparent"], expected_run_traceparent.as_str());
 
         let poll_req = Request::builder()
             .method(Method::POST)
@@ -4262,12 +4501,12 @@ mod tests {
             .expect("lease_id")
             .to_string();
         let poll_trace = poll_json["data"]["trace"].clone();
-        assert_eq!(
-            poll_trace["trace_id"],
-            "0123456789abcdef0123456789abcdef"
-        );
+        assert_eq!(poll_trace["trace_id"], "0123456789abcdef0123456789abcdef");
         assert_eq!(poll_trace["parent_span_id"], run_span_id.as_str());
-        let poll_span_id = poll_trace["span_id"].as_str().expect("poll span").to_string();
+        let poll_span_id = poll_trace["span_id"]
+            .as_str()
+            .expect("poll span")
+            .to_string();
         assert_ne!(poll_span_id, run_span_id);
 
         let hb_req = Request::builder()
@@ -4323,7 +4562,10 @@ mod tests {
             .expect("persisted trace query")
             .expect("persisted trace");
         assert_eq!(persisted_trace.trace_id, "0123456789abcdef0123456789abcdef");
-        assert_eq!(persisted_trace.parent_span_id.as_deref(), Some(hb_span_id.as_str()));
+        assert_eq!(
+            persisted_trace.parent_span_id.as_deref(),
+            Some(hb_span_id.as_str())
+        );
         assert_eq!(persisted_trace.span_id, ack_span_id);
     }
 
@@ -4354,8 +4596,9 @@ mod tests {
     #[cfg(feature = "sqlite-persistence")]
     #[tokio::test]
     async fn metrics_endpoint_is_scrape_ready_and_exposes_runtime_metrics() {
-        let state = ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
-            .with_static_api_key("metrics-key");
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key("metrics-key");
         let repo = state.runtime_repo.clone().expect("runtime repo");
         repo.enqueue_attempt("attempt-metrics-a", "run-metrics-1")
             .expect("enqueue a");
@@ -4380,7 +4623,8 @@ mod tests {
         let poll_body = axum::body::to_bytes(poll_resp.into_body(), usize::MAX)
             .await
             .expect("metrics poll body");
-        let poll_json: serde_json::Value = serde_json::from_slice(&poll_body).expect("metrics poll json");
+        let poll_json: serde_json::Value =
+            serde_json::from_slice(&poll_body).expect("metrics poll json");
         let attempt_id = poll_json["data"]["attempt_id"]
             .as_str()
             .expect("metrics attempt")
@@ -4756,8 +5000,12 @@ mod tests {
         let list_body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
             .await
             .expect("dlq list body");
-        let list_json: serde_json::Value = serde_json::from_slice(&list_body).expect("dlq list json");
-        assert_eq!(list_json["data"]["entries"][0]["attempt_id"], "attempt-dlq-api-1");
+        let list_json: serde_json::Value =
+            serde_json::from_slice(&list_body).expect("dlq list json");
+        assert_eq!(
+            list_json["data"]["entries"][0]["attempt_id"],
+            "attempt-dlq-api-1"
+        );
         assert_eq!(list_json["data"]["entries"][0]["replay_status"], "pending");
 
         let detail_req = Request::builder()
@@ -4860,7 +5108,10 @@ mod tests {
             .expect("first priority poll body");
         let first_poll_json: serde_json::Value =
             serde_json::from_slice(&first_poll_body).expect("first priority poll json");
-        assert_eq!(first_poll_json["data"]["attempt_id"], "attempt-priority-high");
+        assert_eq!(
+            first_poll_json["data"]["attempt_id"],
+            "attempt-priority-high"
+        );
 
         let second_poll_req = Request::builder()
             .method(Method::POST)
@@ -4880,7 +5131,10 @@ mod tests {
             .expect("second priority poll body");
         let second_poll_json: serde_json::Value =
             serde_json::from_slice(&second_poll_body).expect("second priority poll json");
-        assert_eq!(second_poll_json["data"]["attempt_id"], "attempt-priority-low");
+        assert_eq!(
+            second_poll_json["data"]["attempt_id"],
+            "attempt-priority-low"
+        );
     }
 
     #[cfg(feature = "sqlite-persistence")]
@@ -4897,8 +5151,13 @@ mod tests {
         let repo = state.runtime_repo.clone().expect("runtime repo");
         repo.enqueue_attempt("attempt-dlq-rbac", "run-dlq-rbac")
             .expect("enqueue dlq rbac attempt");
-        repo.ack_attempt("attempt-dlq-rbac", AttemptExecutionStatus::Failed, None, Utc::now())
-            .expect("move attempt to dlq");
+        repo.ack_attempt(
+            "attempt-dlq-rbac",
+            AttemptExecutionStatus::Failed,
+            None,
+            Utc::now(),
+        )
+        .expect("move attempt to dlq");
         let router = build_router(state);
 
         let list_req = Request::builder()
@@ -5250,7 +5509,11 @@ mod tests {
             .expect("enqueue stress attempt");
             repo.set_attempt_tenant_id(
                 &format!("attempt-stress-{i}"),
-                Some(if i % 2 == 0 { "tenant-alpha" } else { "tenant-beta" }),
+                Some(if i % 2 == 0 {
+                    "tenant-alpha"
+                } else {
+                    "tenant-beta"
+                }),
             )
             .expect("set stress tenant");
         }
@@ -5274,13 +5537,8 @@ mod tests {
                 .to_string();
 
             baseline.conflict_injections += 1;
-            let conflict_status = heartbeat_status(
-                &router,
-                &format!("stress-conflict-{i}"),
-                &lease_id,
-                5,
-            )
-            .await;
+            let conflict_status =
+                heartbeat_status(&router, &format!("stress-conflict-{i}"), &lease_id, 5).await;
             assert_eq!(conflict_status, StatusCode::CONFLICT);
             baseline.conflicts_observed += 1;
 

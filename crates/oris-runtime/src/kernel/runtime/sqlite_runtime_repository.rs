@@ -13,7 +13,7 @@ use crate::kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
-const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 8;
+const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 9;
 
 #[derive(Clone)]
 pub struct SqliteRuntimeRepository {
@@ -114,6 +114,25 @@ pub struct DeadLetterRow {
     pub last_replayed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplayEffectClaim {
+    Acquired,
+    InProgress,
+    Completed(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct ReplayEffectLogRow {
+    pub fingerprint: String,
+    pub thread_id: String,
+    pub replay_target: String,
+    pub effect_type: String,
+    pub status: String,
+    pub execution_count: u32,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct DispatchableAttemptContext {
     pub attempt_id: String,
@@ -184,6 +203,10 @@ impl SqliteRuntimeRepository {
         if current < 8 {
             apply_sqlite_runtime_migration_v8(&conn)?;
             record_sqlite_migration(&conn, 8, "attempt_trace_context")?;
+        }
+        if current < 9 {
+            apply_sqlite_runtime_migration_v9(&conn)?;
+            record_sqlite_migration(&conn, 9, "replay_effect_guard")?;
         }
         Ok(())
     }
@@ -1046,6 +1069,129 @@ impl SqliteRuntimeRepository {
         Ok(row)
     }
 
+    pub fn claim_replay_effect(
+        &self,
+        thread_id: &str,
+        replay_target: &str,
+        fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ReplayEffectClaim, KernelError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| KernelError::Driver(format!("begin replay effect tx: {}", e)))?;
+
+        let existing = tx
+            .query_row(
+                "SELECT status, response_json
+                 FROM runtime_replay_effects
+                 WHERE fingerprint = ?1",
+                params![fingerprint],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(|e| KernelError::Driver(format!("read replay effect: {}", e)))?;
+
+        let claim = match existing {
+            Some((status, response_json)) if status == "completed" => {
+                let stored = response_json.ok_or_else(|| {
+                    KernelError::Driver("missing stored replay response".to_string())
+                })?;
+                ReplayEffectClaim::Completed(stored)
+            }
+            Some((status, _)) if status == "in_progress" => ReplayEffectClaim::InProgress,
+            Some((_status, _)) => ReplayEffectClaim::InProgress,
+            None => {
+                tx.execute(
+                    "INSERT INTO runtime_replay_effects
+                     (fingerprint, thread_id, replay_target, effect_type, status, execution_count, created_at_ms, completed_at_ms, response_json)
+                     VALUES (?1, ?2, ?3, 'job_replay', 'in_progress', 1, ?4, NULL, NULL)",
+                    params![fingerprint, thread_id, replay_target, dt_to_ms(now)],
+                )
+                .map_err(|e| KernelError::Driver(format!("insert replay effect: {}", e)))?;
+                ReplayEffectClaim::Acquired
+            }
+        };
+
+        tx.commit()
+            .map_err(|e| KernelError::Driver(format!("commit replay effect tx: {}", e)))?;
+        Ok(claim)
+    }
+
+    pub fn complete_replay_effect(
+        &self,
+        fingerprint: &str,
+        response_json: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_replay_effects
+                 SET status = 'completed',
+                     completed_at_ms = ?2,
+                     response_json = ?3
+                 WHERE fingerprint = ?1
+                   AND status = 'in_progress'",
+                params![fingerprint, dt_to_ms(now), response_json],
+            )
+            .map_err(|e| KernelError::Driver(format!("complete replay effect: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "replay effect not claimable for completion: {}",
+                fingerprint
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn abandon_replay_effect(&self, fingerprint: &str) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "DELETE FROM runtime_replay_effects
+             WHERE fingerprint = ?1
+               AND status = 'in_progress'",
+            params![fingerprint],
+        )
+        .map_err(|e| KernelError::Driver(format!("abandon replay effect: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn list_replay_effects_for_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<ReplayEffectLogRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT fingerprint, thread_id, replay_target, effect_type, status, execution_count, created_at_ms, completed_at_ms
+                 FROM runtime_replay_effects
+                 WHERE thread_id = ?1
+                 ORDER BY created_at_ms ASC",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare list replay effects: {}", e)))?;
+        let rows = stmt
+            .query_map(params![thread_id], map_row_to_replay_effect_log)
+            .map_err(|e| KernelError::Driver(format!("query replay effects: {}", e)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| KernelError::Driver(format!("row replay effects: {}", e)))?);
+        }
+        Ok(out)
+    }
+
     pub fn upsert_job(&self, thread_id: &str, status: &str) -> Result<(), KernelError> {
         let now = dt_to_ms(Utc::now());
         let conn = self
@@ -1551,6 +1697,19 @@ fn map_row_to_dead_letter(row: &rusqlite::Row) -> rusqlite::Result<DeadLetterRow
     })
 }
 
+fn map_row_to_replay_effect_log(row: &rusqlite::Row) -> rusqlite::Result<ReplayEffectLogRow> {
+    Ok(ReplayEffectLogRow {
+        fingerprint: row.get(0)?,
+        thread_id: row.get(1)?,
+        replay_target: row.get(2)?,
+        effect_type: row.get(3)?,
+        status: row.get(4)?,
+        execution_count: row.get::<_, i64>(5)? as u32,
+        created_at: ms_to_dt(row.get::<_, i64>(6)?),
+        completed_at: row.get::<_, Option<i64>>(7)?.map(ms_to_dt),
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct InterruptRow {
     pub interrupt_id: String,
@@ -2049,9 +2208,19 @@ fn apply_sqlite_runtime_migration_v2(conn: &Connection) -> Result<(), KernelErro
 fn apply_sqlite_runtime_migration_v3(conn: &Connection) -> Result<(), KernelError> {
     add_column_if_missing(conn, "runtime_attempts", "retry_strategy", "TEXT NULL")?;
     add_column_if_missing(conn, "runtime_attempts", "retry_backoff_ms", "INTEGER NULL")?;
-    add_column_if_missing(conn, "runtime_attempts", "retry_max_backoff_ms", "INTEGER NULL")?;
+    add_column_if_missing(
+        conn,
+        "runtime_attempts",
+        "retry_max_backoff_ms",
+        "INTEGER NULL",
+    )?;
     add_column_if_missing(conn, "runtime_attempts", "retry_multiplier", "REAL NULL")?;
-    add_column_if_missing(conn, "runtime_attempts", "retry_max_retries", "INTEGER NULL")?;
+    add_column_if_missing(
+        conn,
+        "runtime_attempts",
+        "retry_max_retries",
+        "INTEGER NULL",
+    )?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS runtime_attempt_retry_history (
@@ -2072,8 +2241,18 @@ fn apply_sqlite_runtime_migration_v3(conn: &Connection) -> Result<(), KernelErro
 }
 
 fn apply_sqlite_runtime_migration_v4(conn: &Connection) -> Result<(), KernelError> {
-    add_column_if_missing(conn, "runtime_attempts", "execution_timeout_ms", "INTEGER NULL")?;
-    add_column_if_missing(conn, "runtime_attempts", "timeout_terminal_status", "TEXT NULL")?;
+    add_column_if_missing(
+        conn,
+        "runtime_attempts",
+        "execution_timeout_ms",
+        "INTEGER NULL",
+    )?;
+    add_column_if_missing(
+        conn,
+        "runtime_attempts",
+        "timeout_terminal_status",
+        "TEXT NULL",
+    )?;
     add_column_if_missing(conn, "runtime_attempts", "started_at_ms", "INTEGER NULL")?;
     Ok(())
 }
@@ -2129,7 +2308,12 @@ fn apply_sqlite_runtime_migration_v7(conn: &Connection) -> Result<(), KernelErro
 
 fn apply_sqlite_runtime_migration_v8(conn: &Connection) -> Result<(), KernelError> {
     add_column_if_missing(conn, "runtime_attempts", "trace_id", "TEXT NULL")?;
-    add_column_if_missing(conn, "runtime_attempts", "trace_parent_span_id", "TEXT NULL")?;
+    add_column_if_missing(
+        conn,
+        "runtime_attempts",
+        "trace_parent_span_id",
+        "TEXT NULL",
+    )?;
     add_column_if_missing(conn, "runtime_attempts", "trace_span_id", "TEXT NULL")?;
     add_column_if_missing(
         conn,
@@ -2143,6 +2327,28 @@ fn apply_sqlite_runtime_migration_v8(conn: &Connection) -> Result<(), KernelErro
         [],
     )
     .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v8: {}", e)))?;
+    Ok(())
+}
+
+fn apply_sqlite_runtime_migration_v9(conn: &Connection) -> Result<(), KernelError> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS runtime_replay_effects (
+          fingerprint TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          replay_target TEXT NOT NULL,
+          effect_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          execution_count INTEGER NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER NULL,
+          response_json TEXT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_replay_effects_thread_created
+          ON runtime_replay_effects(thread_id, created_at_ms);
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v9: {}", e)))?;
     Ok(())
 }
 
@@ -2181,8 +2387,8 @@ mod tests {
 
     use super::{
         apply_sqlite_runtime_migration_v1, ensure_sqlite_migration_table, record_sqlite_migration,
-        RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository, TimeoutPolicyConfig,
-        SQLITE_RUNTIME_SCHEMA_VERSION,
+        ReplayEffectClaim, RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository,
+        TimeoutPolicyConfig, SQLITE_RUNTIME_SCHEMA_VERSION,
     };
     use crate::kernel::runtime::models::AttemptExecutionStatus;
     use crate::kernel::runtime::repository::RuntimeRepository;
@@ -2245,20 +2451,41 @@ mod tests {
         assert!(column_exists(&conn, "runtime_api_keys", "role"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_strategy"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_backoff_ms"));
-        assert!(column_exists(&conn, "runtime_attempts", "retry_max_backoff_ms"));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "retry_max_backoff_ms"
+        ));
         assert!(column_exists(&conn, "runtime_attempts", "retry_multiplier"));
-        assert!(column_exists(&conn, "runtime_attempts", "retry_max_retries"));
-        assert!(column_exists(&conn, "runtime_attempts", "execution_timeout_ms"));
-        assert!(column_exists(&conn, "runtime_attempts", "timeout_terminal_status"));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "retry_max_retries"
+        ));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "execution_timeout_ms"
+        ));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "timeout_terminal_status"
+        ));
         assert!(column_exists(&conn, "runtime_attempts", "started_at_ms"));
         assert!(column_exists(&conn, "runtime_attempts", "priority"));
         assert!(column_exists(&conn, "runtime_attempts", "tenant_id"));
         assert!(column_exists(&conn, "runtime_attempts", "trace_id"));
-        assert!(column_exists(&conn, "runtime_attempts", "trace_parent_span_id"));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "trace_parent_span_id"
+        ));
         assert!(column_exists(&conn, "runtime_attempts", "trace_span_id"));
         assert!(column_exists(&conn, "runtime_attempts", "trace_flags"));
         assert!(table_exists(&conn, "runtime_attempt_retry_history"));
         assert!(table_exists(&conn, "runtime_dead_letters"));
+        assert!(table_exists(&conn, "runtime_replay_effects"));
 
         let _ = fs::remove_file(path);
     }
@@ -2300,20 +2527,41 @@ mod tests {
         assert!(column_exists(&conn, "runtime_api_keys", "role"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_strategy"));
         assert!(column_exists(&conn, "runtime_attempts", "retry_backoff_ms"));
-        assert!(column_exists(&conn, "runtime_attempts", "retry_max_backoff_ms"));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "retry_max_backoff_ms"
+        ));
         assert!(column_exists(&conn, "runtime_attempts", "retry_multiplier"));
-        assert!(column_exists(&conn, "runtime_attempts", "retry_max_retries"));
-        assert!(column_exists(&conn, "runtime_attempts", "execution_timeout_ms"));
-        assert!(column_exists(&conn, "runtime_attempts", "timeout_terminal_status"));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "retry_max_retries"
+        ));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "execution_timeout_ms"
+        ));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "timeout_terminal_status"
+        ));
         assert!(column_exists(&conn, "runtime_attempts", "started_at_ms"));
         assert!(column_exists(&conn, "runtime_attempts", "priority"));
         assert!(column_exists(&conn, "runtime_attempts", "tenant_id"));
         assert!(column_exists(&conn, "runtime_attempts", "trace_id"));
-        assert!(column_exists(&conn, "runtime_attempts", "trace_parent_span_id"));
+        assert!(column_exists(
+            &conn,
+            "runtime_attempts",
+            "trace_parent_span_id"
+        ));
         assert!(column_exists(&conn, "runtime_attempts", "trace_span_id"));
         assert!(column_exists(&conn, "runtime_attempts", "trace_flags"));
         assert!(table_exists(&conn, "runtime_attempt_retry_history"));
         assert!(table_exists(&conn, "runtime_dead_letters"));
+        assert!(table_exists(&conn, "runtime_replay_effects"));
 
         let migration_v2: Option<String> = conn
             .query_row(
@@ -2335,7 +2583,10 @@ mod tests {
             )
             .optional()
             .expect("query migration v3");
-        assert_eq!(migration_v3.as_deref(), Some("attempt_retry_policy_and_history"));
+        assert_eq!(
+            migration_v3.as_deref(),
+            Some("attempt_retry_policy_and_history")
+        );
         let migration_v4: Option<String> = conn
             .query_row(
                 "SELECT name FROM runtime_schema_migrations WHERE version = 4",
@@ -2344,7 +2595,10 @@ mod tests {
             )
             .optional()
             .expect("query migration v4");
-        assert_eq!(migration_v4.as_deref(), Some("attempt_execution_timeout_policy"));
+        assert_eq!(
+            migration_v4.as_deref(),
+            Some("attempt_execution_timeout_policy")
+        );
         let migration_v5: Option<String> = conn
             .query_row(
                 "SELECT name FROM runtime_schema_migrations WHERE version = 5",
@@ -2362,7 +2616,10 @@ mod tests {
             )
             .optional()
             .expect("query migration v6");
-        assert_eq!(migration_v6.as_deref(), Some("attempt_priority_dispatch_order"));
+        assert_eq!(
+            migration_v6.as_deref(),
+            Some("attempt_priority_dispatch_order")
+        );
         let migration_v7: Option<String> = conn
             .query_row(
                 "SELECT name FROM runtime_schema_migrations WHERE version = 7",
@@ -2381,8 +2638,64 @@ mod tests {
             .optional()
             .expect("query migration v8");
         assert_eq!(migration_v8.as_deref(), Some("attempt_trace_context"));
+        let migration_v9: Option<String> = conn
+            .query_row(
+                "SELECT name FROM runtime_schema_migrations WHERE version = 9",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query migration v9");
+        assert_eq!(migration_v9.as_deref(), Some("replay_effect_guard"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn replay_effect_guard_persists_completed_effects_and_dedupes() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite runtime repo");
+        let claim = repo
+            .claim_replay_effect(
+                "thread-replay-guard",
+                "latest_state:abc123",
+                "fingerprint-1",
+                Utc::now(),
+            )
+            .expect("claim replay effect");
+        assert_eq!(claim, ReplayEffectClaim::Acquired);
+
+        repo.complete_replay_effect(
+            "fingerprint-1",
+            r#"{"thread_id":"thread-replay-guard","status":"completed"}"#,
+            Utc::now(),
+        )
+        .expect("complete replay effect");
+
+        let second_claim = repo
+            .claim_replay_effect(
+                "thread-replay-guard",
+                "latest_state:abc123",
+                "fingerprint-1",
+                Utc::now(),
+            )
+            .expect("claim completed replay effect");
+        match second_claim {
+            ReplayEffectClaim::Completed(response_json) => {
+                assert!(response_json.contains("\"thread_id\":\"thread-replay-guard\""));
+            }
+            other => panic!("expected completed replay effect, got {:?}", other),
+        }
+
+        let rows = repo
+            .list_replay_effects_for_thread("thread-replay-guard")
+            .expect("list replay effects");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].fingerprint, "fingerprint-1");
+        assert_eq!(rows[0].replay_target, "latest_state:abc123");
+        assert_eq!(rows[0].effect_type, "job_replay");
+        assert_eq!(rows[0].status, "completed");
+        assert_eq!(rows[0].execution_count, 1);
+        assert!(rows[0].completed_at.is_some());
     }
 
     #[test]
@@ -2496,7 +2809,11 @@ mod tests {
         )
         .expect("set timeout policy");
         let lease = repo
-            .upsert_lease("attempt-timeout-1", "worker-timeout-1", Utc::now() + Duration::seconds(30))
+            .upsert_lease(
+                "attempt-timeout-1",
+                "worker-timeout-1",
+                Utc::now() + Duration::seconds(30),
+            )
             .expect("lease timeout attempt");
         assert!(!lease.lease_id.is_empty());
         repo.set_attempt_started_at_for_test(

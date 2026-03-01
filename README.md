@@ -328,7 +328,7 @@ Execution server endpoints (v1 runtime-bin):
 - `GET /v1/jobs/:thread_id/timeline`
 - `GET /v1/jobs/:thread_id/checkpoints/:checkpoint_id`
 - `POST /v1/jobs/:thread_id/resume`
-- `POST /v1/jobs/:thread_id/replay`
+- `POST /v1/jobs/:thread_id/replay` — with `sqlite-persistence`, replay requests are fingerprinted by thread + replay target (`checkpoint_id` when present, otherwise current state fingerprint) and duplicate replays return the stored response instead of re-executing side effects
 - `POST /v1/jobs/:thread_id/cancel`
 
 Interrupt API (Phase 4):
@@ -364,6 +364,7 @@ Run idempotency contract (`POST /v1/jobs/run`):
 
 - Send optional `idempotency_key`.
 - Same `idempotency_key` + same payload returns the stored semantic result with `data.idempotent_replay=true`.
+- Same replay target (`thread_id` + explicit `checkpoint_id`, or `thread_id` + current state fingerprint) is also deduplicated under `sqlite-persistence`; repeated replay calls return the stored response with `data.idempotent_replay=true`.
 - Same `idempotency_key` + different payload returns `409 conflict`.
 - Trace metadata is observational only and does not participate in idempotency matching.
 
