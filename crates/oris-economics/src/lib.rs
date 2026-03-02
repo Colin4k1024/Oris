@@ -49,3 +49,70 @@ impl EvuLedger {
             .unwrap_or(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_evu_ledger_can_publish_with_sufficient_balance() {
+        let ledger = EvuLedger {
+            accounts: vec![EvuAccount {
+                node_id: "node1".into(),
+                balance: 10,
+            }],
+            reputations: vec![],
+        };
+        let policy = StakePolicy { publish_cost: 5 };
+        assert!(ledger.can_publish("node1", &policy));
+    }
+
+    #[test]
+    fn test_evu_ledger_cannot_publish_with_insufficient_balance() {
+        let ledger = EvuLedger {
+            accounts: vec![EvuAccount {
+                node_id: "node1".into(),
+                balance: 3,
+            }],
+            reputations: vec![],
+        };
+        let policy = StakePolicy { publish_cost: 5 };
+        assert!(!ledger.can_publish("node1", &policy));
+    }
+
+    #[test]
+    fn test_evu_ledger_cannot_publish_unknown_node() {
+        let ledger = EvuLedger::default();
+        let policy = StakePolicy { publish_cost: 5 };
+        assert!(!ledger.can_publish("unknown_node", &policy));
+    }
+
+    #[test]
+    fn test_default_stake_policy() {
+        let policy = StakePolicy::default();
+        assert_eq!(policy.publish_cost, 1);
+    }
+
+    #[test]
+    fn test_reputation_record() {
+        let reputation = ReputationRecord {
+            node_id: "node1".into(),
+            publish_success_rate: 0.95,
+            validator_accuracy: 0.88,
+            reuse_impact: 100,
+        };
+        assert_eq!(reputation.node_id, "node1");
+        assert!(reputation.publish_success_rate > 0.9);
+    }
+
+    #[test]
+    fn test_validation_settlement() {
+        let settlement = ValidationSettlement {
+            publisher_delta: 10,
+            validator_delta: 5,
+            reason: "successful validation".into(),
+        };
+        assert_eq!(settlement.publisher_delta, 10);
+        assert_eq!(settlement.validator_delta, 5);
+    }
+}
