@@ -3,14 +3,14 @@ name = "oris-sandbox"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-publish = false
+publish = ["crates-io"]
 license = "MIT"
 description = "Local sandboxed mutation application for Oris EvoKernel."
 
 [dependencies]
 async-trait = "0.1.80"
 hex = "0.4"
-oris-evolution = { path = "../oris-evolution" }
+oris-evolution = { version = "0.1.0", path = "../oris-evolution" }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2.0.0"

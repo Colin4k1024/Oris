@@ -1,22 +1,22 @@
 [package]
 name = "oris-evokernel"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.80"
-publish = false
+publish = ["crates-io"]
 license = "MIT"
 description = "Self-evolving kernel orchestration for Oris."
 
 [dependencies]
 async-trait = "0.1.80"
-oris-agent-contract = { path = "../oris-agent-contract" }
-oris-economics = { path = "../oris-economics" }
-oris-evolution = { path = "../oris-evolution" }
-oris-evolution-network = { path = "../oris-evolution-network" }
-oris-governor = { path = "../oris-governor" }
-oris-kernel = { path = "../oris-kernel" }
-oris-sandbox = { path = "../oris-sandbox" }
-oris-spec = { path = "../oris-spec" }
+oris-agent-contract = { version = "0.1.0", path = "../oris-agent-contract" }
+oris-economics = { version = "0.1.0", path = "../oris-economics" }
+oris-evolution = { version = "0.1.0", path = "../oris-evolution" }
+oris-evolution-network = { version = "0.1.0", path = "../oris-evolution-network" }
+oris-governor = { version = "0.1.0", path = "../oris-governor" }
+oris-kernel = { version = "0.2.12", path = "../oris-kernel" }
+oris-sandbox = { version = "0.1.0", path = "../oris-sandbox" }
+oris-spec = { version = "0.1.0", path = "../oris-spec" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.0"

@@ -3,12 +3,12 @@ name = "oris-spec"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-publish = false
+publish = ["crates-io"]
 license = "MIT"
 description = "OUSL YAML spec contracts and compilers for Oris."
 
 [dependencies]
-oris-evolution = { path = "../oris-evolution" }
+oris-evolution = { version = "0.1.0", path = "../oris-evolution" }
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 thiserror = "2.0.0"

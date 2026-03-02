@@ -3,7 +3,7 @@ name = "oris-agent-contract"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-publish = false
+publish = ["crates-io"]
 license = "MIT"
 description = "External agent proposal contracts for Oris EvoKernel."
 

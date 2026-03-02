@@ -3,14 +3,14 @@ name = "oris-evolution-network"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-publish = false
+publish = ["crates-io"]
 license = "MIT"
 description = "Protocol types for the Oris Evolution Network."
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
-oris-evolution = { path = "../oris-evolution" }
+oris-evolution = { version = "0.1.0", path = "../oris-evolution" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

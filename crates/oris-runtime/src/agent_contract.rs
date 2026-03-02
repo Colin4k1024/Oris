@@ -1,3 +1,3 @@
-//! Experimental re-export for the external agent runtime contract.
+//! Experimental re-export for the external agent runtime contract via the EvoKernel facade.
 
-pub use oris_agent_contract::*;
+pub use oris_evokernel::agent_contract::*;
