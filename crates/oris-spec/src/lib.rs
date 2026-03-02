@@ -87,3 +87,99 @@ impl SpecCompiler {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_SPEC: &str = r#"
+id: example-spec
+version: "1.0"
+intent: Fix borrow checker error
+signals:
+  - rust borrow error
+constraints:
+  - key: crate
+    value: oris-kernel
+mutation:
+  strategy: tighten_borrow_scope
+validation:
+  - cargo check
+"#;
+
+    #[test]
+    fn test_spec_compiler_from_yaml() {
+        let doc = SpecCompiler::from_yaml(SAMPLE_SPEC).unwrap();
+        assert_eq!(doc.id, "example-spec");
+        assert_eq!(doc.version, "1.0");
+        assert_eq!(doc.signals.len(), 1);
+    }
+
+    #[test]
+    fn test_spec_compiler_compile() {
+        let doc = SpecCompiler::from_yaml(SAMPLE_SPEC).unwrap();
+        let plan = SpecCompiler::compile(&doc).unwrap();
+        assert!(plan.mutation_intent.id.starts_with("spec-"));
+        assert_eq!(plan.validation_profile, "cargo check");
+    }
+
+    #[test]
+    fn test_spec_compile_empty_id() {
+        let doc = SpecDocument {
+            id: "".into(),
+            version: "1.0".into(),
+            intent: "test".into(),
+            signals: vec![],
+            constraints: vec![],
+            mutation: SpecMutation { strategy: "test".into() },
+            validation: vec![],
+        };
+        let result = SpecCompiler::compile(&doc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spec_compile_empty_intent() {
+        let doc = SpecDocument {
+            id: "test".into(),
+            version: "1.0".into(),
+            intent: "".into(),
+            signals: vec![],
+            constraints: vec![],
+            mutation: SpecMutation { strategy: "test".into() },
+            validation: vec![],
+        };
+        let result = SpecCompiler::compile(&doc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_spec_compile_empty_strategy() {
+        let doc = SpecDocument {
+            id: "test".into(),
+            version: "1.0".into(),
+            intent: "test".into(),
+            signals: vec![],
+            constraints: vec![],
+            mutation: SpecMutation { strategy: "".into() },
+            validation: vec![],
+        };
+        let result = SpecCompiler::compile(&doc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_default_validation_profile() {
+        let doc = SpecDocument {
+            id: "test".into(),
+            version: "1.0".into(),
+            intent: "test".into(),
+            signals: vec![],
+            constraints: vec![],
+            mutation: SpecMutation { strategy: "test".into() },
+            validation: vec![],
+        };
+        let plan = SpecCompiler::compile(&doc).unwrap();
+        assert_eq!(plan.validation_profile, "spec-default");
+    }
+}
