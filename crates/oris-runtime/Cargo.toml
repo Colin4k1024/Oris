@@ -96,7 +96,7 @@ gix = { version = "0.68.0", default-features = false, optional = true, features 
     "serde",
 ] }
 opensearch = { version = "2", optional = true, features = ["aws-auth"] }
-aws-config = { version = "1.2", optional = true, features = [
+aws-config = { version = "=1.8.13", optional = true, features = [
     "behavior-version-latest",
 ] }
 glob = "0.3.1"
@@ -121,8 +121,8 @@ ollama-rs = { version = "0.2.0", optional = true, features = [
 ] }
 mistralai-client = { version = "0.14.0", optional = true }
 google-ai-rs = { version = "0.1", optional = true }
-aws-sdk-bedrockruntime = { version = "1", optional = true }
-aws-sdk-s3 = { version = "1", optional = true }
+aws-sdk-bedrockruntime = { version = "=1.124.0", optional = true }
+aws-sdk-s3 = { version = "=1.122.0", optional = true }
 octocrab = { version = "0.38", optional = true }
 base64 = { version = "0.22", optional = true }
 chromadb = { version = "2", optional = true }
