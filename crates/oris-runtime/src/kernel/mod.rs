@@ -5,16 +5,23 @@
 //! Graph and Agent compile down to StepFn; tools implement ActionExecutor.
 
 pub mod action;
+pub mod determinism_guard;
 pub mod driver;
 pub mod event;
 pub mod event_store;
+pub mod execution_log;
+pub mod execution_step;
 pub mod identity;
+pub mod kernel_mode;
 pub mod policy;
 #[cfg(feature = "kernel-postgres")]
 pub mod postgres_store;
 pub mod reducer;
+pub mod replay_cursor;
+pub mod replay_verifier;
 pub mod runner;
 pub mod runtime;
+pub mod runtime_effect;
 pub mod snapshot;
 pub mod state;
 pub mod step;
@@ -22,16 +29,24 @@ pub mod stubs;
 pub mod timeline;
 
 pub use action::{Action, ActionError, ActionErrorKind, ActionExecutor, ActionResult};
+pub use determinism_guard::{
+    compute_event_stream_hash, event_stream_hash, verify_event_stream_hash, DeterminismGuard,
+};
 pub use driver::{BlockedInfo, Kernel, RunStatus, Signal};
 pub use event::{Event, EventStore, KernelError, SequencedEvent};
 pub use event_store::{InMemoryEventStore, SharedEventStore};
+pub use execution_log::{scan_execution_log, ExecutionLog};
+pub use execution_step::{ExecutionStep, ExecutionStepInput, StepResult};
 pub use identity::{RunId, Seq, StepId};
+pub use kernel_mode::KernelMode;
 pub use policy::{
     AllowListPolicy, BudgetRules, Policy, PolicyCtx, RetryDecision, RetryWithBackoffPolicy,
 };
 #[cfg(feature = "kernel-postgres")]
 pub use postgres_store::{PostgresEventStore, PostgresSnapshotStore};
 pub use reducer::{Reducer, StateUpdatedOnlyReducer};
+pub use replay_cursor::{ReplayCursor, ReplayStepIter};
+pub use replay_verifier::{ReplayVerifier, VerificationFailure, VerificationResult, VerifyConfig};
 pub use runner::KernelRunner;
 #[cfg(feature = "kernel-postgres")]
 pub use runtime::PostgresRuntimeRepository;
@@ -67,6 +82,7 @@ pub use runtime::{
 pub use runtime::{IdempotencyRecord, SqliteIdempotencyStore, SqliteRuntimeRepository};
 #[cfg(feature = "sqlite-persistence")]
 pub use runtime::{RuntimeStorageBackend, RuntimeStorageConfig};
+pub use runtime_effect::{EffectSink, NoopEffectSink, RuntimeEffect};
 pub use snapshot::{InMemorySnapshotStore, Snapshot, SnapshotStore};
 pub use state::KernelState;
 pub use step::{InterruptInfo, Next, StepFn};

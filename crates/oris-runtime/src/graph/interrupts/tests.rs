@@ -151,6 +151,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: crate::kernel::KernelMode::Normal,
         };
         let replayed = kernel
             .replay(&run_id, initial_state)

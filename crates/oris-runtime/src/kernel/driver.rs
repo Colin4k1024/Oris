@@ -2,11 +2,14 @@
 
 use std::time::Duration;
 
-use crate::kernel::action::{ActionError, ActionExecutor, ActionResult};
+use crate::kernel::action::{Action, ActionError, ActionExecutor, ActionResult};
+use crate::kernel::determinism_guard::DeterminismGuard;
 use crate::kernel::event::{Event, EventStore};
 use crate::kernel::identity::{RunId, Seq};
+use crate::kernel::kernel_mode::KernelMode;
 use crate::kernel::policy::{Policy, PolicyCtx, RetryDecision};
 use crate::kernel::reducer::Reducer;
+use crate::kernel::runtime_effect::{EffectSink, RuntimeEffect};
 use crate::kernel::snapshot::{Snapshot, SnapshotStore};
 use crate::kernel::state::KernelState;
 use crate::kernel::step::{InterruptInfo, Next, StepFn};
@@ -42,7 +45,7 @@ pub enum Signal {
     },
 }
 
-/// Kernel: event store, optional snapshot store, reducer, executor, step fn, policy.
+/// Kernel: event store, optional snapshot store, reducer, executor, step fn, policy, optional effect sink, execution mode.
 pub struct Kernel<S: KernelState> {
     pub events: Box<dyn EventStore>,
     pub snaps: Option<Box<dyn SnapshotStore<S>>>,
@@ -50,9 +53,18 @@ pub struct Kernel<S: KernelState> {
     pub exec: Box<dyn ActionExecutor>,
     pub step: Box<dyn StepFn<S>>,
     pub policy: Box<dyn Policy>,
+    /// When set, every runtime effect (LLM/tool call, state write, interrupt) is recorded here.
+    pub effect_sink: Option<Box<dyn EffectSink>>,
+    /// Execution mode: Normal, Record, Replay, or Verify. Replay/Verify trap clock, randomness, spawn.
+    pub mode: KernelMode,
 }
 
 impl<S: KernelState> Kernel<S> {
+    /// Returns a determinism guard for the current mode. Use before clock, randomness, or spawn in Replay/Verify.
+    pub fn determinism_guard(&self) -> DeterminismGuard {
+        DeterminismGuard::new(self.mode)
+    }
+
     /// Runs until the step returns Complete or Interrupt/WaitSignal. Returns run status.
     /// State is obtained by replaying the event log (or initial_state if the run has no events yet).
     pub fn run_until_blocked(
@@ -92,6 +104,19 @@ impl<S: KernelState> Kernel<S> {
             let next = self.step.next(&state)?;
             match next {
                 Next::Emit(evs) => {
+                    if let Some(sink) = &self.effect_sink {
+                        for ev in &evs {
+                            if let Event::StateUpdated { step_id, payload } = ev {
+                                sink.record(
+                                    run_id,
+                                    &RuntimeEffect::StateWrite {
+                                        step_id: step_id.clone(),
+                                        payload: payload.clone(),
+                                    },
+                                );
+                            }
+                        }
+                    }
                     if !evs.is_empty() {
                         let before = self.events.head(run_id)?;
                         self.events.append(run_id, &evs)?;
@@ -102,6 +127,29 @@ impl<S: KernelState> Kernel<S> {
                     }
                 }
                 Next::Do(action) => {
+                    if let Some(sink) = &self.effect_sink {
+                        match &action {
+                            Action::CallLLM { provider, input } => {
+                                sink.record(
+                                    run_id,
+                                    &RuntimeEffect::LLMCall {
+                                        provider: provider.clone(),
+                                        input: input.clone(),
+                                    },
+                                );
+                            }
+                            Action::CallTool { tool, input } => {
+                                sink.record(
+                                    run_id,
+                                    &RuntimeEffect::ToolCall {
+                                        tool: tool.clone(),
+                                        input: input.clone(),
+                                    },
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
                     self.policy
                         .authorize(run_id, &action, &PolicyCtx::default())?;
                     let before = self.events.head(run_id)?;
@@ -189,6 +237,14 @@ impl<S: KernelState> Kernel<S> {
                     }
                 }
                 Next::Interrupt(info) => {
+                    if let Some(sink) = &self.effect_sink {
+                        sink.record(
+                            run_id,
+                            &RuntimeEffect::InterruptRaise {
+                                value: info.value.clone(),
+                            },
+                        );
+                    }
                     self.events.append(
                         run_id,
                         &[Event::Interrupted {
@@ -230,6 +286,7 @@ impl<S: KernelState> Kernel<S> {
         self.replay_from(run_id, initial_state, from_snap.as_ref())
     }
 
+    /// Replay-only: no executor or step is called; recorded outputs are applied from the event log.
     fn replay_from(
         &self,
         run_id: &RunId,
@@ -261,6 +318,7 @@ mod tests {
     use crate::kernel::event::Event;
     use crate::kernel::event_store::{InMemoryEventStore, SharedEventStore};
     use crate::kernel::policy::RetryWithBackoffPolicy;
+    use crate::kernel::runtime_effect::RuntimeEffect;
     use crate::kernel::stubs::{AllowAllPolicy, NoopActionExecutor, NoopStepFn};
     use crate::kernel::StateUpdatedOnlyReducer;
     use serde::{Deserialize, Serialize};
@@ -292,6 +350,32 @@ mod tests {
         }
     }
 
+    /// Sink that collects effects into a shared Vec for tests.
+    struct CollectingEffectSink(Arc<Mutex<Vec<(String, RuntimeEffect)>>>);
+    impl crate::kernel::runtime_effect::EffectSink for CollectingEffectSink {
+        fn record(&self, run_id: &RunId, effect: &RuntimeEffect) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((run_id.clone(), effect.clone()));
+        }
+    }
+
+    /// Step that emits one StateUpdated then completes (for effect-capture test).
+    struct EmitOnceThenCompleteStep(AtomicUsize);
+    impl StepFn<TestState> for EmitOnceThenCompleteStep {
+        fn next(&self, _state: &TestState) -> Result<Next, KernelError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Next::Emit(vec![Event::StateUpdated {
+                    step_id: Some("node1".into()),
+                    payload: serde_json::to_value(&TestState(1)).unwrap(),
+                }]))
+            } else {
+                Ok(Next::Complete)
+            }
+        }
+    }
+
     #[test]
     fn run_until_blocked_complete() {
         let k = Kernel::<TestState> {
@@ -301,10 +385,62 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let run_id = "run-complete".to_string();
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(matches!(status, RunStatus::Completed));
+    }
+
+    #[test]
+    fn kernel_replay_mode_determinism_guard_traps_clock() {
+        let k = Kernel::<TestState> {
+            events: Box::new(InMemoryEventStore::new()),
+            snaps: None,
+            reducer: Box::new(StateUpdatedOnlyReducer),
+            exec: Box::new(NoopActionExecutor),
+            step: Box::new(NoopStepFn),
+            policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Replay,
+        };
+        let guard = k.determinism_guard();
+        let err = guard.check_clock_access().unwrap_err();
+        assert!(err.to_string().contains("Replay"));
+    }
+
+    #[test]
+    fn effect_sink_captures_state_write_and_complete() {
+        let effects: Arc<Mutex<Vec<(String, RuntimeEffect)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = CollectingEffectSink(Arc::clone(&effects));
+        let k = Kernel::<TestState> {
+            events: Box::new(InMemoryEventStore::new()),
+            snaps: None,
+            reducer: Box::new(StateUpdatedOnlyReducer),
+            exec: Box::new(NoopActionExecutor),
+            step: Box::new(EmitOnceThenCompleteStep(AtomicUsize::new(0))),
+            policy: Box::new(AllowAllPolicy),
+            effect_sink: Some(Box::new(sink)),
+            mode: KernelMode::Normal,
+        };
+        let run_id = "run-effect-capture".to_string();
+        let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
+        assert!(matches!(status, RunStatus::Completed));
+        let recorded = effects.lock().unwrap();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "one effect (StateWrite) should be captured"
+        );
+        match &recorded[0].1 {
+            RuntimeEffect::StateWrite { step_id, payload } => {
+                assert_eq!(step_id.as_deref(), Some("node1"));
+                let s: TestState = serde_json::from_value(payload.clone()).unwrap();
+                assert_eq!(s.0, 1);
+            }
+            _ => panic!("expected StateWrite"),
+        }
     }
 
     #[test]
@@ -317,6 +453,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let run_id = "timeline-run".to_string();
         let _ = k.run_until_blocked(&run_id, TestState(0)).unwrap();
@@ -356,6 +494,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(InterruptOnceStep(false)),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(matches!(status, RunStatus::Blocked(_)));
@@ -367,6 +507,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(InterruptOnceStep(true)),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let status2 = k2
             .resume(&run_id, TestState(0), Signal::Resume(serde_json::json!(1)))
@@ -399,6 +541,8 @@ mod tests {
             exec: Box::new(CountingActionExecutor::new(Arc::clone(&exec_count))),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let _ = k.replay(&run_id, TestState(0)).unwrap();
         assert_eq!(
@@ -436,6 +580,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let initial = TestState(0);
         let s1 = k.replay(&run_id, initial.clone()).unwrap();
@@ -482,6 +628,8 @@ mod tests {
             exec: Box::new(TransientThenSuccessExecutor::new(2)),
             step: Box::new(DoOnceThenCompleteStep::new()),
             policy: Box::new(RetryWithBackoffPolicy::new(AllowAllPolicy, 3, 0)),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(matches!(status, RunStatus::Completed));
@@ -510,6 +658,8 @@ mod tests {
             exec: Box::new(CountingActionExecutor::new(Arc::new(AtomicUsize::new(0)))),
             step: Box::new(DoOnceThenCompleteStep::new()),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(
@@ -651,6 +801,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
         let state = k.replay_from_snapshot(&run_id, TestState(0)).unwrap();
         assert_eq!(state.0, 30, "only events after at_seq=2 (seq 3) applied");
@@ -669,6 +821,8 @@ mod tests {
             )])),
             step: Box::new(DoThenCompleteStep::new()),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
 
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
@@ -719,6 +873,8 @@ mod tests {
             exec: Box::new(ArcExecutor(Arc::clone(&exec))),
             step: Box::new(DoThenCompleteStep::new()),
             policy: Box::new(RetryWithBackoffPolicy::new(AllowAllPolicy, 3, 0)),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
 
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
@@ -765,6 +921,8 @@ mod tests {
             exec: Box::new(ArcExecutor(Arc::clone(&exec))),
             step: Box::new(DoThenCompleteStep::new()),
             policy: Box::new(RetryWithBackoffPolicy::new(AllowAllPolicy, 1, 0)),
+            effect_sink: None,
+            mode: KernelMode::Normal,
         };
 
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();

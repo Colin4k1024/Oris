@@ -159,6 +159,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: crate::kernel::KernelMode::Normal,
         };
         let runner = KernelRunner::new(kernel);
         let run_id = "runner-sync-test".to_string();
@@ -177,6 +179,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: crate::kernel::KernelMode::Normal,
         };
         let runner = KernelRunner::new(kernel);
         let run_id = "runner-async-test".to_string();
@@ -196,6 +200,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: crate::kernel::KernelMode::Normal,
         };
         let runner = KernelRunner::new(kernel);
         let status1 = runner
@@ -220,6 +226,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(NoopStepFn),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: crate::kernel::KernelMode::Normal,
         };
         let runner = KernelRunner::new(kernel);
         let result = tokio::time::timeout(

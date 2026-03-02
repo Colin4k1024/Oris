@@ -36,6 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         exec: Box::new(NoopActionExecutor),
         step: Box::new(adapter),
         policy: Box::new(AllowAllPolicy),
+        effect_sink: None,
+        mode: oris_runtime::kernel::KernelMode::Normal,
     };
 
     let runner = KernelRunner::new(kernel);

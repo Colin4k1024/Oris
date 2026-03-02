@@ -170,6 +170,8 @@ mod tests {
             exec: Box::new(NoopActionExecutor),
             step: Box::new(adapter),
             policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: crate::kernel::KernelMode::Normal,
         };
         let runner = KernelRunner::new(kernel);
         let run_id = "graph-step-test".to_string();

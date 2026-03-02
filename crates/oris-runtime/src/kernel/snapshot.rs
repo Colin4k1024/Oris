@@ -1,6 +1,9 @@
 //! Snapshot and SnapshotStore for the Oris kernel.
 //!
-//! Snapshots are an **optimization**; the source of truth is the event log.
+//! **Checkpointing/snapshots are strictly an optimization layer.** The source of truth
+//! is the event-sourced execution log (see [crate::kernel::execution_log::ExecutionLog] and
+//! [crate::kernel::event::EventStore]). Snapshots only speed up replay by providing
+//! initial state at a given seq; they do not replace the log.
 //! Every snapshot must carry `at_seq` (the seq up to which state has been projected).
 
 use serde::{Deserialize, Serialize};
