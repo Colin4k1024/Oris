@@ -24,13 +24,14 @@ sqlx = { version = "0.8.0", default-features = false, features = [
     "json",
     "uuid",
 ], optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
 tracing = { version = "0.1", optional = true }
 uuid = { version = "1.8.0", features = ["v4"], optional = true }
 
 [features]
 default = []
 execution-server = ["dep:axum", "dep:uuid", "dep:tracing"]
-kernel-postgres = ["dep:sqlx", "oris-kernel/kernel-postgres"]
+kernel-postgres = ["dep:sqlx", "dep:tokio", "oris-kernel/kernel-postgres"]
 sqlite-persistence = ["dep:rusqlite", "dep:uuid", "oris-kernel/sqlite-persistence"]
 
 [dev-dependencies]

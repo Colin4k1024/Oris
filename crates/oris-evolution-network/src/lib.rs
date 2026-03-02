@@ -66,7 +66,10 @@ impl EvolutionEnvelope {
             protocol: "oen".into(),
             protocol_version: "0.1".into(),
             message_type: MessageType::Publish,
-            message_id: format!("msg-{:x}", Utc::now().timestamp_nanos_opt().unwrap_or_default()),
+            message_id: format!(
+                "msg-{:x}",
+                Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ),
             sender_id,
             timestamp: Utc::now().to_rfc3339(),
             assets,

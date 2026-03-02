@@ -124,7 +124,8 @@ impl EventStore for SqliteEventStore {
         let mut last_seq = current_head as Seq;
         for (idx, event) in events.iter().enumerate() {
             let seq = current_head + idx as i64 + 1;
-            let json = serde_json::to_string(event).map_err(|e| map_event_err("serialize event", e))?;
+            let json =
+                serde_json::to_string(event).map_err(|e| map_event_err("serialize event", e))?;
             tx.execute(
                 "INSERT INTO kernel_events (run_id, seq, event_json, created_at_ms) VALUES (?1, ?2, ?3, ?4)",
                 params![run_id, seq, json, now_ms()],
@@ -274,8 +275,8 @@ where
 
         match row {
             Some((at_seq, state_json)) => {
-                let state =
-                    serde_json::from_str(&state_json).map_err(|e| map_snapshot_err("decode state", e))?;
+                let state = serde_json::from_str(&state_json)
+                    .map_err(|e| map_snapshot_err("decode state", e))?;
                 Ok(Some(Snapshot {
                     run_id: run_id.clone(),
                     at_seq: at_seq as Seq,

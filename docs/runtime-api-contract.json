@@ -1218,6 +1218,16 @@
               },
               "type": "array"
             },
+            "observability": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/KernelObservability"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "pending_interrupt": {
               "anyOf": [
                 {
@@ -1303,6 +1313,60 @@
             "event_type",
             "seq"
           ],
+          "type": "object"
+        },
+        "KernelObservability": {
+          "description": "Placeholder structure for kernel observability / telemetry.\n\nFields can be populated by the runtime for metrics and tracing. No built-in collection or export; types exist for API stability.",
+          "properties": {
+            "interrupt_latency_ms": {
+              "description": "Optional interrupt handling latency (e.g. ms).",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "lease_graph": {
+              "description": "Optional lease/ownership snapshot (e.g. attempt → worker).",
+              "items": {
+                "items": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "reasoning_timeline": {
+              "description": "Optional reasoning or decision timeline (e.g. scheduler steps).",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "replay_cost": {
+              "description": "Optional replay cost hint (e.g. event count or duration).",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         },
         "TraceContextResponse": {
@@ -1531,6 +1595,16 @@
         },
         "JobTimelineResponse": {
           "properties": {
+            "observability": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/KernelObservability"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "thread_id": {
               "type": "string"
             },
@@ -1545,6 +1619,60 @@
             "thread_id",
             "timeline"
           ],
+          "type": "object"
+        },
+        "KernelObservability": {
+          "description": "Placeholder structure for kernel observability / telemetry.\n\nFields can be populated by the runtime for metrics and tracing. No built-in collection or export; types exist for API stability.",
+          "properties": {
+            "interrupt_latency_ms": {
+              "description": "Optional interrupt handling latency (e.g. ms).",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "lease_graph": {
+              "description": "Optional lease/ownership snapshot (e.g. attempt → worker).",
+              "items": {
+                "items": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "reasoning_timeline": {
+              "description": "Optional reasoning or decision timeline (e.g. scheduler steps).",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "replay_cost": {
+              "description": "Optional replay cost hint (e.g. event count or duration).",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
           "type": "object"
         }
       },
@@ -1803,6 +1931,60 @@
           ],
           "type": "object"
         },
+        "KernelObservability": {
+          "description": "Placeholder structure for kernel observability / telemetry.\n\nFields can be populated by the runtime for metrics and tracing. No built-in collection or export; types exist for API stability.",
+          "properties": {
+            "interrupt_latency_ms": {
+              "description": "Optional interrupt handling latency (e.g. ms).",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "lease_graph": {
+              "description": "Optional lease/ownership snapshot (e.g. attempt → worker).",
+              "items": {
+                "items": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "string"
+                  }
+                ],
+                "maxItems": 2,
+                "minItems": 2,
+                "type": "array"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "reasoning_timeline": {
+              "description": "Optional reasoning or decision timeline (e.g. scheduler steps).",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "replay_cost": {
+              "description": "Optional replay cost hint (e.g. event count or duration).",
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "TimelineExportResponse": {
           "properties": {
             "history": {
@@ -1810,6 +1992,16 @@
                 "$ref": "#/definitions/JobHistoryItem"
               },
               "type": "array"
+            },
+            "observability": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/KernelObservability"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "thread_id": {
               "type": "string"

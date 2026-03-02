@@ -59,10 +59,14 @@ impl SpecCompiler {
             return Err(SpecCompileError::Invalid("spec id cannot be empty".into()));
         }
         if doc.intent.trim().is_empty() {
-            return Err(SpecCompileError::Invalid("spec intent cannot be empty".into()));
+            return Err(SpecCompileError::Invalid(
+                "spec intent cannot be empty".into(),
+            ));
         }
         if doc.mutation.strategy.trim().is_empty() {
-            return Err(SpecCompileError::Invalid("spec mutation strategy cannot be empty".into()));
+            return Err(SpecCompileError::Invalid(
+                "spec mutation strategy cannot be empty".into(),
+            ));
         }
 
         Ok(CompiledMutationPlan {
