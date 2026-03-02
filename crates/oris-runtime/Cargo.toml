@@ -33,14 +33,14 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-oris-execution-runtime = { path = "../oris-execution-runtime", default-features = false }
-oris-kernel = { path = "../oris-kernel", default-features = false }
-oris-evokernel = { path = "../oris-evokernel", optional = true }
-oris-governor = { path = "../oris-governor", optional = true }
-oris-evolution-network = { path = "../oris-evolution-network", optional = true }
-oris-economics = { path = "../oris-economics", optional = true }
-oris-spec = { path = "../oris-spec", optional = true }
-oris-agent-contract = { path = "../oris-agent-contract", optional = true }
+oris-execution-runtime = { version = "0.2.12", path = "../oris-execution-runtime", default-features = false }
+oris-kernel = { version = "0.2.12", path = "../oris-kernel", default-features = false }
+oris-evokernel = { version = "0.1.0", path = "../oris-evokernel", optional = true }
+oris-governor = { version = "0.1.0", path = "../oris-governor", optional = true }
+oris-evolution-network = { version = "0.1.0", path = "../oris-evolution-network", optional = true }
+oris-economics = { version = "0.1.0", path = "../oris-economics", optional = true }
+oris-spec = { version = "0.1.0", path = "../oris-spec", optional = true }
+oris-agent-contract = { version = "0.1.0", path = "../oris-agent-contract", optional = true }
 scraper = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1.80"
