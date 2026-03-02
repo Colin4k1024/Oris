@@ -1,3 +1,3 @@
-//! Experimental re-export for governor policy types.
+//! Experimental re-export for governor policy types via the EvoKernel facade.
 
-pub use oris_governor::*;
+pub use oris_evokernel::governor::*;

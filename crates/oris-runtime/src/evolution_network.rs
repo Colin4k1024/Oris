@@ -1,3 +1,3 @@
-//! Experimental re-export for the Oris Evolution Network protocol.
+//! Experimental re-export for the Oris Evolution Network protocol via the EvoKernel facade.
 
-pub use oris_evolution_network::*;
+pub use oris_evokernel::evolution_network::*;

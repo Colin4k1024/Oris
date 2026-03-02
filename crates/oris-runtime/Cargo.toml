@@ -36,11 +36,6 @@ rustdoc-args = ["--cfg", "docsrs"]
 oris-execution-runtime = { version = "0.2.12", path = "../oris-execution-runtime", default-features = false }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel", default-features = false }
 oris-evokernel = { version = "0.1.0", path = "../oris-evokernel", optional = true }
-oris-governor = { version = "0.1.0", path = "../oris-governor", optional = true }
-oris-evolution-network = { version = "0.1.0", path = "../oris-evolution-network", optional = true }
-oris-economics = { version = "0.1.0", path = "../oris-economics", optional = true }
-oris-spec = { version = "0.1.0", path = "../oris-spec", optional = true }
-oris-agent-contract = { version = "0.1.0", path = "../oris-agent-contract", optional = true }
 scraper = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1.80"
@@ -204,12 +199,13 @@ execution-server = [
     "oris-kernel/execution-server",
     "oris-execution-runtime/execution-server",
 ]
-evolution-experimental = ["dep:oris-evokernel"]
-governor-experimental = ["dep:oris-governor"]
-evolution-network-experimental = ["dep:oris-evolution-network", "evolution-experimental"]
-economics-experimental = ["dep:oris-economics"]
-spec-experimental = ["dep:oris-spec"]
-agent-contract-experimental = ["dep:oris-agent-contract"]
+evokernel-facade = ["dep:oris-evokernel"]
+evolution-experimental = ["evokernel-facade"]
+governor-experimental = ["evokernel-facade"]
+evolution-network-experimental = ["evokernel-facade", "evolution-experimental"]
+economics-experimental = ["evokernel-facade"]
+spec-experimental = ["evokernel-facade"]
+agent-contract-experimental = ["evokernel-facade"]
 full-evolution-experimental = [
     "evolution-experimental",
     "governor-experimental",
