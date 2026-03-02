@@ -1,5 +1,7 @@
 # Oris Agent Runtime Contract Specification
 
+
+> **Implementation Status: Needs Update** ⚠️
 Source: https://www.notion.so/317e8a70eec5808b9b0bd35bc45b4e91
 
 Last synced: March 2, 2026

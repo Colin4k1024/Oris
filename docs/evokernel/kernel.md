@@ -1,5 +1,7 @@
 # Oris Minimal Evolution Kernel Specification
 
+
+> **Implementation Status: Implemented** ✅
 Source: https://www.notion.so/317e8a70eec58055bd75dc70f680d4c1
 
 Last synced: March 2, 2026

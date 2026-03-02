@@ -1,5 +1,7 @@
 # Oris Unified Specification Language (OUSL)
 
+
+> **Implementation Status: Implemented** ✅
 Source: https://www.notion.so/317e8a70eec580de9ea1df0f825fffcd
 
 Last synced: March 2, 2026

@@ -1,5 +1,7 @@
 # Oris Self-Accelerating Development Loop
 
+
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec58037987ffb3c0c7b0be7
 
 Last synced: March 2, 2026

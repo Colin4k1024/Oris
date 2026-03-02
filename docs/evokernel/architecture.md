@@ -1,5 +1,7 @@
 # Oris - Self-Evolving Agent Kernel Architecture
 
+> **Implementation Status: Implemented** ✅
+
 Source: https://www.notion.so/317e8a70eec5803eb3a4d504c2ba9979
 
 Last synced: March 2, 2026

@@ -1,5 +1,7 @@
 # Oris Evolution Economy and Anti-Collapse Mechanism
 
+
+> **Implementation Status: Implemented** ✅
 Source: https://www.notion.so/317e8a70eec5804791a6c1b843a08464
 
 Last synced: March 2, 2026

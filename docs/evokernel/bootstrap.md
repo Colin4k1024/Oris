@@ -1,5 +1,7 @@
 # Oris Evolution Bootstrap Specification
 
+
+> **Implementation Status: Needs Update** ⚠️
 Source: https://www.notion.so/317e8a70eec5808892d5e97a9d8d5de7
 
 Last synced: March 2, 2026

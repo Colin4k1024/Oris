@@ -1,5 +1,7 @@
 # Oris Evolution Mechanism Specification
 
+
+> **Implementation Status: Implemented** ✅
 Source: https://www.notion.so/317e8a70eec5804ca71ae1ae0ea354fa
 
 Last synced: March 2, 2026

@@ -1,5 +1,7 @@
 # Oris Evolution Network Protocol (OEN)
 
+
+> **Implementation Status: Implemented** ✅
 Source: https://www.notion.so/317e8a70eec580569ef0ea1713b7e5f6
 
 Last synced: March 2, 2026
