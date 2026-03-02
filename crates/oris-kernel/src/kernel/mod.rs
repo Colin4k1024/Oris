@@ -26,11 +26,11 @@ pub mod replay_verifier;
 pub mod runner;
 pub mod runtime_effect;
 pub mod snapshot;
+#[cfg(feature = "sqlite-persistence")]
+pub mod sqlite_store;
 pub mod state;
 pub mod step;
 pub mod stubs;
-#[cfg(feature = "sqlite-persistence")]
-pub mod sqlite_store;
 pub mod timeline;
 pub mod timeline_fork;
 
@@ -62,10 +62,10 @@ pub use replay_verifier::{ReplayVerifier, VerificationFailure, VerificationResul
 pub use runner::KernelRunner;
 pub use runtime_effect::{EffectSink, NoopEffectSink, RuntimeEffect};
 pub use snapshot::{InMemorySnapshotStore, Snapshot, SnapshotStore};
+#[cfg(feature = "sqlite-persistence")]
+pub use sqlite_store::{SqliteEventStore, SqliteSnapshotStore};
 pub use state::KernelState;
 pub use step::{InterruptInfo, Next, StepFn};
 pub use stubs::{AllowAllPolicy, NoopActionExecutor, NoopStepFn};
-#[cfg(feature = "sqlite-persistence")]
-pub use sqlite_store::{SqliteEventStore, SqliteSnapshotStore};
 pub use timeline::{run_timeline, RunStatusSummary, RunTimeline, TimelineEntry};
 pub use timeline_fork::{ForkResult, TimelineFork, TimelineForker};

@@ -60,11 +60,11 @@ pub mod agent_contract;
 pub mod chain;
 /// Document loaders: PDF, HTML, CSV, Git, S3, and more (feature-gated). Experimental API in 0.1.x.
 pub mod document_loaders;
-/// Embedding models (OpenAI, Ollama, FastEmbed, etc.; feature-gated). Experimental API in 0.1.x.
-pub mod embedding;
 /// Economics layer: EVU ledger and reputation accounting. Experimental API.
 #[cfg(feature = "economics-experimental")]
 pub mod economics;
+/// Embedding models (OpenAI, Ollama, FastEmbed, etc.; feature-gated). Experimental API in 0.1.x.
+pub mod embedding;
 /// Unified error types and utilities.
 pub mod error;
 /// EvoKernel API: mutation, sandboxed validation, evolution memory, replay-first reuse. Experimental API.
@@ -78,11 +78,11 @@ pub mod execution_runtime;
 /// Graph-aware HTTP execution server and benchmark helpers.
 #[cfg(feature = "execution-server")]
 pub mod execution_server;
-/// Graph: state graphs, streaming, persistence, subgraphs, interrupts. **Stable API.**
-pub mod graph;
 /// Governor: policy-only promotion, revocation, and cooldown rules. Experimental API.
 #[cfg(feature = "governor-experimental")]
 pub mod governor;
+/// Graph: state graphs, streaming, persistence, subgraphs, interrupts. **Stable API.**
+pub mod graph;
 /// Kernel API (2.0): event log, snapshot, reducer, action, step, policy, driver. Experimental API in 0.1.x.
 pub mod kernel;
 /// Common LLM/embedding traits and config. Experimental API in 0.1.x.
