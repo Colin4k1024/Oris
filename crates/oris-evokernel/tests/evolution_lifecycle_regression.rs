@@ -368,6 +368,107 @@ async fn governor_blast_radius_gate_blocks_promotion_and_replay() {
 }
 
 #[tokio::test]
+async fn governor_rate_limit_blocks_rapid_successive_mutations() {
+    let workspace = temp_workspace();
+    let sandbox_root = unique_path("governor-rate-limit-sandbox");
+    let store_root = unique_path("governor-rate-limit-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let sandbox = Arc::new(LocalProcessSandbox::new(
+        "run-governor-rate-limit",
+        &workspace,
+        &sandbox_root,
+    ));
+    let evo = EvoKernel::new(test_kernel(), sandbox, validator, store.clone())
+        .with_governor(Arc::new(DefaultGovernor::new(GovernorConfig {
+            promote_after_successes: 1,
+            cooldown_secs: 0,
+            max_mutations_per_window: 1,
+            mutation_window_secs: 60 * 60,
+            ..Default::default()
+        })))
+        .with_sandbox_policy(sandbox_policy())
+        .with_validation_plan(lightweight_plan());
+
+    let first = evo
+        .capture_mutation_with_governor(
+            &"run-governor-rate-limit".to_string(),
+            sample_mutation_with_id("mutation-governor-rate-limit-1"),
+        )
+        .await
+        .unwrap();
+    let second = evo
+        .capture_mutation_with_governor(
+            &"run-governor-rate-limit".to_string(),
+            sample_mutation_with_id("mutation-governor-rate-limit-2"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first.governor_decision.target_state,
+        EvoAssetState::Promoted
+    );
+    assert_eq!(
+        second.governor_decision.target_state,
+        EvoAssetState::Candidate
+    );
+    assert!(second.governor_decision.reason.contains("rate limit"));
+    assert_eq!(second.gene.state, EvoAssetState::Candidate);
+    assert_eq!(second.capsule.state, EvoAssetState::Candidate);
+    assert!(second.governor_decision.cooling_window.is_some());
+}
+
+#[tokio::test]
+async fn governor_cooling_window_blocks_rapid_repromotion() {
+    let workspace = temp_workspace();
+    let sandbox_root = unique_path("governor-cooling-sandbox");
+    let store_root = unique_path("governor-cooling-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let sandbox = Arc::new(LocalProcessSandbox::new(
+        "run-governor-cooling",
+        &workspace,
+        &sandbox_root,
+    ));
+    let evo = EvoKernel::new(test_kernel(), sandbox, validator, store)
+        .with_governor(Arc::new(DefaultGovernor::new(GovernorConfig {
+            promote_after_successes: 1,
+            retry_cooldown_secs: 5 * 60,
+            max_mutations_per_window: 100,
+            ..Default::default()
+        })))
+        .with_sandbox_policy(sandbox_policy())
+        .with_validation_plan(lightweight_plan());
+
+    let first = evo
+        .capture_mutation_with_governor(
+            &"run-governor-cooling".to_string(),
+            sample_mutation_with_id("mutation-governor-cooling-1"),
+        )
+        .await
+        .unwrap();
+    let second = evo
+        .capture_mutation_with_governor(
+            &"run-governor-cooling".to_string(),
+            sample_mutation_with_id("mutation-governor-cooling-2"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first.governor_decision.target_state,
+        EvoAssetState::Promoted
+    );
+    assert_eq!(
+        second.governor_decision.target_state,
+        EvoAssetState::Candidate
+    );
+    assert!(second.governor_decision.reason.contains("cooling"));
+    assert!(second.governor_decision.cooling_window.is_some());
+}
+
+#[tokio::test]
 async fn replay_failure_threshold_revokes_promoted_gene() {
     let workspace = temp_workspace();
     let sandbox_root = unique_path("replay-failure-sandbox");

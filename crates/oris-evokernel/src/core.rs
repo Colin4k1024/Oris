@@ -12,9 +12,9 @@ use oris_agent_contract::{ExecutionFeedback, MutationProposal as AgentMutationPr
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
     compute_artifact_hash, next_id, stable_hash_json, AssetState, BlastRadius, CandidateSource,
-    Capsule, CapsuleId, EnvFingerprint, EvolutionError, EvolutionEvent, EvolutionStore, Gene,
-    GeneCandidate, MutationId, PreparedMutation, Selector, SelectorInput, StoreBackedSelector,
-    StoredEvolutionEvent, ValidationSnapshot,
+    Capsule, CapsuleId, EnvFingerprint, EvolutionError, EvolutionEvent, EvolutionProjection,
+    EvolutionStore, Gene, GeneCandidate, MutationId, PreparedMutation, Selector, SelectorInput,
+    StoreBackedSelector, StoredEvolutionEvent, ValidationSnapshot,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -471,6 +471,13 @@ impl StoreReplayExecutor {
         validation: &ValidationPlan,
         report: &ValidationReport,
     ) -> Result<(), ReplayError> {
+        let projection = self
+            .store
+            .rebuild_projection()
+            .map_err(|err| ReplayError::Store(err.to_string()))?;
+        let (current_confidence, historical_peak_confidence, confidence_last_updated_secs) =
+            Self::confidence_context(&projection, &best.gene.id);
+
         self.store
             .append_event(EvolutionEvent::ValidationFailed {
                 mutation_id: capsule.mutation_id.clone(),
@@ -492,6 +499,10 @@ impl StoreReplayExecutor {
                 lines_changed: capsule.outcome.lines_changed,
             },
             replay_failures,
+            recent_mutation_ages_secs: Vec::new(),
+            current_confidence,
+            historical_peak_confidence,
+            confidence_last_updated_secs,
         });
 
         if matches!(governor_decision.target_state, AssetState::Revoked) {
@@ -518,6 +529,35 @@ impl StoreReplayExecutor {
         }
 
         Ok(())
+    }
+
+    fn confidence_context(
+        projection: &EvolutionProjection,
+        gene_id: &str,
+    ) -> (f32, f32, Option<u64>) {
+        let peak_confidence = projection
+            .capsules
+            .iter()
+            .filter(|capsule| capsule.gene_id == gene_id)
+            .map(|capsule| capsule.confidence)
+            .fold(0.0_f32, f32::max);
+        let age_secs = projection
+            .last_updated_at
+            .get(gene_id)
+            .and_then(|timestamp| Self::seconds_since_timestamp(timestamp, Utc::now()));
+        (peak_confidence, peak_confidence, age_secs)
+    }
+
+    fn seconds_since_timestamp(timestamp: &str, now: DateTime<Utc>) -> Option<u64> {
+        let parsed = DateTime::parse_from_rfc3339(timestamp)
+            .ok()?
+            .with_timezone(&Utc);
+        let elapsed = now.signed_duration_since(parsed);
+        if elapsed < Duration::zero() {
+            Some(0)
+        } else {
+            u64::try_from(elapsed.num_seconds()).ok()
+        }
     }
 
     fn replay_failure_count(&self, gene_id: &str) -> Result<u64, ReplayError> {
@@ -665,6 +705,40 @@ pub struct EvoKernel<S: KernelState> {
 }
 
 impl<S: KernelState> EvoKernel<S> {
+    fn recent_prior_mutation_ages_secs(
+        &self,
+        exclude_mutation_id: Option<&str>,
+    ) -> Result<Vec<u64>, EvolutionError> {
+        let now = Utc::now();
+        let mut ages = self
+            .store
+            .scan(1)?
+            .into_iter()
+            .filter_map(|stored| match stored.event {
+                EvolutionEvent::MutationDeclared { mutation }
+                    if exclude_mutation_id != Some(mutation.intent.id.as_str()) =>
+                {
+                    Self::seconds_since_timestamp(&stored.timestamp, now)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        ages.sort_unstable();
+        Ok(ages)
+    }
+
+    fn seconds_since_timestamp(timestamp: &str, now: DateTime<Utc>) -> Option<u64> {
+        let parsed = DateTime::parse_from_rfc3339(timestamp)
+            .ok()?
+            .with_timezone(&Utc);
+        let elapsed = now.signed_duration_since(parsed);
+        if elapsed < Duration::zero() {
+            Some(0)
+        } else {
+            u64::try_from(elapsed.num_seconds()).ok()
+        }
+    }
+
     pub fn new(
         kernel: Arc<Kernel<S>>,
         sandbox: Arc<dyn Sandbox>,
@@ -782,12 +856,14 @@ impl<S: KernelState> EvoKernel<S> {
 
         let projection = self.store.rebuild_projection().map_err(store_err)?;
         let blast_radius = compute_blast_radius(&mutation.artifact.payload);
+        let recent_mutation_ages_secs = self
+            .recent_prior_mutation_ages_secs(Some(mutation.intent.id.as_str()))
+            .map_err(store_err)?;
+        let mut gene = derive_gene(&mutation, &receipt, &self.validation_plan.profile);
         let success_count = projection
             .genes
             .iter()
-            .find(|gene| {
-                gene.id == derive_gene(&mutation, &receipt, &self.validation_plan.profile).id
-            })
+            .find(|existing| existing.id == gene.id)
             .map(|existing| {
                 projection
                     .capsules
@@ -802,9 +878,12 @@ impl<S: KernelState> EvoKernel<S> {
             success_count,
             blast_radius: blast_radius.clone(),
             replay_failures: 0,
+            recent_mutation_ages_secs,
+            current_confidence: 0.7,
+            historical_peak_confidence: 0.7,
+            confidence_last_updated_secs: Some(0),
         });
 
-        let mut gene = derive_gene(&mutation, &receipt, &self.validation_plan.profile);
         gene.state = governor_decision.target_state.clone();
         self.store
             .append_event(EvolutionEvent::ValidationPassed {
