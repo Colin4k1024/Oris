@@ -13,12 +13,12 @@
 - cargo test -p oris-kernel -- --nocapture
 - cargo test -p oris-kernel --features sqlite-persistence -- --nocapture
 - cargo test --workspace
-- cargo build --verbose --all --release --all-features
-- cargo test --release --all-features
+- /bin/zsh -lc "unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo build --verbose --all --release --all-features"
+- /bin/zsh -lc "unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo test --release --all-features"
 - cargo publish -p oris-kernel --dry-run
 - cargo publish -p oris-kernel
-- cargo publish -p oris-runtime --all-features --dry-run
-- cargo publish -p oris-runtime --all-features
+- cargo publish -p oris-runtime --all-features --dry-run --registry crates-io
+- cargo publish -p oris-runtime --all-features --registry crates-io
 
 ## Links
 
