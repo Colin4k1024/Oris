@@ -453,6 +453,23 @@ impl Selector for ProjectionSelector {
             if capsules.is_empty() {
                 continue;
             }
+            let mut capsules = capsules;
+            capsules.sort_by(|left, right| {
+                environment_match_factor(&input.env, &right.env)
+                    .partial_cmp(&environment_match_factor(&input.env, &left.env))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        right
+                            .confidence
+                            .partial_cmp(&left.confidence)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let env_match_factor = capsules
+                .first()
+                .map(|capsule| environment_match_factor(&input.env, &capsule.env))
+                .unwrap_or(0.0);
 
             let successful_capsules = capsules.len() as f64;
             let attempts = self
@@ -473,12 +490,6 @@ impl Selector for ProjectionSelector {
                 .copied()
                 .unwrap_or(0) as f64;
             let reuse_count_factor = 1.0 + (1.0 + successful_reuses).ln();
-            let env_fingerprints = capsules
-                .iter()
-                .map(|capsule| fingerprint_key(&capsule.env))
-                .collect::<BTreeSet<_>>()
-                .len() as f64;
-            let env_diversity = (env_fingerprints / 5.0).min(1.0);
             let signal_overlap = normalized_signal_overlap(&gene.signals, &input.signals);
             let recency_decay = self
                 .projection
@@ -492,7 +503,7 @@ impl Selector for ProjectionSelector {
                 .unwrap_or(0.0);
             let score = (success_rate
                 * reuse_count_factor
-                * env_diversity
+                * env_match_factor
                 * recency_decay
                 * signal_overlap) as f32;
             if score < 0.35 {
@@ -700,11 +711,21 @@ fn normalized_signal_overlap(gene_signals: &[String], input_signals: &[String]) 
     matched / input.len() as f64
 }
 
-fn fingerprint_key(env: &EnvFingerprint) -> String {
-    format!(
-        "{}|{}|{}|{}",
-        env.rustc_version, env.cargo_lock_hash, env.target_triple, env.os
-    )
+fn environment_match_factor(input: &EnvFingerprint, candidate: &EnvFingerprint) -> f64 {
+    let fields = [
+        input
+            .rustc_version
+            .eq_ignore_ascii_case(&candidate.rustc_version),
+        input
+            .cargo_lock_hash
+            .eq_ignore_ascii_case(&candidate.cargo_lock_hash),
+        input
+            .target_triple
+            .eq_ignore_ascii_case(&candidate.target_triple),
+        input.os.eq_ignore_ascii_case(&candidate.os),
+    ];
+    let matched_fields = fields.into_iter().filter(|matched| *matched).count() as f64;
+    0.5 + ((matched_fields / 4.0) * 0.5)
 }
 
 fn hash_record(
@@ -1124,5 +1145,127 @@ mod tests {
         let selected = selector.select(&input);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].gene.id, "gene-b");
+    }
+
+    #[test]
+    fn selector_prefers_closest_environment_match() {
+        let projection = EvolutionProjection {
+            genes: vec![
+                Gene {
+                    id: "gene-a".into(),
+                    signals: vec!["signal".into()],
+                    strategy: vec!["a".into()],
+                    validation: vec!["oris-default".into()],
+                    state: AssetState::Promoted,
+                },
+                Gene {
+                    id: "gene-b".into(),
+                    signals: vec!["signal".into()],
+                    strategy: vec!["b".into()],
+                    validation: vec!["oris-default".into()],
+                    state: AssetState::Promoted,
+                },
+            ],
+            capsules: vec![
+                Capsule {
+                    id: "capsule-a-stale".into(),
+                    gene_id: "gene-a".into(),
+                    mutation_id: "m1".into(),
+                    run_id: "r1".into(),
+                    diff_hash: "1".into(),
+                    confidence: 0.2,
+                    env: EnvFingerprint {
+                        rustc_version: "old-rustc".into(),
+                        cargo_lock_hash: "other-lock".into(),
+                        target_triple: "aarch64-apple-darwin".into(),
+                        os: "macos".into(),
+                    },
+                    outcome: Outcome {
+                        success: true,
+                        validation_profile: "oris-default".into(),
+                        validation_duration_ms: 1,
+                        changed_files: vec!["crates/oris-kernel".into()],
+                        validator_hash: "v".into(),
+                        lines_changed: 1,
+                        replay_verified: false,
+                    },
+                    state: AssetState::Promoted,
+                },
+                Capsule {
+                    id: "capsule-a-best".into(),
+                    gene_id: "gene-a".into(),
+                    mutation_id: "m2".into(),
+                    run_id: "r2".into(),
+                    diff_hash: "2".into(),
+                    confidence: 0.9,
+                    env: EnvFingerprint {
+                        rustc_version: "rustc".into(),
+                        cargo_lock_hash: "lock".into(),
+                        target_triple: "x86_64-unknown-linux-gnu".into(),
+                        os: "linux".into(),
+                    },
+                    outcome: Outcome {
+                        success: true,
+                        validation_profile: "oris-default".into(),
+                        validation_duration_ms: 1,
+                        changed_files: vec!["crates/oris-kernel".into()],
+                        validator_hash: "v".into(),
+                        lines_changed: 1,
+                        replay_verified: false,
+                    },
+                    state: AssetState::Promoted,
+                },
+                Capsule {
+                    id: "capsule-b".into(),
+                    gene_id: "gene-b".into(),
+                    mutation_id: "m3".into(),
+                    run_id: "r3".into(),
+                    diff_hash: "3".into(),
+                    confidence: 0.7,
+                    env: EnvFingerprint {
+                        rustc_version: "rustc".into(),
+                        cargo_lock_hash: "different-lock".into(),
+                        target_triple: "x86_64-unknown-linux-gnu".into(),
+                        os: "linux".into(),
+                    },
+                    outcome: Outcome {
+                        success: true,
+                        validation_profile: "oris-default".into(),
+                        validation_duration_ms: 1,
+                        changed_files: vec!["crates/oris-kernel".into()],
+                        validator_hash: "v".into(),
+                        lines_changed: 1,
+                        replay_verified: false,
+                    },
+                    state: AssetState::Promoted,
+                },
+            ],
+            reuse_counts: BTreeMap::from([("gene-a".into(), 3), ("gene-b".into(), 3)]),
+            attempt_counts: BTreeMap::from([("gene-a".into(), 2), ("gene-b".into(), 1)]),
+            last_updated_at: BTreeMap::from([
+                ("gene-a".into(), Utc::now().to_rfc3339()),
+                ("gene-b".into(), Utc::now().to_rfc3339()),
+            ]),
+            spec_ids_by_gene: BTreeMap::new(),
+        };
+        let selector = ProjectionSelector::new(projection);
+        let input = SelectorInput {
+            signals: vec!["signal".into()],
+            env: EnvFingerprint {
+                rustc_version: "rustc".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            spec_id: None,
+            limit: 2,
+        };
+
+        let selected = selector.select(&input);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].gene.id, "gene-a");
+        assert_eq!(selected[0].capsules[0].id, "capsule-a-best");
+        assert!(selected[0].score > selected[1].score);
     }
 }

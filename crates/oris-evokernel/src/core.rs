@@ -1125,19 +1125,35 @@ fn exact_match_candidates(store: &dyn EvolutionStore, input: &SelectorInput) -> 
                 .map(|signal| signal.to_ascii_lowercase())
                 .collect::<BTreeSet<_>>();
             if gene_signals == signal_set {
-                let matched_capsules = capsules
+                let mut matched_capsules = capsules
                     .iter()
                     .filter(|capsule| {
                         capsule.gene_id == gene.id && capsule.state == AssetState::Promoted
                     })
                     .cloned()
                     .collect::<Vec<_>>();
+                matched_capsules.sort_by(|left, right| {
+                    replay_environment_match_factor(&input.env, &right.env)
+                        .partial_cmp(&replay_environment_match_factor(&input.env, &left.env))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            right
+                                .confidence
+                                .partial_cmp(&left.confidence)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| left.id.cmp(&right.id))
+                });
                 if matched_capsules.is_empty() {
                     None
                 } else {
+                    let score = matched_capsules
+                        .first()
+                        .map(|capsule| replay_environment_match_factor(&input.env, &capsule.env))
+                        .unwrap_or(0.0);
                     Some(GeneCandidate {
                         gene,
-                        score: 1.0,
+                        score,
                         capsules: matched_capsules,
                     })
                 }
@@ -1146,8 +1162,31 @@ fn exact_match_candidates(store: &dyn EvolutionStore, input: &SelectorInput) -> 
             }
         })
         .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| left.gene.id.cmp(&right.gene.id));
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.gene.id.cmp(&right.gene.id))
+    });
     candidates
+}
+
+fn replay_environment_match_factor(input: &EnvFingerprint, candidate: &EnvFingerprint) -> f32 {
+    let fields = [
+        input
+            .rustc_version
+            .eq_ignore_ascii_case(&candidate.rustc_version),
+        input
+            .cargo_lock_hash
+            .eq_ignore_ascii_case(&candidate.cargo_lock_hash),
+        input
+            .target_triple
+            .eq_ignore_ascii_case(&candidate.target_triple),
+        input.os.eq_ignore_ascii_case(&candidate.os),
+    ];
+    let matched_fields = fields.into_iter().filter(|matched| *matched).count() as f32;
+    0.5 + ((matched_fields / 4.0) * 0.5)
 }
 
 fn effective_candidate_score(
@@ -1523,6 +1562,30 @@ index 0000000..1111111
         file_name: &str,
         line: &str,
     ) -> EvolutionEnvelope {
+        remote_publish_envelope_with_env(
+            sender_id,
+            run_id,
+            gene_id,
+            capsule_id,
+            mutation_id,
+            signal,
+            file_name,
+            line,
+            replay_input(signal).env,
+        )
+    }
+
+    fn remote_publish_envelope_with_env(
+        sender_id: &str,
+        run_id: &str,
+        gene_id: &str,
+        capsule_id: &str,
+        mutation_id: &str,
+        signal: &str,
+        file_name: &str,
+        line: &str,
+        env: EnvFingerprint,
+    ) -> EvolutionEnvelope {
         let mutation = prepare_mutation(
             MutationIntent {
                 id: mutation_id.into(),
@@ -1562,7 +1625,7 @@ index 0000000..1111111
             run_id: run_id.into(),
             diff_hash: mutation.artifact.content_hash.clone(),
             confidence: 0.9,
-            env: replay_input(signal).env,
+            env,
             outcome: Outcome {
                 success: true,
                 validation_profile: "test".into(),
@@ -1685,6 +1748,49 @@ index 0000000..1111111
             .unwrap()
             .iter()
             .any(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. })));
+    }
+
+    #[tokio::test]
+    async fn remote_replay_prefers_closest_environment_match() {
+        let (evo, _) = build_test_evo("remote-env", "run-remote-env", command_validator());
+        let input = replay_input("env-signal");
+
+        let envelope_a = remote_publish_envelope_with_env(
+            "node-a",
+            "run-remote-a",
+            "gene-a",
+            "capsule-a",
+            "mutation-a",
+            "env-signal",
+            "A.md",
+            "# from a",
+            input.env.clone(),
+        );
+        let envelope_b = remote_publish_envelope_with_env(
+            "node-b",
+            "run-remote-b",
+            "gene-b",
+            "capsule-b",
+            "mutation-b",
+            "env-signal",
+            "B.md",
+            "# from b",
+            EnvFingerprint {
+                rustc_version: "old-rustc".into(),
+                cargo_lock_hash: "other-lock".into(),
+                target_triple: "aarch64-apple-darwin".into(),
+                os: "linux".into(),
+            },
+        );
+
+        evo.import_remote_envelope(&envelope_a).unwrap();
+        evo.import_remote_envelope(&envelope_b).unwrap();
+
+        let decision = evo.replay_or_fallback(input).await.unwrap();
+
+        assert!(decision.used_capsule);
+        assert_eq!(decision.capsule_id, Some("capsule-a".into()));
+        assert!(!decision.fallback_to_planner);
     }
 
     #[tokio::test]

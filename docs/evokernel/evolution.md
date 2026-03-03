@@ -12,14 +12,14 @@ The current `crates/oris-evolution` and `crates/oris-evokernel` layers implement
 
 - `Gene`, `Capsule`, and `EvolutionEvent` domain models
 - append-only JSONL-backed evolution storage
-- selector inputs and candidate scoring inputs
+- selector ranking by signal overlap, success rate, reuse count, recency, and environment match
 - mutation preparation plus capsule capture and replay-first fallback flows
 - `spec_id` linkage for spec-driven mutations
 
 Not yet fully implemented in the checked-in code:
 
 - confidence decay over time
-- selector narrowing by `spec_id`
+- a dedicated runtime signal extraction stage that derives selector inputs automatically
 - the full detect/select/mutate pipeline as separate runtime stages
 - explicit multi-run promotion enforcement in the evolution crate itself
 
