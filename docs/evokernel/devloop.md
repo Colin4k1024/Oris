@@ -10,7 +10,7 @@ Last synced: March 3, 2026
 
 The current repository supports part of the DEVLOOP design:
 
-- development mutations can be represented as `MutationProposal` contracts
+- `examples/evo_oris_repo` demonstrates `AgentTask -> MutationProposal -> capture_from_proposal -> replay_or_fallback`
 - `oris-evokernel` can prepare mutations, validate them, capture successful capsules, and attempt replay-first reuse
 - the `full-evolution-experimental` feature wires the experimental facades together through `oris-runtime`
 
