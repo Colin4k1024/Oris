@@ -1,10 +1,26 @@
 # Oris Agent Runtime Contract Specification
 
 
-> **Implementation Status: Needs Update** ⚠️
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec5808b9b0bd35bc45b4e91
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current `crates/oris-agent-contract` crate is a proposal-only contract scaffold:
+
+- `AgentTask`
+- `MutationProposal`
+- `ExecutionFeedback`
+- `AgentCapabilityLevel`
+- `ProposalTarget`
+
+Not yet implemented in the checked-in code:
+
+- capability negotiation or enforcement
+- a transport/runtime protocol between agents and the kernel
+- agent-managed execution privileges
 
 ## 1. Purpose
 
@@ -97,12 +113,12 @@ Agents express change as a mutation proposal:
 ```rust
 struct MutationProposal {
     intent: String,
-    files: Vec<Path>,
+    files: Vec<String>,
     expected_effect: String,
 }
 ```
 
-The kernel converts this into executable mutation state.
+The kernel converts this into executable mutation state. The current contract is intentionally narrow and does not grant direct execution authority.
 
 Contract rules:
 

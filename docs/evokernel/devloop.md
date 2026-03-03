@@ -4,7 +4,22 @@
 > **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec58037987ffb3c0c7b0be7
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current repository supports part of the DEVLOOP design:
+
+- development mutations can be represented as `MutationProposal` contracts
+- `oris-evokernel` can prepare mutations, validate them, capture successful capsules, and attempt replay-first reuse
+- the `full-evolution-experimental` feature wires the experimental facades together through `oris-runtime`
+
+Still not implemented as a closed loop:
+
+- automated issue intake or task planning
+- an always-on agent execution loop
+- automatic reinjection of replay hints back into a coding agent session
+- autonomous branch, review, and release orchestration
 
 ## 1. Purpose
 
@@ -113,7 +128,7 @@ Captured automatically:
 
 Agents remain unaware of evolution capture.
 
-## 7. Replay-Driven Development
+## 7. Replay-Driven Development (Target)
 
 Before coding begins:
 

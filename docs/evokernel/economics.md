@@ -1,10 +1,25 @@
 # Oris Evolution Economy and Anti-Collapse Mechanism
 
 
-> **Implementation Status: Implemented** ✅
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec5804791a6c1b843a08464
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current `crates/oris-economics` crate is an experimental local ledger scaffold:
+
+- `EvuAccount`, `ReputationRecord`, `StakePolicy`, and `ValidationSettlement`
+- `EvuLedger` with a local `can_publish(...)` balance check
+- experimental re-export through `oris-runtime::economics`
+
+Not yet wired into the checked-in runtime:
+
+- automatic stake settlement after remote reuse success or failure
+- validator staking enforcement
+- publish-window rate limits
+- reputation-weighted selector inputs
 
 ## 1. Purpose
 
@@ -57,14 +72,14 @@ EVU - Evolution Value Unit
 EVU measures verified contribution to network intelligence. It is not required
 to be financial; it is a trust-weighted accounting unit.
 
-## 5. Evolution Lifecycle Economics
+## 5. Evolution Lifecycle Economics (Target)
 
 - Stage 1, local creation: compute and validation cost, no EVU issuance.
 - Stage 2, publication stake: publishing requires a base stake.
 - Stage 3, network validation: reuse success rewards, failure burns stake.
 - Stage 4, promotion: sufficiently reused assets become network-promoted assets.
 
-## 6. Validator Role
+## 6. Validator Role (Planned)
 
 Validators:
 
@@ -95,7 +110,7 @@ Reputation affects:
 - trust priority
 - propagation speed
 
-## 8. Anti-Spam Mechanisms
+## 8. Anti-Spam Mechanisms (Target)
 
 - publication cost
 - promotion threshold requiring independent confirmations
@@ -114,7 +129,7 @@ Example:
 reward proportional to novelty_score
 ```
 
-## 10. Confidence Market Dynamics
+## 10. Confidence Market Dynamics (Planned)
 
 Positive reuse:
 
@@ -128,7 +143,7 @@ Negative reuse:
 
 Confidence acts as evolutionary currency.
 
-## 11. Revocation Economics
+## 11. Revocation Economics (Planned)
 
 When regression occurs:
 
@@ -142,7 +157,7 @@ Consequences:
 - validator rewards reverse
 - future influence is reduced
 
-## 12. Evolution Inflation Control
+## 12. Evolution Inflation Control (Planned)
 
 Controls:
 
@@ -162,7 +177,7 @@ This prevents intelligence inflation.
 
 Healthy systems show gradual growth, not spikes.
 
-## 14. Sybil Resistance
+## 14. Sybil Resistance (Target)
 
 Strategies:
 

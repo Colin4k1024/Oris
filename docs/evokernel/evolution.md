@@ -1,10 +1,27 @@
 # Oris Evolution Mechanism Specification
 
 
-> **Implementation Status: Implemented** ✅
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec5804ca71ae1ae0ea354fa
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current `crates/oris-evolution` and `crates/oris-evokernel` layers implement:
+
+- `Gene`, `Capsule`, and `EvolutionEvent` domain models
+- append-only JSONL-backed evolution storage
+- selector inputs and candidate scoring inputs
+- mutation preparation plus capsule capture and replay-first fallback flows
+- `spec_id` linkage for spec-driven mutations
+
+Not yet fully implemented in the checked-in code:
+
+- confidence decay over time
+- selector narrowing by `spec_id`
+- the full detect/select/mutate pipeline as separate runtime stages
+- explicit multi-run promotion enforcement in the evolution crate itself
 
 ## 1. Purpose
 
@@ -96,14 +113,14 @@ Lifecycle:
 Candidate -> Promoted -> Revoked -> Archived
 ```
 
-Promotion requires:
+Target promotion policy requires:
 
 - repeated success
 - multi-run validation
 - acceptable blast radius
 - governor approval
 
-## 7. Confidence Model
+## 7. Confidence Model (Planned)
 
 Initial confidence derives from validation outcome and increases through reuse
 success. It decays with inactivity:

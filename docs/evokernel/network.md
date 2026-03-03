@@ -1,10 +1,27 @@
 # Oris Evolution Network Protocol (OEN)
 
 
-> **Implementation Status: Implemented** ✅
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec580569ef0ea1713b7e5f6
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current `crates/oris-evolution-network` crate provides protocol contracts only:
+
+- `EvolutionEnvelope` with content-hash generation and verification
+- `Publish`, `Fetch`, `Report`, and `Revoke` message types
+- `Gene`, `Capsule`, and `EvolutionEvent` network asset variants
+- request and response structs for publish, fetch, and revoke flows
+- experimental re-export through `oris-runtime::evolution_network`
+
+Not yet implemented in the checked-in crate:
+
+- HTTP or peer-to-peer transport endpoints
+- peer discovery or gossip propagation
+- automatic publish gating based on promoted asset state
+- remote trust execution or validation pipelines
 
 ## 1. Purpose
 
@@ -102,9 +119,9 @@ enum Asset {
 
 Only promoted assets may be published.
 
-## 6. Publish Protocol
+## 6. Publish Protocol (Target)
 
-Triggered when:
+Target design assumes publish is triggered when:
 
 ```text
 Capsule.state == Promoted
@@ -118,13 +135,13 @@ Local Promotion
 -> Peer Broadcast
 ```
 
-Example endpoint:
+An endpoint such as the following is a future transport shape, not a currently shipped API:
 
 ```text
 POST /evolution/publish
 ```
 
-## 7. Fetch Protocol
+## 7. Fetch Protocol (Target)
 
 Nodes may request experience using signals such as:
 
@@ -132,7 +149,7 @@ Nodes may request experience using signals such as:
 - runtime failures
 - performance anomalies
 
-Response returns ranked capsules.
+The current crate only defines fetch query and response payload types.
 
 ## 8. Remote Asset Lifecycle
 
@@ -176,7 +193,7 @@ Mandatory checks:
 - sandbox execution
 - deterministic replay
 
-## 10. Gossip Propagation Model
+## 10. Gossip Propagation Model (Planned)
 
 Recommended strategy:
 
@@ -201,7 +218,7 @@ Duplicate or competing strategies are resolved through:
 
 No global conflict authority is required.
 
-## 12. Revocation Protocol
+## 12. Revocation Protocol (Target)
 
 Nodes may revoke published assets with `MessageType::Revoke`.
 

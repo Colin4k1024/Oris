@@ -1,10 +1,26 @@
 # Oris Evolution Bootstrap Specification
 
 
-> **Implementation Status: Needs Update** ⚠️
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec5808892d5e97a9d8d5de7
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+There is no dedicated bootstrap subsystem yet. Current bootstrap behavior is assembled from existing primitives:
+
+- human-directed or test-driven mutation preparation
+- validation through the sandbox and command validator
+- capsule capture through `capture_successful_mutation(...)`
+- replay-first reuse through `replay_or_fallback(...)`
+- conservative promotion via governor thresholds
+
+Not yet implemented in the checked-in code:
+
+- an explicit bootstrap orchestrator
+- special bootstrap-only promotion policies
+- automated transition from cold start into seeded replay catalogs
 
 ## 1. Purpose
 
@@ -74,7 +90,7 @@ Example task classes:
 - error handling
 - test stabilization
 
-### 5.2 Autonomous Bootstrap
+### 5.2 Autonomous Bootstrap (Planned)
 
 Real tasks arrive immediately. This is faster but riskier and requires stricter
 governor enforcement.

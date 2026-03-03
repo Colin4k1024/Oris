@@ -4,7 +4,18 @@
 > **Implementation Status: Implemented** ✅
 Source: https://www.notion.so/317e8a70eec58055bd75dc70f680d4c1
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current `crates/oris-kernel` crate provides the baseline kernel surface:
+
+- `Kernel`, `KernelRunner`, and `ReplayCursor`
+- deterministic execution modes including replay and verify semantics
+- event storage, checkpoint-aware replay, and timeline inspection
+- interrupt, resume, retry, and effect-capture primitives
+
+The code samples in this document are schematic. The checked-in crate exposes concrete Rust types with the same responsibilities rather than the exact trait names shown below.
 
 ## 1. Purpose
 

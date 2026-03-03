@@ -1,10 +1,26 @@
 # Oris - Self-Evolving Agent Kernel Architecture
 
-> **Implementation Status: Implemented** ✅
+> **Implementation Status: In Progress** 🔄
 
 Source: https://www.notion.so/317e8a70eec5803eb3a4d504c2ba9979
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current repository provides the main architecture building blocks:
+
+- deterministic execution primitives in `crates/oris-kernel`
+- append-only evolution data structures and selector inputs in `crates/oris-evolution`
+- mutation capture, validation orchestration, and replay-first reuse in `crates/oris-evokernel`
+- local sandboxing in `crates/oris-sandbox`
+- experimental governor, network, economics, spec, and agent-contract facades through `oris-evokernel`
+
+Still represented as conceptual layers rather than dedicated runtime services:
+
+- planner and task decomposition
+- a standalone Codex execution adapter
+- a separate solidify pipeline service boundary
 
 ## 1. Overview
 
@@ -101,7 +117,7 @@ Responsible for deterministic task execution:
 
 This is the foundation of trustworthy evolution.
 
-### 4.2 Codex Execution Adapter
+### 4.2 Codex Execution Adapter (Planned Integration)
 
 Observes AI coding runtime behavior and captures:
 

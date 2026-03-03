@@ -1,10 +1,27 @@
 # Oris Evolution Stability and Safety Model
 
 
-> **Implementation Status: Implemented** ✅
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec580bfaaade692f65532fa
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current `crates/oris-governor` crate implements a narrow default policy:
+
+- promotion after a configurable success threshold
+- blast radius caps using changed file and line counts
+- replay-failure-based revocation
+- a promotion cooling window
+- `Candidate`, `Promoted`, and `Revoked` decisions
+
+Not yet implemented in the checked-in crate:
+
+- time-window or concurrent mutation rate limits
+- confidence decay and confidence history
+- automatic rollback orchestration
+- global pause or freeze controls
 
 ## 1. Purpose
 
@@ -36,7 +53,7 @@ Governor approval is required before persistence.
 
 ## 4. Control Domains
 
-### 4.1 Mutation Rate Control
+### 4.1 Mutation Rate Control (Target)
 
 Limit evolution velocity.
 
@@ -81,7 +98,7 @@ Automatic response:
 revoke_gene(gene_id)
 ```
 
-### 4.5 Confidence Decay
+### 4.5 Confidence Decay (Planned)
 
 All experience ages:
 
@@ -137,7 +154,7 @@ The governor ignores:
 
 Only execution evidence counts.
 
-## 9. Emergency Safeguards
+## 9. Emergency Safeguards (Planned)
 
 The governor may trigger:
 

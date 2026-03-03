@@ -1,10 +1,26 @@
 # Oris Unified Specification Language (OUSL)
 
 
-> **Implementation Status: Implemented** ✅
+> **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec580de9ea1df0f825fffcd
 
-Last synced: March 2, 2026
+Last synced: March 3, 2026
+
+## Current Implementation Snapshot (March 3, 2026)
+
+The current `crates/oris-spec` and `crates/oris-evokernel` crates implement:
+
+- flat top-level OUSL v0.1 YAML parsing into `SpecDocument`
+- `SpecCompiler` producing a `CompiledMutationPlan`
+- `prepare_mutation_from_spec(...)`
+- `MutationIntent.spec_id` and `EvolutionEvent::SpecLinked`
+- experimental re-export through `oris-runtime::spec_contract`
+
+Not yet implemented in the checked-in code:
+
+- default repository `specs/` directories created by tooling
+- selector narrowing by `spec_id`
+- spec version migration workflows
 
 ## 1. Purpose
 
@@ -70,23 +86,22 @@ A spec defines:
 
 Minimal schema:
 
+Current OUSL v0.1 compiler accepts a flat top-level YAML document:
+
 ```yaml
-spec:
-  id: retry_api_call
-  intent: improve reliability
-
-  signals:
-    - timeout_error
-    - connection_reset
-
-  constraints:
-    max_latency: 200ms
-
-  mutation:
-    strategy: retry_with_backoff
-
-  validation:
-    - integration_test
+id: retry_api_call
+version: "1.0"
+intent: improve reliability
+signals:
+  - timeout_error
+  - connection_reset
+constraints:
+  - key: max_latency
+    value: 200ms
+mutation:
+  strategy: retry_with_backoff
+validation:
+  - integration_test
 ```
 
 ## 6. Spec Lifecycle
@@ -171,7 +186,7 @@ Ambiguous intent is rejected.
 - optimization specs
 - evolution specs
 
-## 13. Spec Storage
+## 13. Target Spec Storage Layout
 
 ```text
 /specs
@@ -181,7 +196,7 @@ Ambiguous intent is rejected.
   `- evolution/
 ```
 
-Specs become repository-native assets.
+This is the intended repository layout. The current scaffold does not create these directories automatically.
 
 ## 14. Spec Execution Flow
 
@@ -209,11 +224,11 @@ Specs cannot bypass kernel rules.
 
 ```text
 Signal
--> Spec Match
+-> Spec-linked trace
 -> Capsule Replay
 ```
 
-Specs accelerate reuse discovery.
+Current replay integration is limited to `spec_id` tracking in mutation intents and `SpecLinked` evolution events. Selector-side spec matching is still planned.
 
 ## 17. Spec and Agents
 
