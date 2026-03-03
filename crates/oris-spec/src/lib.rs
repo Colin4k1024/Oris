@@ -131,7 +131,9 @@ validation:
             intent: "test".into(),
             signals: vec![],
             constraints: vec![],
-            mutation: SpecMutation { strategy: "test".into() },
+            mutation: SpecMutation {
+                strategy: "test".into(),
+            },
             validation: vec![],
         };
         let result = SpecCompiler::compile(&doc);
@@ -146,7 +148,9 @@ validation:
             intent: "".into(),
             signals: vec![],
             constraints: vec![],
-            mutation: SpecMutation { strategy: "test".into() },
+            mutation: SpecMutation {
+                strategy: "test".into(),
+            },
             validation: vec![],
         };
         let result = SpecCompiler::compile(&doc);
@@ -161,7 +165,9 @@ validation:
             intent: "test".into(),
             signals: vec![],
             constraints: vec![],
-            mutation: SpecMutation { strategy: "".into() },
+            mutation: SpecMutation {
+                strategy: "".into(),
+            },
             validation: vec![],
         };
         let result = SpecCompiler::compile(&doc);
@@ -176,7 +182,9 @@ validation:
             intent: "test".into(),
             signals: vec![],
             constraints: vec![],
-            mutation: SpecMutation { strategy: "test".into() },
+            mutation: SpecMutation {
+                strategy: "test".into(),
+            },
             validation: vec![],
         };
         let plan = SpecCompiler::compile(&doc).unwrap();

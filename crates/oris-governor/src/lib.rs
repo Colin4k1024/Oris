@@ -114,7 +114,12 @@ impl Governor for DefaultGovernor {
 mod tests {
     use super::*;
 
-    fn create_test_input(success_count: u64, files_changed: usize, lines_changed: usize, replay_failures: u64) -> GovernorInput {
+    fn create_test_input(
+        success_count: u64,
+        files_changed: usize,
+        lines_changed: usize,
+        replay_failures: u64,
+    ) -> GovernorInput {
         GovernorInput {
             candidate_source: CandidateSource::Local,
             success_count,
@@ -140,7 +145,10 @@ mod tests {
         // Should revoke after 2 replay failures
         let result = governor.evaluate(create_test_input(5, 1, 100, 2));
         assert_eq!(result.target_state, AssetState::Revoked);
-        assert!(matches!(result.revocation_reason, Some(RevocationReason::ReplayRegression)));
+        assert!(matches!(
+            result.revocation_reason,
+            Some(RevocationReason::ReplayRegression)
+        ));
     }
 
     #[test]

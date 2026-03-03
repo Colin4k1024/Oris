@@ -264,6 +264,7 @@ pub struct StoreReplayExecutor {
     pub validator: Arc<dyn Validator>,
     pub store: Arc<dyn EvolutionStore>,
     pub selector: Arc<dyn Selector>,
+    pub governor: Arc<dyn Governor>,
     pub economics: Option<Arc<Mutex<EvuLedger>>>,
     pub remote_publishers: Option<Arc<Mutex<BTreeMap<String, String>>>>,
     pub stake_policy: StakePolicy,
@@ -351,6 +352,7 @@ impl ReplayExecutor for StoreReplayExecutor {
             .await
             .map_err(|err| ReplayError::Validation(err.to_string()))?;
         if !report.success {
+            self.record_replay_validation_failure(&best, &capsule, validation, &report)?;
             self.record_reuse_settlement(remote_publisher.as_deref(), false);
             return Ok(ReplayDecision {
                 used_capsule: false,
@@ -434,6 +436,80 @@ impl StoreReplayExecutor {
         if let Ok(mut locked) = ledger.lock() {
             locked.settle_remote_reuse(publisher_id, success, &self.stake_policy);
         }
+    }
+
+    fn record_replay_validation_failure(
+        &self,
+        best: &GeneCandidate,
+        capsule: &Capsule,
+        validation: &ValidationPlan,
+        report: &ValidationReport,
+    ) -> Result<(), ReplayError> {
+        self.store
+            .append_event(EvolutionEvent::ValidationFailed {
+                mutation_id: capsule.mutation_id.clone(),
+                report: report.to_snapshot(&validation.profile),
+                gene_id: Some(best.gene.id.clone()),
+            })
+            .map_err(|err| ReplayError::Store(err.to_string()))?;
+
+        let replay_failures = self.replay_failure_count(&best.gene.id)?;
+        let governor_decision = self.governor.evaluate(GovernorInput {
+            candidate_source: if self.publisher_for_gene(&best.gene.id).is_some() {
+                CandidateSource::Remote
+            } else {
+                CandidateSource::Local
+            },
+            success_count: 0,
+            blast_radius: BlastRadius {
+                files_changed: capsule.outcome.changed_files.len(),
+                lines_changed: capsule.outcome.lines_changed,
+            },
+            replay_failures,
+        });
+
+        if matches!(governor_decision.target_state, AssetState::Revoked) {
+            self.store
+                .append_event(EvolutionEvent::PromotionEvaluated {
+                    gene_id: best.gene.id.clone(),
+                    state: AssetState::Revoked,
+                    reason: governor_decision.reason.clone(),
+                })
+                .map_err(|err| ReplayError::Store(err.to_string()))?;
+            self.store
+                .append_event(EvolutionEvent::GeneRevoked {
+                    gene_id: best.gene.id.clone(),
+                    reason: governor_decision.reason,
+                })
+                .map_err(|err| ReplayError::Store(err.to_string()))?;
+            for related in &best.capsules {
+                self.store
+                    .append_event(EvolutionEvent::CapsuleQuarantined {
+                        capsule_id: related.id.clone(),
+                    })
+                    .map_err(|err| ReplayError::Store(err.to_string()))?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn replay_failure_count(&self, gene_id: &str) -> Result<u64, ReplayError> {
+        Ok(self
+            .store
+            .scan(1)
+            .map_err(|err| ReplayError::Store(err.to_string()))?
+            .into_iter()
+            .filter(|stored| {
+                matches!(
+                    &stored.event,
+                    EvolutionEvent::ValidationFailed {
+                        gene_id: Some(current_gene_id),
+                        ..
+                    } if current_gene_id == gene_id
+                )
+            })
+            .count() as u64)
     }
 }
 
@@ -814,6 +890,7 @@ impl<S: KernelState> EvoKernel<S> {
             validator: self.validator.clone(),
             store: self.store.clone(),
             selector: self.selector.clone(),
+            governor: self.governor.clone(),
             economics: Some(self.economics.clone()),
             remote_publishers: Some(self.remote_publishers.clone()),
             stake_policy: self.stake_policy.clone(),
@@ -1395,12 +1472,34 @@ index 0000000..1111111
         }
     }
 
+    fn build_test_evo_with_store(
+        name: &str,
+        run_id: &str,
+        validator: Arc<dyn Validator>,
+        store: Arc<dyn EvolutionStore>,
+    ) -> EvoKernel<TestState> {
+        let workspace = temp_workspace(name);
+        let sandbox: Arc<dyn Sandbox> = Arc::new(oris_sandbox::LocalProcessSandbox::new(
+            run_id,
+            &workspace,
+            std::env::temp_dir(),
+        ));
+        EvoKernel::new(test_kernel(), sandbox, validator, store)
+            .with_governor(Arc::new(DefaultGovernor::new(
+                oris_governor::GovernorConfig {
+                    promote_after_successes: 1,
+                    ..Default::default()
+                },
+            )))
+            .with_validation_plan(lightweight_plan())
+            .with_sandbox_policy(base_sandbox_policy())
+    }
+
     fn build_test_evo(
         name: &str,
         run_id: &str,
         validator: Arc<dyn Validator>,
     ) -> (EvoKernel<TestState>, Arc<dyn EvolutionStore>) {
-        let workspace = temp_workspace(name);
         let store_root = std::env::temp_dir().join(format!(
             "oris-evokernel-{name}-store-{}",
             std::process::id()
@@ -1410,20 +1509,7 @@ index 0000000..1111111
         }
         let store: Arc<dyn EvolutionStore> =
             Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
-        let sandbox: Arc<dyn Sandbox> = Arc::new(oris_sandbox::LocalProcessSandbox::new(
-            run_id,
-            &workspace,
-            std::env::temp_dir(),
-        ));
-        let evo = EvoKernel::new(test_kernel(), sandbox, validator, store.clone())
-            .with_governor(Arc::new(DefaultGovernor::new(
-                oris_governor::GovernorConfig {
-                    promote_after_successes: 1,
-                    ..Default::default()
-                },
-            )))
-            .with_validation_plan(lightweight_plan())
-            .with_sandbox_policy(base_sandbox_policy());
+        let evo = build_test_evo_with_store(name, run_id, validator, store.clone());
         (evo, store)
     }
 
@@ -1617,6 +1703,88 @@ index 0000000..1111111
             .unwrap();
         assert!(decision.used_capsule);
         assert_eq!(decision.capsule_id, Some(capsule.id));
+    }
+
+    #[tokio::test]
+    async fn second_replay_validation_failure_revokes_gene_immediately() {
+        let (capturer, store) = build_test_evo("revoke-replay", "run-capture", command_validator());
+        let capsule = capturer
+            .capture_successful_mutation(&"run-capture".into(), sample_mutation())
+            .await
+            .unwrap();
+
+        let failing_validator: Arc<dyn Validator> = Arc::new(FixedValidator { success: false });
+        let failing_replay = build_test_evo_with_store(
+            "revoke-replay",
+            "run-replay-fail",
+            failing_validator,
+            store.clone(),
+        );
+
+        let first = failing_replay
+            .replay_or_fallback(replay_input("missing readme"))
+            .await
+            .unwrap();
+        let second = failing_replay
+            .replay_or_fallback(replay_input("missing readme"))
+            .await
+            .unwrap();
+
+        assert!(!first.used_capsule);
+        assert!(first.fallback_to_planner);
+        assert!(!second.used_capsule);
+        assert!(second.fallback_to_planner);
+
+        let projection = store.rebuild_projection().unwrap();
+        let gene = projection
+            .genes
+            .iter()
+            .find(|gene| gene.id == capsule.gene_id)
+            .unwrap();
+        assert_eq!(gene.state, AssetState::Revoked);
+        let committed_capsule = projection
+            .capsules
+            .iter()
+            .find(|current| current.id == capsule.id)
+            .unwrap();
+        assert_eq!(committed_capsule.state, AssetState::Quarantined);
+
+        let events = store.scan(1).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        EvolutionEvent::ValidationFailed {
+                            gene_id: Some(gene_id),
+                            ..
+                        } if gene_id == &capsule.gene_id
+                    )
+                })
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                EvolutionEvent::GeneRevoked { gene_id, .. } if gene_id == &capsule.gene_id
+            )
+        }));
+
+        let recovered = build_test_evo_with_store(
+            "revoke-replay",
+            "run-replay-check",
+            command_validator(),
+            store.clone(),
+        );
+        let after_revoke = recovered
+            .replay_or_fallback(replay_input("missing readme"))
+            .await
+            .unwrap();
+        assert!(!after_revoke.used_capsule);
+        assert!(after_revoke.fallback_to_planner);
+        assert_eq!(after_revoke.reason, "no matching gene");
     }
 
     #[tokio::test]
