@@ -16,6 +16,12 @@
 - cargo test --workspace
 - cargo build --verbose --all --release --all-features
 - cargo test --release --all-features
+- HOME=/tmp/oris-publish-home CARGO_HOME=/tmp/oris-publish-home/.cargo RUSTUP_HOME=/Users/jiafan/.rustup RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin cargo publish --manifest-path /Users/jiafan/Desktop/poc/Oris/crates/oris-governor/Cargo.toml -p oris-governor --dry-run --registry crates-io
+- HOME=/tmp/oris-publish-home CARGO_HOME=/tmp/oris-publish-home/.cargo RUSTUP_HOME=/Users/jiafan/.rustup RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin cargo publish --manifest-path /Users/jiafan/Desktop/poc/Oris/crates/oris-governor/Cargo.toml -p oris-governor --registry crates-io
+- HOME=/tmp/oris-publish-home CARGO_HOME=/tmp/oris-publish-home/.cargo RUSTUP_HOME=/Users/jiafan/.rustup RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin cargo publish --manifest-path /Users/jiafan/Desktop/poc/Oris/crates/oris-evokernel/Cargo.toml -p oris-evokernel --dry-run --registry crates-io
+- HOME=/tmp/oris-publish-home CARGO_HOME=/tmp/oris-publish-home/.cargo RUSTUP_HOME=/Users/jiafan/.rustup RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin cargo publish --manifest-path /Users/jiafan/Desktop/poc/Oris/crates/oris-evokernel/Cargo.toml -p oris-evokernel --registry crates-io
+- HOME=/tmp/oris-publish-home CARGO_HOME=/tmp/oris-publish-home/.cargo RUSTUP_HOME=/Users/jiafan/.rustup RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin cargo publish --manifest-path /Users/jiafan/Desktop/poc/Oris/crates/oris-runtime/Cargo.toml -p oris-runtime --all-features --dry-run --registry crates-io
+- HOME=/tmp/oris-publish-home CARGO_HOME=/tmp/oris-publish-home/.cargo RUSTUP_HOME=/Users/jiafan/.rustup RUSTUP_TOOLCHAIN=stable-aarch64-apple-darwin cargo publish --manifest-path /Users/jiafan/Desktop/poc/Oris/crates/oris-runtime/Cargo.toml -p oris-runtime --all-features --registry crates-io
 
 ## Links
 
