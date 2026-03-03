@@ -23,6 +23,12 @@ Not yet implemented in the checked-in crate:
 - automatic publish gating based on promoted asset state
 - remote trust execution or validation pipelines
 
+## Related Documents
+
+- [evolution.md](evolution.md)
+- [governor.md](governor.md)
+- [economics.md](economics.md)
+
 ## 1. Purpose
 
 The Oris Evolution Network enables multiple Oris nodes to share verified

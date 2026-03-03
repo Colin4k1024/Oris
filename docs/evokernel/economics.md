@@ -27,6 +27,12 @@ Still not implemented:
 - validator staking enforcement
 - publish-window rate limits
 
+## Related Documents
+
+- [network.md](network.md)
+- [governor.md](governor.md)
+- [evolution.md](evolution.md)
+
 ## 1. Purpose
 
 The evolution economy defines how evolutionary intelligence is:

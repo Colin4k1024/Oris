@@ -22,6 +22,12 @@ Not yet implemented in the checked-in code:
 - special bootstrap-only promotion policies
 - automated transition from cold start into seeded replay catalogs
 
+## Related Documents
+
+- [devloop.md](devloop.md)
+- [evolution.md](evolution.md)
+- [governor.md](governor.md)
+
 ## 1. Purpose
 
 Bootstrap defines how Oris produces its first verified experience and first

@@ -21,6 +21,12 @@ Still not implemented as a closed loop:
 - automatic reinjection of replay hints back into a coding agent session
 - autonomous branch, review, and release orchestration
 
+## Related Documents
+
+- [agent.md](agent.md)
+- [spec.md](spec.md)
+- [evolution.md](evolution.md)
+
 ## 1. Purpose
 
 DEVLOOP defines how Oris develops itself using AI coding agents. It establishes
