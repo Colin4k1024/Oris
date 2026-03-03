@@ -12,7 +12,7 @@ description = "Execution runtime control plane and repositories for Oris."
 async-trait = "0.1.80"
 axum = { version = "0.7", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
-oris-kernel = { version = "0.2.12", path = "../oris-kernel", default-features = false }
+oris-kernel = { version = "0.2.13", path = "../oris-kernel", default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 schemars = { version = "0.8", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -63,10 +63,10 @@ impl<S: KernelState> ReplayCursor<S> {
         run_id: &RunId,
         initial_state: S,
     ) -> Result<S, KernelError> {
-        let from_snap = self
-            .snaps
-            .as_ref()
-            .and_then(|s| s.load_latest(run_id).ok().flatten());
+        let from_snap = match &self.snaps {
+            Some(store) => store.load_latest(run_id)?,
+            None => None,
+        };
         self.replay_from(run_id, initial_state, from_snap.as_ref())
     }
 

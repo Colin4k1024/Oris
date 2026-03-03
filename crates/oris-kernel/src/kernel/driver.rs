@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::kernel::action::{Action, ActionError, ActionExecutor, ActionResult};
 use crate::kernel::determinism_guard::DeterminismGuard;
-use crate::kernel::event::{Event, EventStore};
+use crate::kernel::event::{Event, EventStore, SequencedEvent};
 use crate::kernel::identity::{RunId, Seq};
 use crate::kernel::kernel_mode::KernelMode;
 use crate::kernel::policy::{Policy, PolicyCtx, RetryDecision};
@@ -93,12 +93,7 @@ impl<S: KernelState> Kernel<S> {
 
     /// Inner loop: replay to get state, then step until Complete or Blocked.
     fn run_loop(&self, run_id: &RunId, initial_state: S) -> Result<RunStatus, KernelError> {
-        const FROM_SEQ: Seq = 1;
-        let mut state = initial_state;
-        let sequenced = self.events.scan(run_id, FROM_SEQ)?;
-        for se in sequenced {
-            self.reducer.apply(&mut state, &se)?;
-        }
+        let mut state = self.restore_state(run_id, initial_state)?;
 
         loop {
             let next = self.step.next(&state)?;
@@ -118,12 +113,7 @@ impl<S: KernelState> Kernel<S> {
                         }
                     }
                     if !evs.is_empty() {
-                        let before = self.events.head(run_id)?;
-                        self.events.append(run_id, &evs)?;
-                        let new_events = self.events.scan(run_id, before + 1)?;
-                        for se in new_events {
-                            self.reducer.apply(&mut state, &se)?;
-                        }
+                        self.append_and_apply(run_id, &mut state, &evs)?;
                     }
                 }
                 Next::Do(action) => {
@@ -156,8 +146,9 @@ impl<S: KernelState> Kernel<S> {
                     let action_id = format!("{}-{}", run_id, before + 1);
                     let payload = serde_json::to_value(&action)
                         .map_err(|e| KernelError::Driver(e.to_string()))?;
-                    self.events.append(
+                    self.append_and_apply(
                         run_id,
+                        &mut state,
                         &[Event::ActionRequested {
                             action_id: action_id.clone(),
                             payload,
@@ -166,8 +157,9 @@ impl<S: KernelState> Kernel<S> {
                     let result = self.exec.execute(run_id, &action);
                     match result {
                         Ok(ActionResult::Success(output)) => {
-                            self.events.append(
+                            self.append_and_apply(
                                 run_id,
+                                &mut state,
                                 &[Event::ActionSucceeded {
                                     action_id: action_id.clone(),
                                     output,
@@ -175,8 +167,11 @@ impl<S: KernelState> Kernel<S> {
                             )?;
                         }
                         Ok(ActionResult::Failure(error)) => {
-                            self.events
-                                .append(run_id, &[Event::ActionFailed { action_id, error }])?;
+                            self.append_and_apply(
+                                run_id,
+                                &mut state,
+                                &[Event::ActionFailed { action_id, error }],
+                            )?;
                             return Ok(RunStatus::Failed { recoverable: false });
                         }
                         Err(mut e) => {
@@ -190,8 +185,9 @@ impl<S: KernelState> Kernel<S> {
                                 );
                                 match decision {
                                     RetryDecision::Fail => {
-                                        self.events.append(
+                                        self.append_and_apply(
                                             run_id,
+                                            &mut state,
                                             &[Event::ActionFailed {
                                                 action_id: action_id.clone(),
                                                 error: e.to_string(),
@@ -207,8 +203,9 @@ impl<S: KernelState> Kernel<S> {
                                 attempt += 1;
                                 match self.exec.execute(run_id, &action) {
                                     Ok(ActionResult::Success(output)) => {
-                                        self.events.append(
+                                        self.append_and_apply(
                                             run_id,
+                                            &mut state,
                                             &[Event::ActionSucceeded {
                                                 action_id: action_id.clone(),
                                                 output,
@@ -217,8 +214,9 @@ impl<S: KernelState> Kernel<S> {
                                         break;
                                     }
                                     Ok(ActionResult::Failure(error)) => {
-                                        self.events.append(
+                                        self.append_and_apply(
                                             run_id,
+                                            &mut state,
                                             &[Event::ActionFailed {
                                                 action_id: action_id.clone(),
                                                 error,
@@ -231,10 +229,6 @@ impl<S: KernelState> Kernel<S> {
                             }
                         }
                     }
-                    let new_events = self.events.scan(run_id, before + 1)?;
-                    for se in new_events {
-                        self.reducer.apply(&mut state, &se)?;
-                    }
                 }
                 Next::Interrupt(info) => {
                     if let Some(sink) = &self.effect_sink {
@@ -245,8 +239,9 @@ impl<S: KernelState> Kernel<S> {
                             },
                         );
                     }
-                    self.events.append(
+                    self.append_and_apply(
                         run_id,
+                        &mut state,
                         &[Event::Interrupted {
                             value: info.value.clone(),
                         }],
@@ -257,11 +252,69 @@ impl<S: KernelState> Kernel<S> {
                     }));
                 }
                 Next::Complete => {
-                    self.events.append(run_id, &[Event::Completed])?;
+                    self.append_and_apply(run_id, &mut state, &[Event::Completed])?;
                     return Ok(RunStatus::Completed);
                 }
             }
         }
+    }
+
+    fn restore_state(&self, run_id: &RunId, initial_state: S) -> Result<S, KernelError> {
+        const FROM_SEQ: Seq = 1;
+        let latest_snapshot = self.load_latest_snapshot(run_id)?;
+        let (mut state, from_seq) = match latest_snapshot {
+            Some(snapshot) => (snapshot.state, snapshot.at_seq + 1),
+            None => (initial_state, FROM_SEQ),
+        };
+        let sequenced = self.events.scan(run_id, from_seq)?;
+        self.apply_events(run_id, &mut state, sequenced)?;
+        Ok(state)
+    }
+
+    fn load_latest_snapshot(&self, run_id: &RunId) -> Result<Option<Snapshot<S>>, KernelError> {
+        match &self.snaps {
+            Some(store) => store.load_latest(run_id),
+            None => Ok(None),
+        }
+    }
+
+    fn append_and_apply(
+        &self,
+        run_id: &RunId,
+        state: &mut S,
+        events: &[Event],
+    ) -> Result<(), KernelError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let before = self.events.head(run_id)?;
+        self.events.append(run_id, events)?;
+        let sequenced = self.events.scan(run_id, before + 1)?;
+        self.apply_events(run_id, state, sequenced)
+    }
+
+    fn apply_events(
+        &self,
+        run_id: &RunId,
+        state: &mut S,
+        sequenced: Vec<SequencedEvent>,
+    ) -> Result<(), KernelError> {
+        for se in sequenced {
+            self.reducer.apply(state, &se)?;
+            self.save_snapshot(run_id, se.seq, state)?;
+        }
+        Ok(())
+    }
+
+    fn save_snapshot(&self, run_id: &RunId, at_seq: Seq, state: &S) -> Result<(), KernelError> {
+        if let Some(store) = &self.snaps {
+            store.save(&Snapshot {
+                run_id: run_id.clone(),
+                at_seq,
+                state: state.clone(),
+            })?;
+        }
+        Ok(())
     }
 
     /// Replays the run from the event log without executing external actions; returns final state.
@@ -279,10 +332,7 @@ impl<S: KernelState> Kernel<S> {
     /// `snap.state` and only events with seq > snap.at_seq are applied; otherwise
     /// starts at `initial_state` and replays from seq 1.
     pub fn replay_from_snapshot(&self, run_id: &RunId, initial_state: S) -> Result<S, KernelError> {
-        let from_snap = self
-            .snaps
-            .as_ref()
-            .and_then(|s| s.load_latest(run_id).ok().flatten());
+        let from_snap = self.load_latest_snapshot(run_id)?;
         self.replay_from(run_id, initial_state, from_snap.as_ref())
     }
 
@@ -319,6 +369,7 @@ mod tests {
     use crate::kernel::event_store::{InMemoryEventStore, SharedEventStore};
     use crate::kernel::policy::RetryWithBackoffPolicy;
     use crate::kernel::runtime_effect::RuntimeEffect;
+    use crate::kernel::snapshot::{InMemorySnapshotStore, SnapshotStore};
     use crate::kernel::stubs::{AllowAllPolicy, NoopActionExecutor, NoopStepFn};
     use crate::kernel::StateUpdatedOnlyReducer;
     use serde::{Deserialize, Serialize};
@@ -347,6 +398,29 @@ mod tests {
         fn execute(&self, _run_id: &RunId, _action: &Action) -> Result<ActionResult, KernelError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Err(KernelError::Driver("mock".into()))
+        }
+    }
+
+    struct SharedSnapshotStoreHandle<S>(Arc<InMemorySnapshotStore<S>>);
+    impl<S: Clone + Send + Sync> SnapshotStore<S> for SharedSnapshotStoreHandle<S> {
+        fn load_latest(&self, run_id: &RunId) -> Result<Option<Snapshot<S>>, KernelError> {
+            self.0.load_latest(run_id)
+        }
+
+        fn save(&self, snapshot: &Snapshot<S>) -> Result<(), KernelError> {
+            self.0.save(snapshot)
+        }
+    }
+
+    struct CountingStateReducer(Arc<AtomicUsize>);
+    impl Reducer<TestState> for CountingStateReducer {
+        fn apply(&self, state: &mut TestState, event: &SequencedEvent) -> Result<(), KernelError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            if let Event::StateUpdated { payload, .. } = &event.event {
+                *state = serde_json::from_value(payload.clone())
+                    .map_err(|e| KernelError::Reducer(e.to_string()))?;
+            }
+            Ok(())
         }
     }
 
@@ -391,6 +465,31 @@ mod tests {
         let run_id = "run-complete".to_string();
         let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
         assert!(matches!(status, RunStatus::Completed));
+    }
+
+    #[test]
+    fn run_until_blocked_persists_latest_snapshot_on_completion() {
+        let snapshots = Arc::new(InMemorySnapshotStore::new());
+        let k = Kernel::<TestState> {
+            events: Box::new(InMemoryEventStore::new()),
+            snaps: Some(Box::new(SharedSnapshotStoreHandle(Arc::clone(&snapshots)))),
+            reducer: Box::new(StateUpdatedOnlyReducer),
+            exec: Box::new(NoopActionExecutor),
+            step: Box::new(EmitOnceThenCompleteStep(AtomicUsize::new(0))),
+            policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
+        };
+        let run_id = "run-snapshot-complete".to_string();
+        let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
+        assert!(matches!(status, RunStatus::Completed));
+
+        let snapshot = snapshots.load_latest(&run_id).unwrap().unwrap();
+        assert_eq!(
+            snapshot.at_seq, 2,
+            "StateUpdated + Completed should both checkpoint"
+        );
+        assert_eq!(snapshot.state, TestState(1));
     }
 
     #[test]
@@ -514,6 +613,29 @@ mod tests {
             .resume(&run_id, TestState(0), Signal::Resume(serde_json::json!(1)))
             .unwrap();
         assert!(matches!(status2, RunStatus::Completed));
+    }
+
+    #[test]
+    fn interrupt_saves_snapshot_before_returning_blocked() {
+        let snapshots = Arc::new(InMemorySnapshotStore::new());
+        let k = Kernel::<TestState> {
+            events: Box::new(InMemoryEventStore::new()),
+            snaps: Some(Box::new(SharedSnapshotStoreHandle(Arc::clone(&snapshots)))),
+            reducer: Box::new(StateUpdatedOnlyReducer),
+            exec: Box::new(NoopActionExecutor),
+            step: Box::new(InterruptOnceStep(false)),
+            policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
+        };
+        let run_id = "run-interrupt-checkpoint".to_string();
+
+        let status = k.run_until_blocked(&run_id, TestState(7)).unwrap();
+        assert!(matches!(status, RunStatus::Blocked(_)));
+
+        let snapshot = snapshots.load_latest(&run_id).unwrap().unwrap();
+        assert_eq!(snapshot.at_seq, 1);
+        assert_eq!(snapshot.state, TestState(7));
     }
 
     /// Replay must not call ActionExecutor (0 side effects).
@@ -761,7 +883,6 @@ mod tests {
     /// Replay from snapshot applies only events after at_seq.
     #[test]
     fn replay_from_snapshot_applies_tail_only() {
-        use crate::kernel::InMemorySnapshotStore;
         use crate::kernel::Snapshot;
 
         let store = InMemoryEventStore::new();
@@ -806,6 +927,63 @@ mod tests {
         };
         let state = k.replay_from_snapshot(&run_id, TestState(0)).unwrap();
         assert_eq!(state.0, 30, "only events after at_seq=2 (seq 3) applied");
+    }
+
+    #[test]
+    fn run_loop_replays_only_tail_after_loading_latest_snapshot() {
+        let store = InMemoryEventStore::new();
+        let run_id = "run-tail-only".to_string();
+        store
+            .append(
+                &run_id,
+                &[
+                    Event::StateUpdated {
+                        step_id: Some("a".into()),
+                        payload: serde_json::json!(1),
+                    },
+                    Event::StateUpdated {
+                        step_id: Some("b".into()),
+                        payload: serde_json::json!(2),
+                    },
+                    Event::StateUpdated {
+                        step_id: Some("c".into()),
+                        payload: serde_json::json!(3),
+                    },
+                ],
+            )
+            .unwrap();
+
+        let snapshots = Arc::new(InMemorySnapshotStore::new());
+        snapshots
+            .save(&Snapshot {
+                run_id: run_id.clone(),
+                at_seq: 2,
+                state: TestState(2),
+            })
+            .unwrap();
+        let apply_count = Arc::new(AtomicUsize::new(0));
+        let k = Kernel::<TestState> {
+            events: Box::new(store),
+            snaps: Some(Box::new(SharedSnapshotStoreHandle(Arc::clone(&snapshots)))),
+            reducer: Box::new(CountingStateReducer(Arc::clone(&apply_count))),
+            exec: Box::new(NoopActionExecutor),
+            step: Box::new(NoopStepFn),
+            policy: Box::new(AllowAllPolicy),
+            effect_sink: None,
+            mode: KernelMode::Normal,
+        };
+
+        let status = k.run_until_blocked(&run_id, TestState(0)).unwrap();
+        assert!(matches!(status, RunStatus::Completed));
+        assert_eq!(
+            apply_count.load(Ordering::SeqCst),
+            2,
+            "only the tail event plus the new Completed event should be reduced"
+        );
+
+        let snapshot = snapshots.load_latest(&run_id).unwrap().unwrap();
+        assert_eq!(snapshot.at_seq, 4);
+        assert_eq!(snapshot.state, TestState(3));
     }
 
     #[test]
