@@ -7,7 +7,7 @@ use std::time::Instant;
 use axum::extract::{Path, Query, State};
 use axum::http::{
     header::{AUTHORIZATION, CONTENT_TYPE},
-    HeaderMap,
+    HeaderMap, StatusCode,
 };
 use axum::middleware::{from_fn, from_fn_with_state, Next};
 use axum::response::IntoResponse;
@@ -687,6 +687,7 @@ pub fn build_router(state: ExecutionApiState) -> Router {
     .with_state(state.clone());
 
     Router::new()
+        .route("/healthz", get(healthz_endpoint))
         .route("/metrics", get(metrics_endpoint))
         .with_state(state)
         .merge(secured)
@@ -705,7 +706,29 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     router
 }
 
-async fn metrics_endpoint(State(state): State<ExecutionApiState>) -> impl IntoResponse {
+async fn healthz_endpoint(
+    State(_state): State<ExecutionApiState>,
+) -> Result<impl IntoResponse, ApiError> {
+    #[cfg(feature = "evolution-network-experimental")]
+    let evolution =
+        Some(_state.evolution_node.health_snapshot().map_err(|err| {
+            ApiError::internal(format!("failed to inspect evolution health: {err}"))
+        })?);
+    #[cfg(not(feature = "evolution-network-experimental"))]
+    let evolution: Option<serde_json::Value> = None;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "evolution": evolution,
+        })),
+    ))
+}
+
+async fn metrics_endpoint(
+    State(state): State<ExecutionApiState>,
+) -> Result<impl IntoResponse, ApiError> {
     #[cfg(feature = "sqlite-persistence")]
     let queue_depth = state
         .runtime_repo
@@ -715,10 +738,28 @@ async fn metrics_endpoint(State(state): State<ExecutionApiState>) -> impl IntoRe
     #[cfg(not(feature = "sqlite-persistence"))]
     let queue_depth = 0usize;
 
-    (
+    let body = state.runtime_metrics.render_prometheus(queue_depth);
+    #[cfg(feature = "evolution-network-experimental")]
+    let mut body = body;
+    #[cfg(feature = "evolution-network-experimental")]
+    {
+        let evolution_metrics =
+            state
+                .evolution_node
+                .render_metrics_prometheus()
+                .map_err(|err| {
+                    ApiError::internal(format!("failed to render evolution metrics: {err}"))
+                })?;
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str(&evolution_metrics);
+    }
+
+    Ok((
         [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
-        state.runtime_metrics.render_prometheus(queue_depth),
-    )
+        body,
+    ))
 }
 
 fn request_id(headers: &HeaderMap) -> String {
@@ -4934,7 +4975,7 @@ mod tests {
             .uri("/metrics")
             .body(Body::empty())
             .unwrap();
-        let metrics_resp = router.oneshot(metrics_req).await.unwrap();
+        let metrics_resp = router.clone().oneshot(metrics_req).await.unwrap();
         assert_eq!(metrics_resp.status(), StatusCode::OK);
         assert_eq!(
             metrics_resp
@@ -4959,6 +5000,75 @@ mod tests {
         assert!(metrics_text.contains("oris_runtime_terminal_error_rate 1.000000"));
         assert!(metrics_text.contains("oris_runtime_dispatch_latency_ms_count 2"));
         assert!(metrics_text.contains("oris_runtime_recovery_latency_ms_count 1"));
+
+        let health_req = Request::builder()
+            .method(Method::GET)
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        let health_resp = router.oneshot(health_req).await.unwrap();
+        assert_eq!(health_resp.status(), StatusCode::OK);
+        let health_body = axum::body::to_bytes(health_resp.into_body(), usize::MAX)
+            .await
+            .expect("health body");
+        let health_json: serde_json::Value =
+            serde_json::from_slice(&health_body).expect("health json");
+        assert_eq!(health_json["status"], "ok");
+        #[cfg(feature = "evolution-network-experimental")]
+        assert_eq!(health_json["evolution"]["status"], "ok");
+        #[cfg(not(feature = "evolution-network-experimental"))]
+        assert!(health_json["evolution"].is_null());
+    }
+
+    #[cfg(feature = "evolution-network-experimental")]
+    #[tokio::test]
+    async fn evolution_metrics_and_health_are_exposed_from_runtime_routes() {
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evolution-observability-api-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&store_root);
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_evolution_store(Arc::new(
+                crate::evolution::JsonlEvolutionStore::new(&store_root),
+            )),
+        );
+
+        let metrics_req = Request::builder()
+            .method(Method::GET)
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let metrics_resp = router.clone().oneshot(metrics_req).await.unwrap();
+        assert_eq!(metrics_resp.status(), StatusCode::OK);
+        let metrics_body = axum::body::to_bytes(metrics_resp.into_body(), usize::MAX)
+            .await
+            .expect("evolution metrics body");
+        let metrics_text =
+            String::from_utf8(metrics_body.to_vec()).expect("evolution metrics utf8");
+        assert!(metrics_text.contains("# HELP oris_evolution_replay_success_rate"));
+        assert!(metrics_text.contains("oris_evolution_replay_success_rate 0.000000"));
+        assert!(metrics_text.contains("# HELP oris_evolution_promotion_ratio"));
+        assert!(metrics_text.contains("# HELP oris_evolution_revoke_frequency_last_hour"));
+        assert!(metrics_text.contains("# HELP oris_evolution_mutation_velocity_last_hour"));
+        assert!(metrics_text.contains("oris_evolution_health 1"));
+
+        let health_req = Request::builder()
+            .method(Method::GET)
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap();
+        let health_resp = router.oneshot(health_req).await.unwrap();
+        assert_eq!(health_resp.status(), StatusCode::OK);
+        let health_body = axum::body::to_bytes(health_resp.into_body(), usize::MAX)
+            .await
+            .expect("evolution health body");
+        let health_json: serde_json::Value =
+            serde_json::from_slice(&health_body).expect("evolution health json");
+        assert_eq!(health_json["status"], "ok");
+        assert_eq!(health_json["evolution"]["status"], "ok");
+        assert_eq!(health_json["evolution"]["last_event_seq"], 0);
+        let _ = std::fs::remove_dir_all(&store_root);
     }
 
     #[test]

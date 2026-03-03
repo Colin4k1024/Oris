@@ -9,22 +9,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
-use axum::http::StatusCode;
-#[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
-use axum::response::IntoResponse;
-#[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
-use axum::routing::get;
-#[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
-use axum::{Json, Router};
-#[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::execution_runtime::{RuntimeStorageBackend, RuntimeStorageConfig};
 use oris_runtime::execution_server::{build_router, ExecutionApiState};
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::graph::{function_node, MessagesState, SqliteSaver, StateGraph, END, START};
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::schemas::messages::Message;
-#[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
-use serde_json::json;
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use tracing_subscriber::EnvFilter;
 
@@ -51,11 +41,6 @@ fn build_compiled(
     let checkpointer = Arc::new(SqliteSaver::new(db_path)?);
     let compiled = graph.compile_with_persistence(Some(checkpointer), None)?;
     Ok(Arc::new(compiled))
-}
-
-#[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
-async fn healthz() -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({"status":"ok"})))
 }
 
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
@@ -92,9 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let (Some(key_id), Some(secret)) = (api_key_id.clone(), api_key.clone()) {
         state = state.with_persisted_api_key_record(key_id, secret, true);
     }
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .merge(build_router(state));
+    let app = build_router(state);
 
     tracing::info!("execution server listening on http://{}", addr);
     tracing::info!(

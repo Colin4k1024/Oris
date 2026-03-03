@@ -9,6 +9,7 @@ description = "Self-evolving kernel orchestration for Oris."
 
 [dependencies]
 async-trait = "0.1.80"
+chrono = { version = "0.4", default-features = true }
 oris-agent-contract = { version = "0.1.0", path = "../oris-agent-contract" }
 oris-economics = { version = "0.1.0", path = "../oris-economics" }
 oris-evolution = { version = "0.1.0", path = "../oris-evolution" }

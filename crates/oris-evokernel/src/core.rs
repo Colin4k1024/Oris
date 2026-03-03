@@ -7,13 +7,14 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{ExecutionFeedback, MutationProposal as AgentMutationProposal};
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
     compute_artifact_hash, next_id, stable_hash_json, AssetState, BlastRadius, CandidateSource,
     Capsule, CapsuleId, EnvFingerprint, EvolutionError, EvolutionEvent, EvolutionStore, Gene,
     GeneCandidate, MutationId, PreparedMutation, Selector, SelectorInput, StoreBackedSelector,
-    ValidationSnapshot,
+    StoredEvolutionEvent, ValidationSnapshot,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -538,6 +539,30 @@ pub struct ImportOutcome {
     pub accepted: bool,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct EvolutionMetricsSnapshot {
+    pub replay_attempts_total: u64,
+    pub replay_success_total: u64,
+    pub replay_success_rate: f64,
+    pub mutation_declared_total: u64,
+    pub promoted_mutations_total: u64,
+    pub promotion_ratio: f64,
+    pub gene_revocations_total: u64,
+    pub mutation_velocity_last_hour: u64,
+    pub revoke_frequency_last_hour: u64,
+    pub promoted_genes: u64,
+    pub promoted_capsules: u64,
+    pub last_event_seq: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvolutionHealthSnapshot {
+    pub status: String,
+    pub last_event_seq: u64,
+    pub promoted_genes: u64,
+    pub promoted_capsules: u64,
+}
+
 #[derive(Clone)]
 pub struct EvolutionNetworkNode {
     pub store: Arc<dyn EvolutionStore>,
@@ -581,6 +606,22 @@ impl EvolutionNetworkNode {
 
     pub fn revoke_assets(&self, notice: &RevokeNotice) -> Result<RevokeNotice, EvoKernelError> {
         revoke_assets_in_store(self.store.as_ref(), notice)
+    }
+
+    pub fn metrics_snapshot(&self) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
+        evolution_metrics_snapshot(self.store.as_ref())
+    }
+
+    pub fn render_metrics_prometheus(&self) -> Result<String, EvoKernelError> {
+        self.metrics_snapshot().map(|snapshot| {
+            let health = evolution_health_snapshot(&snapshot);
+            render_evolution_metrics_prometheus(&snapshot, &health)
+        })
+    }
+
+    pub fn health_snapshot(&self) -> Result<EvolutionHealthSnapshot, EvoKernelError> {
+        self.metrics_snapshot()
+            .map(|snapshot| evolution_health_snapshot(&snapshot))
     }
 }
 
@@ -911,6 +952,22 @@ impl<S: KernelState> EvoKernel<S> {
             .ok()
             .map(|locked| locked.selector_reputation_bias())
             .unwrap_or_default()
+    }
+
+    pub fn metrics_snapshot(&self) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
+        evolution_metrics_snapshot(self.store.as_ref())
+    }
+
+    pub fn render_metrics_prometheus(&self) -> Result<String, EvoKernelError> {
+        self.metrics_snapshot().map(|snapshot| {
+            let health = evolution_health_snapshot(&snapshot);
+            render_evolution_metrics_prometheus(&snapshot, &health)
+        })
+    }
+
+    pub fn health_snapshot(&self) -> Result<EvolutionHealthSnapshot, EvoKernelError> {
+        self.metrics_snapshot()
+            .map(|snapshot| evolution_health_snapshot(&snapshot))
     }
 
     fn record_remote_publishers(&self, envelope: &EvolutionEnvelope) {
@@ -1394,6 +1451,209 @@ fn revoke_assets_in_store(
     })
 }
 
+fn evolution_metrics_snapshot(
+    store: &dyn EvolutionStore,
+) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
+    let events = store.scan(1).map_err(store_err)?;
+    let projection = store.rebuild_projection().map_err(store_err)?;
+    let replay_success_total = events
+        .iter()
+        .filter(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. }))
+        .count() as u64;
+    let replay_failures_total = events
+        .iter()
+        .filter(|stored| is_replay_validation_failure(&stored.event))
+        .count() as u64;
+    let replay_attempts_total = replay_success_total + replay_failures_total;
+    let mutation_declared_total = events
+        .iter()
+        .filter(|stored| matches!(stored.event, EvolutionEvent::MutationDeclared { .. }))
+        .count() as u64;
+    let promoted_mutations_total = events
+        .iter()
+        .filter(|stored| matches!(stored.event, EvolutionEvent::GenePromoted { .. }))
+        .count() as u64;
+    let gene_revocations_total = events
+        .iter()
+        .filter(|stored| matches!(stored.event, EvolutionEvent::GeneRevoked { .. }))
+        .count() as u64;
+    let cutoff = Utc::now() - Duration::hours(1);
+    let mutation_velocity_last_hour = count_recent_events(&events, cutoff, |event| {
+        matches!(event, EvolutionEvent::MutationDeclared { .. })
+    });
+    let revoke_frequency_last_hour = count_recent_events(&events, cutoff, |event| {
+        matches!(event, EvolutionEvent::GeneRevoked { .. })
+    });
+    let promoted_genes = projection
+        .genes
+        .iter()
+        .filter(|gene| gene.state == AssetState::Promoted)
+        .count() as u64;
+    let promoted_capsules = projection
+        .capsules
+        .iter()
+        .filter(|capsule| capsule.state == AssetState::Promoted)
+        .count() as u64;
+
+    Ok(EvolutionMetricsSnapshot {
+        replay_attempts_total,
+        replay_success_total,
+        replay_success_rate: safe_ratio(replay_success_total, replay_attempts_total),
+        mutation_declared_total,
+        promoted_mutations_total,
+        promotion_ratio: safe_ratio(promoted_mutations_total, mutation_declared_total),
+        gene_revocations_total,
+        mutation_velocity_last_hour,
+        revoke_frequency_last_hour,
+        promoted_genes,
+        promoted_capsules,
+        last_event_seq: events.last().map(|stored| stored.seq).unwrap_or(0),
+    })
+}
+
+fn evolution_health_snapshot(snapshot: &EvolutionMetricsSnapshot) -> EvolutionHealthSnapshot {
+    EvolutionHealthSnapshot {
+        status: "ok".into(),
+        last_event_seq: snapshot.last_event_seq,
+        promoted_genes: snapshot.promoted_genes,
+        promoted_capsules: snapshot.promoted_capsules,
+    }
+}
+
+fn render_evolution_metrics_prometheus(
+    snapshot: &EvolutionMetricsSnapshot,
+    health: &EvolutionHealthSnapshot,
+) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "# HELP oris_evolution_replay_attempts_total Total replay attempts that reached validation.\n",
+    );
+    out.push_str("# TYPE oris_evolution_replay_attempts_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_replay_attempts_total {}\n",
+        snapshot.replay_attempts_total
+    ));
+    out.push_str("# HELP oris_evolution_replay_success_total Total replay attempts that reused a capsule successfully.\n");
+    out.push_str("# TYPE oris_evolution_replay_success_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_replay_success_total {}\n",
+        snapshot.replay_success_total
+    ));
+    out.push_str("# HELP oris_evolution_replay_success_rate Successful replay attempts divided by replay attempts that reached validation.\n");
+    out.push_str("# TYPE oris_evolution_replay_success_rate gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_replay_success_rate {:.6}\n",
+        snapshot.replay_success_rate
+    ));
+    out.push_str(
+        "# HELP oris_evolution_mutation_declared_total Total declared mutations recorded in the evolution log.\n",
+    );
+    out.push_str("# TYPE oris_evolution_mutation_declared_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_mutation_declared_total {}\n",
+        snapshot.mutation_declared_total
+    ));
+    out.push_str("# HELP oris_evolution_promoted_mutations_total Total mutations promoted by the governor.\n");
+    out.push_str("# TYPE oris_evolution_promoted_mutations_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_promoted_mutations_total {}\n",
+        snapshot.promoted_mutations_total
+    ));
+    out.push_str(
+        "# HELP oris_evolution_promotion_ratio Promoted mutations divided by declared mutations.\n",
+    );
+    out.push_str("# TYPE oris_evolution_promotion_ratio gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_promotion_ratio {:.6}\n",
+        snapshot.promotion_ratio
+    ));
+    out.push_str("# HELP oris_evolution_gene_revocations_total Total gene revocations recorded in the evolution log.\n");
+    out.push_str("# TYPE oris_evolution_gene_revocations_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_gene_revocations_total {}\n",
+        snapshot.gene_revocations_total
+    ));
+    out.push_str("# HELP oris_evolution_mutation_velocity_last_hour Declared mutations observed in the last hour.\n");
+    out.push_str("# TYPE oris_evolution_mutation_velocity_last_hour gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_mutation_velocity_last_hour {}\n",
+        snapshot.mutation_velocity_last_hour
+    ));
+    out.push_str("# HELP oris_evolution_revoke_frequency_last_hour Gene revocations observed in the last hour.\n");
+    out.push_str("# TYPE oris_evolution_revoke_frequency_last_hour gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_revoke_frequency_last_hour {}\n",
+        snapshot.revoke_frequency_last_hour
+    ));
+    out.push_str("# HELP oris_evolution_promoted_genes Current promoted genes in the evolution projection.\n");
+    out.push_str("# TYPE oris_evolution_promoted_genes gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_promoted_genes {}\n",
+        snapshot.promoted_genes
+    ));
+    out.push_str("# HELP oris_evolution_promoted_capsules Current promoted capsules in the evolution projection.\n");
+    out.push_str("# TYPE oris_evolution_promoted_capsules gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_promoted_capsules {}\n",
+        snapshot.promoted_capsules
+    ));
+    out.push_str("# HELP oris_evolution_store_last_event_seq Last visible append-only evolution event sequence.\n");
+    out.push_str("# TYPE oris_evolution_store_last_event_seq gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_store_last_event_seq {}\n",
+        snapshot.last_event_seq
+    ));
+    out.push_str(
+        "# HELP oris_evolution_health Evolution observability store health (1 = healthy).\n",
+    );
+    out.push_str("# TYPE oris_evolution_health gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_health {}\n",
+        u8::from(health.status == "ok")
+    ));
+    out
+}
+
+fn count_recent_events(
+    events: &[StoredEvolutionEvent],
+    cutoff: DateTime<Utc>,
+    predicate: impl Fn(&EvolutionEvent) -> bool,
+) -> u64 {
+    events
+        .iter()
+        .filter(|stored| {
+            predicate(&stored.event)
+                && parse_event_timestamp(&stored.timestamp)
+                    .map(|timestamp| timestamp >= cutoff)
+                    .unwrap_or(false)
+        })
+        .count() as u64
+}
+
+fn parse_event_timestamp(raw: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(raw)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn is_replay_validation_failure(event: &EvolutionEvent) -> bool {
+    matches!(
+        event,
+        EvolutionEvent::ValidationFailed {
+            gene_id: Some(_),
+            ..
+        }
+    )
+}
+
+fn safe_ratio(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
 fn store_err(err: EvolutionError) -> EvoKernelError {
     EvoKernelError::Store(err.to_string())
 }
@@ -1748,6 +2008,47 @@ index 0000000..1111111
             .unwrap()
             .iter()
             .any(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. })));
+    }
+
+    #[tokio::test]
+    async fn metrics_snapshot_tracks_replay_promotion_and_revocation_signals() {
+        let (evo, _) = build_test_evo("metrics", "run-metrics", command_validator());
+        let capsule = evo
+            .capture_successful_mutation(&"run-metrics".into(), sample_mutation())
+            .await
+            .unwrap();
+        let decision = evo
+            .replay_or_fallback(replay_input("missing readme"))
+            .await
+            .unwrap();
+        assert!(decision.used_capsule);
+
+        evo.revoke_assets(&RevokeNotice {
+            sender_id: "node-metrics".into(),
+            asset_ids: vec![capsule.id.clone()],
+            reason: "manual test revoke".into(),
+        })
+        .unwrap();
+
+        let snapshot = evo.metrics_snapshot().unwrap();
+        assert_eq!(snapshot.replay_attempts_total, 1);
+        assert_eq!(snapshot.replay_success_total, 1);
+        assert_eq!(snapshot.replay_success_rate, 1.0);
+        assert_eq!(snapshot.mutation_declared_total, 1);
+        assert_eq!(snapshot.promoted_mutations_total, 1);
+        assert_eq!(snapshot.promotion_ratio, 1.0);
+        assert_eq!(snapshot.gene_revocations_total, 1);
+        assert_eq!(snapshot.mutation_velocity_last_hour, 1);
+        assert_eq!(snapshot.revoke_frequency_last_hour, 1);
+        assert_eq!(snapshot.promoted_genes, 0);
+        assert_eq!(snapshot.promoted_capsules, 0);
+
+        let rendered = evo.render_metrics_prometheus().unwrap();
+        assert!(rendered.contains("oris_evolution_replay_success_rate 1.000000"));
+        assert!(rendered.contains("oris_evolution_promotion_ratio 1.000000"));
+        assert!(rendered.contains("oris_evolution_revoke_frequency_last_hour 1"));
+        assert!(rendered.contains("oris_evolution_mutation_velocity_last_hour 1"));
+        assert!(rendered.contains("oris_evolution_health 1"));
     }
 
     #[tokio::test]

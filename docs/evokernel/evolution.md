@@ -15,6 +15,8 @@ The current `crates/oris-evolution` and `crates/oris-evokernel` layers implement
 - selector ranking by signal overlap, success rate, reuse count, recency, and environment match
 - mutation preparation plus capsule capture and replay-first fallback flows
 - `spec_id` linkage for spec-driven mutations
+- store-derived Prometheus metrics for replay success, promotion ratio, revoke frequency, and mutation velocity
+- runtime `/metrics` and `/healthz` endpoints that surface the current evolution observability snapshot
 
 Not yet fully implemented in the checked-in code:
 
@@ -22,6 +24,7 @@ Not yet fully implemented in the checked-in code:
 - a dedicated runtime signal extraction stage that derives selector inputs automatically
 - the full detect/select/mutate pipeline as separate runtime stages
 - explicit multi-run promotion enforcement in the evolution crate itself
+- OTLP export wiring and dedicated dashboard assets for the evolution-specific metric families
 
 ## 1. Purpose
 
