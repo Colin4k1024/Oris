@@ -5,9 +5,12 @@
 //! for replay (see [crate::kernel::snapshot]).
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::kernel::event::Event;
 use crate::kernel::identity::{RunId, Seq, StepId};
+use crate::kernel::reducer::Reducer;
+use crate::kernel::state::KernelState;
 
 /// Unified kernel trace event shape for audit and observability consumers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,6 +115,34 @@ pub fn scan_execution_log(
         .collect())
 }
 
+/// Reconstructs the execution log and attaches a deterministic state hash after each event.
+///
+/// `initial_state` must represent the state immediately before `from`. Callers replaying from
+/// a checkpoint should pass the checkpointed state and the next sequence number.
+pub(crate) fn scan_execution_log_with_state_hashes<S>(
+    store: &dyn crate::kernel::event::EventStore,
+    run_id: &RunId,
+    from: Seq,
+    initial_state: S,
+    reducer: &dyn Reducer<S>,
+) -> Result<Vec<ExecutionLog>, crate::kernel::KernelError>
+where
+    S: KernelState + Serialize,
+{
+    let sequenced = store.scan(run_id, from)?;
+    let mut state = initial_state;
+    let mut out = Vec::with_capacity(sequenced.len());
+    for se in sequenced {
+        reducer.apply(&mut state, &se)?;
+        out.push(ExecutionLog::from_sequenced(
+            run_id.clone(),
+            &se,
+            Some(state_hash(&state)?),
+        ));
+    }
+    Ok(out)
+}
+
 /// Scans the event store and returns the unified kernel trace event view.
 pub fn scan_execution_trace(
     store: &dyn crate::kernel::event::EventStore,
@@ -124,11 +155,30 @@ pub fn scan_execution_trace(
         .collect())
 }
 
+fn state_hash<S: Serialize>(state: &S) -> Result<[u8; 32], crate::kernel::KernelError> {
+    let canonical = serde_json::to_vec(state)
+        .map_err(|e| crate::kernel::KernelError::Driver(format!("serialize state hash: {}", e)))?;
+    let mut hasher = Sha256::new();
+    hasher.update(canonical);
+    Ok(hasher.finalize().into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kernel::event::{EventStore, SequencedEvent};
     use crate::kernel::event_store::InMemoryEventStore;
+    use crate::kernel::StateUpdatedOnlyReducer;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct TestState(u32);
+
+    impl crate::kernel::KernelState for TestState {
+        fn version(&self) -> u32 {
+            1
+        }
+    }
 
     #[test]
     fn scan_execution_log_returns_canonical_entries() {
@@ -204,5 +254,38 @@ mod tests {
         assert_eq!(trace.action_id.as_deref(), Some("a1"));
         assert_eq!(trace.kind, "ActionRequested");
         assert_eq!(trace.timestamp_ms, None);
+    }
+
+    #[test]
+    fn scan_execution_log_with_state_hashes_populates_hashes() {
+        let store = InMemoryEventStore::new();
+        let run_id: RunId = "run-hash".into();
+        store
+            .append(
+                &run_id,
+                &[
+                    Event::StateUpdated {
+                        step_id: Some("n1".into()),
+                        payload: serde_json::to_value(&TestState(1)).unwrap(),
+                    },
+                    Event::Completed,
+                ],
+            )
+            .unwrap();
+
+        let log = scan_execution_log_with_state_hashes(
+            &store,
+            &run_id,
+            1,
+            TestState(0),
+            &StateUpdatedOnlyReducer,
+        )
+        .unwrap();
+        assert_eq!(log.len(), 2);
+        assert!(log[0].state_hash.is_some());
+        assert_eq!(
+            log[0].state_hash, log[1].state_hash,
+            "Completed should preserve the last projected state hash"
+        );
     }
 }
