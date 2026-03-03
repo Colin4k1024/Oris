@@ -11,15 +11,21 @@ Last synced: March 3, 2026
 The current `crates/oris-economics` crate is an experimental local ledger scaffold:
 
 - `EvuAccount`, `ReputationRecord`, `StakePolicy`, and `ValidationSettlement`
-- `EvuLedger` with a local `can_publish(...)` balance check
+- `EconomicsSignal` plus `EvuLedger` helpers for:
+  publish stake reservation, remote reuse settlement, validator divergence penalties,
+  selector reputation bias, and governor-facing signal snapshots
 - experimental re-export through `oris-runtime::economics`
 
-Not yet wired into the checked-in runtime:
+Currently wired into the checked-in EvoKernel flow:
 
-- automatic stake settlement after remote reuse success or failure
+- publish gating for remote-facing asset export via EVU stake reservation
+- remote replay success/failure settlement for the recorded publisher
+- reputation-biased replay candidate ordering as a secondary tie-breaker
+
+Still not implemented:
+
 - validator staking enforcement
 - publish-window rate limits
-- reputation-weighted selector inputs
 
 ## 1. Purpose
 

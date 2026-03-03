@@ -14,6 +14,7 @@ fn full_evolution_experimental_paths_resolve() {
     );
 
     assert_type::<oris_runtime::agent_contract::MutationProposal>();
+    assert_type::<oris_runtime::economics::EconomicsSignal>();
     assert_type::<oris_runtime::economics::StakePolicy>();
     assert_type::<oris_runtime::evolution::ValidationPlan>();
     assert_type::<oris_runtime::evolution_network::FetchQuery>();

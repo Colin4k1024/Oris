@@ -1,13 +1,14 @@
 //! EvoKernel orchestration: mutation capture, validation, capsule construction, and replay-first reuse.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use oris_agent_contract::{ExecutionFeedback, MutationProposal as AgentMutationProposal};
+use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
     compute_artifact_hash, next_id, stable_hash_json, AssetState, BlastRadius, CandidateSource,
     Capsule, CapsuleId, EnvFingerprint, EvolutionError, EvolutionEvent, EvolutionStore, Gene,
@@ -263,6 +264,9 @@ pub struct StoreReplayExecutor {
     pub validator: Arc<dyn Validator>,
     pub store: Arc<dyn EvolutionStore>,
     pub selector: Arc<dyn Selector>,
+    pub economics: Option<Arc<Mutex<EvuLedger>>>,
+    pub remote_publishers: Option<Arc<Mutex<BTreeMap<String, String>>>>,
+    pub stake_policy: StakePolicy,
 }
 
 #[async_trait]
@@ -273,14 +277,22 @@ impl ReplayExecutor for StoreReplayExecutor {
         policy: &SandboxPolicy,
         validation: &ValidationPlan,
     ) -> Result<ReplayDecision, ReplayError> {
-        let mut candidates = self.selector.select(input);
+        let mut selector_input = input.clone();
+        if self.economics.is_some() && self.remote_publishers.is_some() {
+            selector_input.limit = selector_input.limit.max(4);
+        }
+        let mut candidates = self.selector.select(&selector_input);
+        self.rerank_with_reputation_bias(&mut candidates);
         let mut exact_match = false;
         if candidates.is_empty() {
-            if let Some(candidate) = exact_match_candidate(self.store.as_ref(), input) {
-                candidates.push(candidate);
+            let mut exact_candidates = exact_match_candidates(self.store.as_ref(), input);
+            self.rerank_with_reputation_bias(&mut exact_candidates);
+            if !exact_candidates.is_empty() {
+                candidates = exact_candidates;
                 exact_match = true;
             }
         }
+        candidates.truncate(input.limit.max(1));
         let Some(best) = candidates.into_iter().next() else {
             return Ok(ReplayDecision {
                 used_capsule: false,
@@ -289,6 +301,7 @@ impl ReplayExecutor for StoreReplayExecutor {
                 reason: "no matching gene".into(),
             });
         };
+        let remote_publisher = self.publisher_for_gene(&best.gene.id);
 
         if !exact_match && best.score < 0.82 {
             return Ok(ReplayDecision {
@@ -322,12 +335,13 @@ impl ReplayExecutor for StoreReplayExecutor {
         let receipt = match self.sandbox.apply(&mutation, policy).await {
             Ok(receipt) => receipt,
             Err(err) => {
+                self.record_reuse_settlement(remote_publisher.as_deref(), false);
                 return Ok(ReplayDecision {
                     used_capsule: false,
                     capsule_id: Some(capsule.id.clone()),
                     fallback_to_planner: true,
                     reason: format!("replay patch apply failed: {err}"),
-                })
+                });
             }
         };
 
@@ -337,6 +351,7 @@ impl ReplayExecutor for StoreReplayExecutor {
             .await
             .map_err(|err| ReplayError::Validation(err.to_string()))?;
         if !report.success {
+            self.record_reuse_settlement(remote_publisher.as_deref(), false);
             return Ok(ReplayDecision {
                 used_capsule: false,
                 capsule_id: Some(capsule.id.clone()),
@@ -352,6 +367,7 @@ impl ReplayExecutor for StoreReplayExecutor {
                 run_id: capsule.run_id.clone(),
             })
             .map_err(|err| ReplayError::Store(err.to_string()))?;
+        self.record_reuse_settlement(remote_publisher.as_deref(), true);
 
         Ok(ReplayDecision {
             used_capsule: true,
@@ -363,6 +379,61 @@ impl ReplayExecutor for StoreReplayExecutor {
                 "replayed via selector".into()
             },
         })
+    }
+}
+
+impl StoreReplayExecutor {
+    fn rerank_with_reputation_bias(&self, candidates: &mut [GeneCandidate]) {
+        let Some(ledger) = self.economics.as_ref() else {
+            return;
+        };
+        let Some(remote_publishers) = self.remote_publishers.as_ref() else {
+            return;
+        };
+        let reputation_bias = ledger
+            .lock()
+            .ok()
+            .map(|locked| locked.selector_reputation_bias())
+            .unwrap_or_default();
+        if reputation_bias.is_empty() {
+            return;
+        }
+        let publisher_map = remote_publishers
+            .lock()
+            .ok()
+            .map(|locked| locked.clone())
+            .unwrap_or_default();
+        candidates.sort_by(|left, right| {
+            effective_candidate_score(right, &publisher_map, &reputation_bias)
+                .partial_cmp(&effective_candidate_score(
+                    left,
+                    &publisher_map,
+                    &reputation_bias,
+                ))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.gene.id.cmp(&right.gene.id))
+        });
+    }
+
+    fn publisher_for_gene(&self, gene_id: &str) -> Option<String> {
+        self.remote_publishers
+            .as_ref()?
+            .lock()
+            .ok()?
+            .get(gene_id)
+            .cloned()
+    }
+
+    fn record_reuse_settlement(&self, publisher_id: Option<&str>, success: bool) {
+        let Some(publisher_id) = publisher_id else {
+            return;
+        };
+        let Some(ledger) = self.economics.as_ref() else {
+            return;
+        };
+        if let Ok(mut locked) = ledger.lock() {
+            locked.settle_remote_reuse(publisher_id, success, &self.stake_policy);
+        }
     }
 }
 
@@ -444,6 +515,9 @@ pub struct EvoKernel<S: KernelState> {
     pub store: Arc<dyn EvolutionStore>,
     pub selector: Arc<dyn Selector>,
     pub governor: Arc<dyn Governor>,
+    pub economics: Arc<Mutex<EvuLedger>>,
+    pub remote_publishers: Arc<Mutex<BTreeMap<String, String>>>,
+    pub stake_policy: StakePolicy,
     pub sandbox_policy: SandboxPolicy,
     pub validation_plan: ValidationPlan,
 }
@@ -463,6 +537,9 @@ impl<S: KernelState> EvoKernel<S> {
             store,
             selector,
             governor: Arc::new(DefaultGovernor::default()),
+            economics: Arc::new(Mutex::new(EvuLedger::default())),
+            remote_publishers: Arc::new(Mutex::new(BTreeMap::new())),
+            stake_policy: StakePolicy::default(),
             sandbox_policy: SandboxPolicy::oris_default(),
             validation_plan: ValidationPlan::oris_default(),
         }
@@ -480,6 +557,16 @@ impl<S: KernelState> EvoKernel<S> {
 
     pub fn with_governor(mut self, governor: Arc<dyn Governor>) -> Self {
         self.governor = governor;
+        self
+    }
+
+    pub fn with_economics(mut self, economics: Arc<Mutex<EvuLedger>>) -> Self {
+        self.economics = economics;
+        self
+    }
+
+    pub fn with_stake_policy(mut self, policy: StakePolicy) -> Self {
+        self.stake_policy = policy;
         self
     }
 
@@ -678,14 +765,32 @@ impl<S: KernelState> EvoKernel<S> {
         &self,
         sender_id: impl Into<String>,
     ) -> Result<EvolutionEnvelope, EvoKernelError> {
-        export_promoted_assets_from_store(self.store.as_ref(), sender_id)
+        let sender_id = sender_id.into();
+        let envelope = export_promoted_assets_from_store(self.store.as_ref(), sender_id.clone())?;
+        if !envelope.assets.is_empty() {
+            let mut ledger = self
+                .economics
+                .lock()
+                .map_err(|_| EvoKernelError::Validation("economics ledger lock poisoned".into()))?;
+            if ledger
+                .reserve_publish_stake(&sender_id, &self.stake_policy)
+                .is_none()
+            {
+                return Err(EvoKernelError::Validation(
+                    "insufficient EVU for remote publish".into(),
+                ));
+            }
+        }
+        Ok(envelope)
     }
 
     pub fn import_remote_envelope(
         &self,
         envelope: &EvolutionEnvelope,
     ) -> Result<ImportOutcome, EvoKernelError> {
-        import_remote_envelope_into_store(self.store.as_ref(), envelope)
+        let outcome = import_remote_envelope_into_store(self.store.as_ref(), envelope)?;
+        self.record_remote_publishers(envelope);
+        Ok(outcome)
     }
 
     pub fn fetch_assets(
@@ -709,11 +814,47 @@ impl<S: KernelState> EvoKernel<S> {
             validator: self.validator.clone(),
             store: self.store.clone(),
             selector: self.selector.clone(),
+            economics: Some(self.economics.clone()),
+            remote_publishers: Some(self.remote_publishers.clone()),
+            stake_policy: self.stake_policy.clone(),
         };
         executor
             .try_replay(&input, &self.sandbox_policy, &self.validation_plan)
             .await
             .map_err(|err| EvoKernelError::Validation(err.to_string()))
+    }
+
+    pub fn economics_signal(&self, node_id: &str) -> Option<EconomicsSignal> {
+        self.economics.lock().ok()?.governor_signal(node_id)
+    }
+
+    pub fn selector_reputation_bias(&self) -> BTreeMap<String, f32> {
+        self.economics
+            .lock()
+            .ok()
+            .map(|locked| locked.selector_reputation_bias())
+            .unwrap_or_default()
+    }
+
+    fn record_remote_publishers(&self, envelope: &EvolutionEnvelope) {
+        let sender_id = envelope.sender_id.trim();
+        if sender_id.is_empty() {
+            return;
+        }
+        let Ok(mut publishers) = self.remote_publishers.lock() else {
+            return;
+        };
+        for asset in &envelope.assets {
+            match asset {
+                NetworkAsset::Gene { gene } => {
+                    publishers.insert(gene.id.clone(), sender_id.to_string());
+                }
+                NetworkAsset::Capsule { capsule } => {
+                    publishers.insert(capsule.gene_id.clone(), sender_id.to_string());
+                }
+                NetworkAsset::EvolutionEvent { .. } => {}
+            }
+        }
     }
 }
 
@@ -865,11 +1006,10 @@ fn find_declared_mutation(
     Ok(None)
 }
 
-fn exact_match_candidate(
-    store: &dyn EvolutionStore,
-    input: &SelectorInput,
-) -> Option<GeneCandidate> {
-    let projection = store.rebuild_projection().ok()?;
+fn exact_match_candidates(store: &dyn EvolutionStore, input: &SelectorInput) -> Vec<GeneCandidate> {
+    let Ok(projection) = store.rebuild_projection() else {
+        return Vec::new();
+    };
     let capsules = projection.capsules.clone();
     let spec_ids_by_gene = projection.spec_ids_by_gene.clone();
     let requested_spec_id = input
@@ -882,49 +1022,69 @@ fn exact_match_candidate(
         .iter()
         .map(|signal| signal.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
-    projection.genes.into_iter().find_map(|gene| {
-        if gene.state != AssetState::Promoted {
-            return None;
-        }
-        if let Some(spec_id) = requested_spec_id {
-            let matches_spec = spec_ids_by_gene
-                .get(&gene.id)
-                .map(|values| {
-                    values
-                        .iter()
-                        .any(|value| value.eq_ignore_ascii_case(spec_id))
-                })
-                .unwrap_or(false);
-            if !matches_spec {
+    let mut candidates = projection
+        .genes
+        .into_iter()
+        .filter_map(|gene| {
+            if gene.state != AssetState::Promoted {
                 return None;
             }
-        }
-        let gene_signals = gene
-            .signals
-            .iter()
-            .map(|signal| signal.to_ascii_lowercase())
-            .collect::<BTreeSet<_>>();
-        if gene_signals == signal_set {
-            let matched_capsules = capsules
-                .iter()
-                .filter(|capsule| {
-                    capsule.gene_id == gene.id && capsule.state == AssetState::Promoted
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if matched_capsules.is_empty() {
-                None
-            } else {
-                Some(GeneCandidate {
-                    gene,
-                    score: 1.0,
-                    capsules: matched_capsules,
-                })
+            if let Some(spec_id) = requested_spec_id {
+                let matches_spec = spec_ids_by_gene
+                    .get(&gene.id)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .any(|value| value.eq_ignore_ascii_case(spec_id))
+                    })
+                    .unwrap_or(false);
+                if !matches_spec {
+                    return None;
+                }
             }
-        } else {
-            None
-        }
-    })
+            let gene_signals = gene
+                .signals
+                .iter()
+                .map(|signal| signal.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>();
+            if gene_signals == signal_set {
+                let matched_capsules = capsules
+                    .iter()
+                    .filter(|capsule| {
+                        capsule.gene_id == gene.id && capsule.state == AssetState::Promoted
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if matched_capsules.is_empty() {
+                    None
+                } else {
+                    Some(GeneCandidate {
+                        gene,
+                        score: 1.0,
+                        capsules: matched_capsules,
+                    })
+                }
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.gene.id.cmp(&right.gene.id));
+    candidates
+}
+
+fn effective_candidate_score(
+    candidate: &GeneCandidate,
+    publishers_by_gene: &BTreeMap<String, String>,
+    reputation_bias: &BTreeMap<String, f32>,
+) -> f32 {
+    let bias = publishers_by_gene
+        .get(&candidate.gene.id)
+        .and_then(|publisher| reputation_bias.get(publisher))
+        .copied()
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    candidate.score * (1.0 + (bias * 0.1))
 }
 
 fn export_promoted_assets_from_store(
@@ -1208,6 +1368,170 @@ index 0000000..1111111
         )
     }
 
+    fn base_sandbox_policy() -> SandboxPolicy {
+        SandboxPolicy {
+            allowed_programs: vec!["git".into()],
+            max_duration_ms: 60_000,
+            max_output_bytes: 1024 * 1024,
+            denied_env_prefixes: Vec::new(),
+        }
+    }
+
+    fn command_validator() -> Arc<dyn Validator> {
+        Arc::new(CommandValidator::new(base_sandbox_policy()))
+    }
+
+    fn replay_input(signal: &str) -> SelectorInput {
+        SelectorInput {
+            signals: vec![signal.into()],
+            env: EnvFingerprint {
+                rustc_version: "rustc".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: std::env::consts::OS.into(),
+            },
+            spec_id: None,
+            limit: 1,
+        }
+    }
+
+    fn build_test_evo(
+        name: &str,
+        run_id: &str,
+        validator: Arc<dyn Validator>,
+    ) -> (EvoKernel<TestState>, Arc<dyn EvolutionStore>) {
+        let workspace = temp_workspace(name);
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evokernel-{name}-store-{}",
+            std::process::id()
+        ));
+        if store_root.exists() {
+            fs::remove_dir_all(&store_root).unwrap();
+        }
+        let store: Arc<dyn EvolutionStore> =
+            Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
+        let sandbox: Arc<dyn Sandbox> = Arc::new(oris_sandbox::LocalProcessSandbox::new(
+            run_id,
+            &workspace,
+            std::env::temp_dir(),
+        ));
+        let evo = EvoKernel::new(test_kernel(), sandbox, validator, store.clone())
+            .with_governor(Arc::new(DefaultGovernor::new(
+                oris_governor::GovernorConfig {
+                    promote_after_successes: 1,
+                    ..Default::default()
+                },
+            )))
+            .with_validation_plan(lightweight_plan())
+            .with_sandbox_policy(base_sandbox_policy());
+        (evo, store)
+    }
+
+    fn remote_publish_envelope(
+        sender_id: &str,
+        run_id: &str,
+        gene_id: &str,
+        capsule_id: &str,
+        mutation_id: &str,
+        signal: &str,
+        file_name: &str,
+        line: &str,
+    ) -> EvolutionEnvelope {
+        let mutation = prepare_mutation(
+            MutationIntent {
+                id: mutation_id.into(),
+                intent: format!("add {file_name}"),
+                target: MutationTarget::Paths {
+                    allow: vec![file_name.into()],
+                },
+                expected_effect: "replay should still validate".into(),
+                risk: RiskLevel::Low,
+                signals: vec![signal.into()],
+                spec_id: None,
+            },
+            format!(
+                "\
+diff --git a/{file_name} b/{file_name}
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/{file_name}
+@@ -0,0 +1 @@
++{line}
+"
+            ),
+            Some("HEAD".into()),
+        );
+        let gene = Gene {
+            id: gene_id.into(),
+            signals: vec![signal.into()],
+            strategy: vec![file_name.into()],
+            validation: vec!["test".into()],
+            state: AssetState::Promoted,
+        };
+        let capsule = Capsule {
+            id: capsule_id.into(),
+            gene_id: gene_id.into(),
+            mutation_id: mutation_id.into(),
+            run_id: run_id.into(),
+            diff_hash: mutation.artifact.content_hash.clone(),
+            confidence: 0.9,
+            env: replay_input(signal).env,
+            outcome: Outcome {
+                success: true,
+                validation_profile: "test".into(),
+                validation_duration_ms: 1,
+                changed_files: vec![file_name.into()],
+                validator_hash: "validator-hash".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+        EvolutionEnvelope::publish(
+            sender_id,
+            vec![
+                NetworkAsset::EvolutionEvent {
+                    event: EvolutionEvent::MutationDeclared { mutation },
+                },
+                NetworkAsset::Gene { gene: gene.clone() },
+                NetworkAsset::Capsule {
+                    capsule: capsule.clone(),
+                },
+                NetworkAsset::EvolutionEvent {
+                    event: EvolutionEvent::CapsuleReleased {
+                        capsule_id: capsule.id.clone(),
+                        state: AssetState::Promoted,
+                    },
+                },
+            ],
+        )
+    }
+
+    struct FixedValidator {
+        success: bool,
+    }
+
+    #[async_trait]
+    impl Validator for FixedValidator {
+        async fn run(
+            &self,
+            _receipt: &SandboxReceipt,
+            plan: &ValidationPlan,
+        ) -> Result<ValidationReport, ValidationError> {
+            Ok(ValidationReport {
+                success: self.success,
+                duration_ms: 1,
+                stages: Vec::new(),
+                logs: if self.success {
+                    format!("{} ok", plan.profile)
+                } else {
+                    format!("{} failed", plan.profile)
+                },
+            })
+        }
+    }
+
     #[tokio::test]
     async fn command_validator_aggregates_stage_reports() {
         let workspace = temp_workspace("validator");
@@ -1245,39 +1569,7 @@ index 0000000..1111111
 
     #[tokio::test]
     async fn capture_successful_mutation_appends_capsule() {
-        let workspace = temp_workspace("capture");
-        let store_root =
-            std::env::temp_dir().join(format!("oris-evokernel-store-{}", std::process::id()));
-        if store_root.exists() {
-            fs::remove_dir_all(&store_root).unwrap();
-        }
-        let store: Arc<dyn EvolutionStore> =
-            Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
-        let sandbox: Arc<dyn Sandbox> = Arc::new(oris_sandbox::LocalProcessSandbox::new(
-            "run-1",
-            &workspace,
-            std::env::temp_dir(),
-        ));
-        let validator: Arc<dyn Validator> = Arc::new(CommandValidator::new(SandboxPolicy {
-            allowed_programs: vec!["git".into()],
-            max_duration_ms: 60_000,
-            max_output_bytes: 1024 * 1024,
-            denied_env_prefixes: Vec::new(),
-        }));
-        let evo = EvoKernel::new(test_kernel(), sandbox, validator, store.clone())
-            .with_governor(Arc::new(DefaultGovernor::new(
-                oris_governor::GovernorConfig {
-                    promote_after_successes: 1,
-                    ..Default::default()
-                },
-            )))
-            .with_validation_plan(lightweight_plan())
-            .with_sandbox_policy(SandboxPolicy {
-                allowed_programs: vec!["git".into()],
-                max_duration_ms: 60_000,
-                max_output_bytes: 1024 * 1024,
-                denied_env_prefixes: Vec::new(),
-            });
+        let (evo, store) = build_test_evo("capture", "run-1", command_validator());
         let capsule = evo
             .capture_successful_mutation(&"run-1".into(), sample_mutation())
             .await
@@ -1291,55 +1583,13 @@ index 0000000..1111111
 
     #[tokio::test]
     async fn replay_hit_records_capsule_reused() {
-        let workspace = temp_workspace("replay");
-        let store_root =
-            std::env::temp_dir().join(format!("oris-evokernel-replay-{}", std::process::id()));
-        if store_root.exists() {
-            fs::remove_dir_all(&store_root).unwrap();
-        }
-        let store: Arc<dyn EvolutionStore> =
-            Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
-        let sandbox: Arc<dyn Sandbox> = Arc::new(oris_sandbox::LocalProcessSandbox::new(
-            "run-2",
-            &workspace,
-            std::env::temp_dir(),
-        ));
-        let validator: Arc<dyn Validator> = Arc::new(CommandValidator::new(SandboxPolicy {
-            allowed_programs: vec!["git".into()],
-            max_duration_ms: 60_000,
-            max_output_bytes: 1024 * 1024,
-            denied_env_prefixes: Vec::new(),
-        }));
-        let evo = EvoKernel::new(test_kernel(), sandbox, validator, store.clone())
-            .with_governor(Arc::new(DefaultGovernor::new(
-                oris_governor::GovernorConfig {
-                    promote_after_successes: 1,
-                    ..Default::default()
-                },
-            )))
-            .with_validation_plan(lightweight_plan())
-            .with_sandbox_policy(SandboxPolicy {
-                allowed_programs: vec!["git".into()],
-                max_duration_ms: 60_000,
-                max_output_bytes: 1024 * 1024,
-                denied_env_prefixes: Vec::new(),
-            });
+        let (evo, store) = build_test_evo("replay", "run-2", command_validator());
         let capsule = evo
             .capture_successful_mutation(&"run-2".into(), sample_mutation())
             .await
             .unwrap();
         let decision = evo
-            .replay_or_fallback(SelectorInput {
-                signals: vec!["missing readme".into()],
-                env: EnvFingerprint {
-                    rustc_version: "rustc".into(),
-                    cargo_lock_hash: "lock".into(),
-                    target_triple: "x86_64-unknown-linux-gnu".into(),
-                    os: std::env::consts::OS.into(),
-                },
-                spec_id: None,
-                limit: 1,
-            })
+            .replay_or_fallback(replay_input("missing readme"))
             .await
             .unwrap();
         assert!(decision.used_capsule);
@@ -1349,5 +1599,122 @@ index 0000000..1111111
             .unwrap()
             .iter()
             .any(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. })));
+    }
+
+    #[tokio::test]
+    async fn insufficient_evu_blocks_publish_but_not_local_replay() {
+        let (evo, _) = build_test_evo("stake-gate", "run-stake", command_validator());
+        let capsule = evo
+            .capture_successful_mutation(&"run-stake".into(), sample_mutation())
+            .await
+            .unwrap();
+        let publish = evo.export_promoted_assets("node-local");
+        assert!(matches!(publish, Err(EvoKernelError::Validation(_))));
+
+        let decision = evo
+            .replay_or_fallback(replay_input("missing readme"))
+            .await
+            .unwrap();
+        assert!(decision.used_capsule);
+        assert_eq!(decision.capsule_id, Some(capsule.id));
+    }
+
+    #[tokio::test]
+    async fn remote_reuse_success_rewards_publisher_and_biases_selection() {
+        let ledger = Arc::new(Mutex::new(EvuLedger {
+            accounts: vec![],
+            reputations: vec![
+                oris_economics::ReputationRecord {
+                    node_id: "node-a".into(),
+                    publish_success_rate: 0.4,
+                    validator_accuracy: 0.4,
+                    reuse_impact: 0,
+                },
+                oris_economics::ReputationRecord {
+                    node_id: "node-b".into(),
+                    publish_success_rate: 0.95,
+                    validator_accuracy: 0.95,
+                    reuse_impact: 8,
+                },
+            ],
+        }));
+        let (evo, _) = build_test_evo("remote-success", "run-remote", command_validator());
+        let evo = evo.with_economics(ledger.clone());
+
+        let envelope_a = remote_publish_envelope(
+            "node-a",
+            "run-remote-a",
+            "gene-a",
+            "capsule-a",
+            "mutation-a",
+            "shared-signal",
+            "A.md",
+            "# from a",
+        );
+        let envelope_b = remote_publish_envelope(
+            "node-b",
+            "run-remote-b",
+            "gene-b",
+            "capsule-b",
+            "mutation-b",
+            "shared-signal",
+            "B.md",
+            "# from b",
+        );
+
+        evo.import_remote_envelope(&envelope_a).unwrap();
+        evo.import_remote_envelope(&envelope_b).unwrap();
+
+        let decision = evo
+            .replay_or_fallback(replay_input("shared-signal"))
+            .await
+            .unwrap();
+
+        assert!(decision.used_capsule);
+        assert_eq!(decision.capsule_id, Some("capsule-b".into()));
+        let locked = ledger.lock().unwrap();
+        let rewarded = locked
+            .accounts
+            .iter()
+            .find(|item| item.node_id == "node-b")
+            .unwrap();
+        assert_eq!(rewarded.balance, evo.stake_policy.reuse_reward);
+        assert!(
+            locked.selector_reputation_bias()["node-b"]
+                > locked.selector_reputation_bias()["node-a"]
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_reuse_failure_penalizes_remote_reputation() {
+        let ledger = Arc::new(Mutex::new(EvuLedger::default()));
+        let failing_validator: Arc<dyn Validator> = Arc::new(FixedValidator { success: false });
+        let (evo, _) = build_test_evo("remote-failure", "run-failure", failing_validator);
+        let evo = evo.with_economics(ledger.clone());
+
+        let envelope = remote_publish_envelope(
+            "node-remote",
+            "run-remote-failed",
+            "gene-remote",
+            "capsule-remote",
+            "mutation-remote",
+            "failure-signal",
+            "FAILED.md",
+            "# from remote",
+        );
+        evo.import_remote_envelope(&envelope).unwrap();
+
+        let decision = evo
+            .replay_or_fallback(replay_input("failure-signal"))
+            .await
+            .unwrap();
+
+        assert!(!decision.used_capsule);
+        assert!(decision.fallback_to_planner);
+
+        let signal = evo.economics_signal("node-remote").unwrap();
+        assert_eq!(signal.available_evu, 0);
+        assert!(signal.publish_success_rate < 0.5);
+        assert!(signal.validator_accuracy < 0.5);
     }
 }
