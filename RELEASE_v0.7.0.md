@@ -18,6 +18,8 @@ Minor release adding built-in EvoKernel observability metrics and health reporti
 - cargo test --workspace
 - /bin/zsh -lc "unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo build --verbose --all --release --all-features"
 - /bin/zsh -lc "unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo test --release --all-features"
+- /bin/zsh -lc "source ~/.zshrc >/dev/null 2>&1; unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo publish -p oris-runtime --all-features --dry-run --registry crates-io"
+- /bin/zsh -lc "source ~/.zshrc >/dev/null 2>&1; unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo publish -p oris-runtime --all-features --registry crates-io"
 
 ## Links
 
