@@ -1,6 +1,6 @@
 [package]
 name = "oris-runtime"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.80"
 publish = true
@@ -33,7 +33,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-oris-execution-runtime = { version = "0.2.12", path = "../oris-execution-runtime", default-features = false }
+oris-execution-runtime = { version = "0.2.13", path = "../oris-execution-runtime", default-features = false }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel", default-features = false }
 oris-evokernel = { version = "0.1.2", path = "../oris-evokernel", optional = true }
 scraper = "0.21"
