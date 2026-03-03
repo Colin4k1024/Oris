@@ -26,6 +26,13 @@ Not yet fully implemented in the checked-in code:
 - explicit multi-run promotion enforcement in the evolution crate itself
 - OTLP export wiring and dedicated dashboard assets for the evolution-specific metric families
 
+## Related Documents
+
+- [architecture.md](architecture.md)
+- [governor.md](governor.md)
+- [network.md](network.md)
+- [spec.md](spec.md)
+
 ## 1. Purpose
 
 This document defines the evolution mechanism of Oris. The system improves

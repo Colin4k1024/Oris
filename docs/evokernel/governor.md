@@ -23,6 +23,12 @@ Not yet implemented in the checked-in crate:
 - automatic rollback orchestration
 - global pause or freeze controls
 
+## Related Documents
+
+- [evolution.md](evolution.md)
+- [economics.md](economics.md)
+- [network.md](network.md)
+
 ## 1. Purpose
 
 The evolution governor protects Oris from instability caused by uncontrolled

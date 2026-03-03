@@ -23,6 +23,12 @@ Not yet implemented in the checked-in code:
 - a transport/runtime protocol between agents and the kernel
 - agent-managed execution privileges
 
+## Related Documents
+
+- [devloop.md](devloop.md)
+- [kernel.md](kernel.md)
+- [spec.md](spec.md)
+
 ## 1. Purpose
 
 This document defines how agents interact with the Oris kernel. Agents are

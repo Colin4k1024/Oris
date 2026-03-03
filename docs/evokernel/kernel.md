@@ -17,6 +17,12 @@ The current `crates/oris-kernel` crate provides the baseline kernel surface:
 
 The code samples in this document are schematic. The checked-in crate exposes concrete Rust types with the same responsibilities rather than the exact trait names shown below.
 
+## Related Documents
+
+- [architecture.md](architecture.md)
+- [evolution.md](evolution.md)
+- [agent.md](agent.md)
+
 ## 1. Purpose
 
 This defines the minimal executable core of Oris: the smallest system capable of

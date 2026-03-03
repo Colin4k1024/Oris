@@ -22,6 +22,12 @@ Still represented as conceptual layers rather than dedicated runtime services:
 - a standalone Codex execution adapter
 - a separate solidify pipeline service boundary
 
+## Related Documents
+
+- [kernel.md](kernel.md)
+- [evolution.md](evolution.md)
+- [devloop.md](devloop.md)
+
 ## 1. Overview
 
 Oris is a deterministic execution kernel designed to evolve software systems
