@@ -1325,7 +1325,6 @@ fn validate_sender_id(sender_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-#[cfg(feature = "evolution-network-experimental")]
 async fn ensure_not_cancelled(state: &ExecutionApiState, thread_id: &str) -> Result<(), ApiError> {
     if state.cancelled_threads.read().await.contains(thread_id) {
         return Err(ApiError::conflict(format!(
