@@ -105,6 +105,8 @@ pub struct JobTimelineResponse {
     pub timeline: Vec<JobTimelineItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observability: Option<KernelObservability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<TraceContextResponse>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -322,6 +324,8 @@ pub struct TimelineExportResponse {
     pub history: Vec<JobHistoryItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observability: Option<KernelObservability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<TraceContextResponse>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]

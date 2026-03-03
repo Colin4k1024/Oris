@@ -57,17 +57,61 @@ use tracing::{info_span, Instrument};
 
 use super::graph_bridge::CompiledGraphExecutionBridge;
 
-fn observability_from_history(
+fn observability_and_trace_from_history(
+    state: &ExecutionApiState,
     thread_id: &str,
     history: &[ExecutionCheckpointView],
-) -> Option<KernelObservability> {
+) -> (Option<KernelObservability>, Option<TraceContextState>) {
     if history.is_empty() {
-        None
-    } else {
-        Some(KernelObservability::from_checkpoint_history(
-            thread_id, history,
-        ))
+        return (None, None);
     }
+
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let _ = state;
+
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let trace = state
+            .runtime_repo
+            .as_ref()
+            .and_then(|repo| repo.latest_attempt_trace_for_run(thread_id).ok().flatten())
+            .map(TraceContextState::from_row);
+        let lease_graph = state.runtime_repo.as_ref().and_then(|repo| {
+            repo.latest_attempt_id_for_run(thread_id)
+                .ok()
+                .flatten()
+                .and_then(|attempt_id| {
+                    repo.get_lease_for_attempt(&attempt_id)
+                        .ok()
+                        .flatten()
+                        .map(|lease| vec![(lease.attempt_id, lease.worker_id)])
+                })
+        });
+        return (
+            Some(
+                KernelObservability::from_checkpoint_history_with_lease_graph(
+                    thread_id,
+                    history,
+                    lease_graph,
+                ),
+            ),
+            trace,
+        );
+    }
+
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        (
+            Some(KernelObservability::from_checkpoint_history(
+                thread_id, history,
+            )),
+            None,
+        )
+    }
+}
+
+fn trace_response(trace: Option<TraceContextState>) -> Option<TraceContextResponse> {
+    trace.map(|ctx| ctx.to_response())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1845,7 +1889,7 @@ pub async fn job_timeline(
             created_at: s.created_at.to_rfc3339(),
         })
         .collect();
-    let observability = observability_from_history(&thread_id, &history);
+    let (observability, trace) = observability_and_trace_from_history(&state, &thread_id, &history);
 
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
@@ -1854,6 +1898,7 @@ pub async fn job_timeline(
             thread_id,
             timeline,
             observability,
+            trace: trace_response(trace),
         },
     }))
 }
@@ -2649,7 +2694,7 @@ pub async fn job_detail(
             created_at: s.created_at.to_rfc3339(),
         })
         .collect();
-    let observability = observability_from_history(&thread_id, &history);
+    let (observability, trace) = observability_and_trace_from_history(&state, &thread_id, &history);
     let values = snapshot.values;
     let status = if state.cancelled_threads.read().await.contains(&thread_id) {
         "cancelled".to_string()
@@ -2682,20 +2727,6 @@ pub async fn job_detail(
             None
         }
     };
-    let trace = {
-        #[cfg(feature = "sqlite-persistence")]
-        {
-            state
-                .runtime_repo
-                .as_ref()
-                .and_then(|repo| repo.latest_attempt_trace_for_run(&thread_id).ok().flatten())
-                .map(TraceContextState::from_row)
-        }
-        #[cfg(not(feature = "sqlite-persistence"))]
-        {
-            None
-        }
-    };
     let _span = lifecycle_span(
         "job.detail",
         &rid,
@@ -2716,7 +2747,7 @@ pub async fn job_detail(
             history: history_items,
             timeline,
             pending_interrupt,
-            trace: trace.map(|ctx| ctx.to_response()),
+            trace: trace_response(trace),
             observability,
         },
     }))
@@ -2756,7 +2787,7 @@ pub async fn export_timeline(
             created_at: s.created_at.to_rfc3339(),
         })
         .collect();
-    let observability = observability_from_history(&thread_id, &history);
+    let (observability, trace) = observability_and_trace_from_history(&state, &thread_id, &history);
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -2765,6 +2796,7 @@ pub async fn export_timeline(
             timeline,
             history: history_items,
             observability,
+            trace: trace_response(trace),
         },
     }))
 }
@@ -4761,6 +4793,65 @@ mod tests {
             .expect("poll span")
             .to_string();
         assert_ne!(poll_span_id, run_span_id);
+
+        let timeline_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/jobs/trace-run-1/timeline")
+            .body(Body::empty())
+            .unwrap();
+        let timeline_resp = router.clone().oneshot(timeline_req).await.unwrap();
+        assert_eq!(timeline_resp.status(), StatusCode::OK);
+        let timeline_body = axum::body::to_bytes(timeline_resp.into_body(), usize::MAX)
+            .await
+            .expect("timeline body");
+        let timeline_json: serde_json::Value =
+            serde_json::from_slice(&timeline_body).expect("timeline json");
+        let timeline_trace = timeline_json["data"]["trace"].clone();
+        assert_eq!(
+            timeline_trace["trace_id"],
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(timeline_trace["span_id"], poll_span_id.as_str());
+        let reasoning = timeline_json["data"]["observability"]["reasoning_timeline"]
+            .as_array()
+            .expect("reasoning timeline");
+        assert_eq!(
+            timeline_json["data"]["observability"]["replay_cost"].as_u64(),
+            Some(1)
+        );
+        assert!(
+            reasoning[0]
+                .as_str()
+                .expect("reasoning entry")
+                .contains("CheckpointSaved#1"),
+            "timeline should surface checkpoint-derived reasoning entries"
+        );
+        let lease_graph = timeline_json["data"]["observability"]["lease_graph"]
+            .as_array()
+            .expect("lease graph");
+        assert_eq!(lease_graph[0][0].as_str(), Some(attempt_id.as_str()));
+        assert_eq!(lease_graph[0][1].as_str(), Some("trace-worker-1"));
+
+        let export_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/jobs/trace-run-1/timeline/export")
+            .body(Body::empty())
+            .unwrap();
+        let export_resp = router.clone().oneshot(export_req).await.unwrap();
+        assert_eq!(export_resp.status(), StatusCode::OK);
+        let export_body = axum::body::to_bytes(export_resp.into_body(), usize::MAX)
+            .await
+            .expect("export body");
+        let export_json: serde_json::Value =
+            serde_json::from_slice(&export_body).expect("export json");
+        assert_eq!(
+            export_json["data"]["trace"]["trace_id"].as_str(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            export_json["data"]["trace"]["span_id"].as_str(),
+            Some(poll_span_id.as_str())
+        );
 
         let hb_req = Request::builder()
             .method(Method::POST)

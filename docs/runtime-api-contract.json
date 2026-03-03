@@ -1316,7 +1316,7 @@
           "type": "object"
         },
         "KernelObservability": {
-          "description": "Placeholder structure for kernel observability / telemetry.\n\nFields can be populated by the runtime for metrics and tracing. No built-in collection or export; types exist for API stability.",
+          "description": "Runtime-derived kernel observability / telemetry.\n\nFields are optional so responses can remain backward compatible when a given execution path does not have enough source data.",
           "properties": {
             "interrupt_latency_ms": {
               "description": "Optional interrupt handling latency (e.g. ms).",
@@ -1613,6 +1613,16 @@
                 "$ref": "#/definitions/JobTimelineItem"
               },
               "type": "array"
+            },
+            "trace": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TraceContextResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -1622,7 +1632,7 @@
           "type": "object"
         },
         "KernelObservability": {
-          "description": "Placeholder structure for kernel observability / telemetry.\n\nFields can be populated by the runtime for metrics and tracing. No built-in collection or export; types exist for API stability.",
+          "description": "Runtime-derived kernel observability / telemetry.\n\nFields are optional so responses can remain backward compatible when a given execution path does not have enough source data.",
           "properties": {
             "interrupt_latency_ms": {
               "description": "Optional interrupt handling latency (e.g. ms).",
@@ -1673,6 +1683,31 @@
               ]
             }
           },
+          "type": "object"
+        },
+        "TraceContextResponse": {
+          "properties": {
+            "parent_span_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "span_id": {
+              "type": "string"
+            },
+            "trace_id": {
+              "type": "string"
+            },
+            "traceparent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "span_id",
+            "trace_id",
+            "traceparent"
+          ],
           "type": "object"
         }
       },
@@ -1932,7 +1967,7 @@
           "type": "object"
         },
         "KernelObservability": {
-          "description": "Placeholder structure for kernel observability / telemetry.\n\nFields can be populated by the runtime for metrics and tracing. No built-in collection or export; types exist for API stability.",
+          "description": "Runtime-derived kernel observability / telemetry.\n\nFields are optional so responses can remain backward compatible when a given execution path does not have enough source data.",
           "properties": {
             "interrupt_latency_ms": {
               "description": "Optional interrupt handling latency (e.g. ms).",
@@ -2011,12 +2046,47 @@
                 "$ref": "#/definitions/JobTimelineItem"
               },
               "type": "array"
+            },
+            "trace": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TraceContextResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "history",
             "thread_id",
             "timeline"
+          ],
+          "type": "object"
+        },
+        "TraceContextResponse": {
+          "properties": {
+            "parent_span_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "span_id": {
+              "type": "string"
+            },
+            "trace_id": {
+              "type": "string"
+            },
+            "traceparent": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "span_id",
+            "trace_id",
+            "traceparent"
           ],
           "type": "object"
         }

@@ -427,6 +427,24 @@ impl SqliteRuntimeRepository {
         .map_err(|e| KernelError::Driver(format!("latest attempt trace for run: {}", e)))
     }
 
+    pub fn latest_attempt_id_for_run(&self, run_id: &str) -> Result<Option<String>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.query_row(
+            "SELECT attempt_id
+             FROM runtime_attempts
+             WHERE run_id = ?1
+             ORDER BY attempt_no DESC, attempt_id DESC
+             LIMIT 1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| KernelError::Driver(format!("latest attempt id for run: {}", e)))
+    }
+
     pub fn advance_attempt_trace(
         &self,
         attempt_id: &str,
@@ -2742,6 +2760,11 @@ mod tests {
             .expect("run trace");
         assert_eq!(latest.parent_span_id.as_deref(), Some("2222222222222222"));
         assert_eq!(latest.span_id, "3333333333333333");
+        assert_eq!(
+            repo.latest_attempt_id_for_run("run-trace-1")
+                .expect("latest attempt id"),
+            Some("attempt-trace-1".into())
+        );
     }
 
     #[test]
