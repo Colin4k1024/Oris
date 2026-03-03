@@ -294,6 +294,15 @@ impl ReplayExecutor for StoreReplayExecutor {
                 exact_match = true;
             }
         }
+        if candidates.is_empty() {
+            let mut remote_candidates =
+                quarantined_remote_exact_match_candidates(self.store.as_ref(), input);
+            self.rerank_with_reputation_bias(&mut remote_candidates);
+            if !remote_candidates.is_empty() {
+                candidates = remote_candidates;
+                exact_match = true;
+            }
+        }
         candidates.truncate(input.limit.max(1));
         let Some(best) = candidates.into_iter().next() else {
             return Ok(ReplayDecision {
@@ -361,6 +370,22 @@ impl ReplayExecutor for StoreReplayExecutor {
                 fallback_to_planner: true,
                 reason: "replay validation failed".into(),
             });
+        }
+
+        if matches!(capsule.state, AssetState::Quarantined) {
+            self.store
+                .append_event(EvolutionEvent::ValidationPassed {
+                    mutation_id: capsule.mutation_id.clone(),
+                    report: report.to_snapshot(&validation.profile),
+                    gene_id: Some(best.gene.id.clone()),
+                })
+                .map_err(|err| ReplayError::Store(err.to_string()))?;
+            self.store
+                .append_event(EvolutionEvent::CapsuleReleased {
+                    capsule_id: capsule.id.clone(),
+                    state: AssetState::Promoted,
+                })
+                .map_err(|err| ReplayError::Store(err.to_string()))?;
         }
 
         self.store
@@ -1229,6 +1254,121 @@ fn exact_match_candidates(store: &dyn EvolutionStore, input: &SelectorInput) -> 
     candidates
 }
 
+fn quarantined_remote_exact_match_candidates(
+    store: &dyn EvolutionStore,
+    input: &SelectorInput,
+) -> Vec<GeneCandidate> {
+    let remote_asset_ids = store
+        .scan(1)
+        .ok()
+        .map(|events| {
+            events
+                .into_iter()
+                .filter_map(|stored| match stored.event {
+                    EvolutionEvent::RemoteAssetImported {
+                        source: CandidateSource::Remote,
+                        asset_ids,
+                    } => Some(asset_ids),
+                    _ => None,
+                })
+                .flatten()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if remote_asset_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(projection) = store.rebuild_projection() else {
+        return Vec::new();
+    };
+    let capsules = projection.capsules.clone();
+    let spec_ids_by_gene = projection.spec_ids_by_gene.clone();
+    let requested_spec_id = input
+        .spec_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let signal_set = input
+        .signals
+        .iter()
+        .map(|signal| signal.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut candidates = projection
+        .genes
+        .into_iter()
+        .filter_map(|gene| {
+            if gene.state != AssetState::Promoted {
+                return None;
+            }
+            if let Some(spec_id) = requested_spec_id {
+                let matches_spec = spec_ids_by_gene
+                    .get(&gene.id)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .any(|value| value.eq_ignore_ascii_case(spec_id))
+                    })
+                    .unwrap_or(false);
+                if !matches_spec {
+                    return None;
+                }
+            }
+            let gene_signals = gene
+                .signals
+                .iter()
+                .map(|signal| signal.to_ascii_lowercase())
+                .collect::<BTreeSet<_>>();
+            if gene_signals == signal_set {
+                let mut matched_capsules = capsules
+                    .iter()
+                    .filter(|capsule| {
+                        capsule.gene_id == gene.id
+                            && capsule.state == AssetState::Quarantined
+                            && remote_asset_ids.contains(&capsule.id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                matched_capsules.sort_by(|left, right| {
+                    replay_environment_match_factor(&input.env, &right.env)
+                        .partial_cmp(&replay_environment_match_factor(&input.env, &left.env))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            right
+                                .confidence
+                                .partial_cmp(&left.confidence)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+                if matched_capsules.is_empty() {
+                    None
+                } else {
+                    let score = matched_capsules
+                        .first()
+                        .map(|capsule| replay_environment_match_factor(&input.env, &capsule.env))
+                        .unwrap_or(0.0);
+                    Some(GeneCandidate {
+                        gene,
+                        score,
+                        capsules: matched_capsules,
+                    })
+                }
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.gene.id.cmp(&right.gene.id))
+    });
+    candidates
+}
+
 fn replay_environment_match_factor(input: &EnvFingerprint, candidate: &EnvFingerprint) -> f32 {
     let fields = [
         input
@@ -1330,7 +1470,9 @@ fn import_remote_envelope_into_store(
                     .map_err(store_err)?;
             }
             NetworkAsset::EvolutionEvent { event } => {
-                store.append_event(event.clone()).map_err(store_err)?;
+                if should_import_remote_event(event) {
+                    store.append_event(event.clone()).map_err(store_err)?;
+                }
             }
         }
     }
@@ -1339,6 +1481,13 @@ fn import_remote_envelope_into_store(
         imported_asset_ids,
         accepted: true,
     })
+}
+
+fn should_import_remote_event(event: &EvolutionEvent) -> bool {
+    matches!(
+        event,
+        EvolutionEvent::MutationDeclared { .. } | EvolutionEvent::SpecLinked { .. }
+    )
 }
 
 fn fetch_assets_from_store(
@@ -2092,6 +2241,51 @@ index 0000000..1111111
         assert!(decision.used_capsule);
         assert_eq!(decision.capsule_id, Some("capsule-a".into()));
         assert!(!decision.fallback_to_planner);
+    }
+
+    #[tokio::test]
+    async fn remote_capsule_stays_quarantined_until_first_successful_replay() {
+        let (evo, store) = build_test_evo(
+            "remote-quarantine",
+            "run-remote-quarantine",
+            command_validator(),
+        );
+        let envelope = remote_publish_envelope(
+            "node-remote",
+            "run-remote-quarantine",
+            "gene-remote",
+            "capsule-remote",
+            "mutation-remote",
+            "remote-signal",
+            "REMOTE.md",
+            "# from remote",
+        );
+
+        evo.import_remote_envelope(&envelope).unwrap();
+
+        let before_replay = store.rebuild_projection().unwrap();
+        let imported_capsule = before_replay
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == "capsule-remote")
+            .unwrap();
+        assert_eq!(imported_capsule.state, AssetState::Quarantined);
+
+        let decision = evo
+            .replay_or_fallback(replay_input("remote-signal"))
+            .await
+            .unwrap();
+
+        assert!(decision.used_capsule);
+        assert_eq!(decision.capsule_id, Some("capsule-remote".into()));
+
+        let after_replay = store.rebuild_projection().unwrap();
+        let released_capsule = after_replay
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == "capsule-remote")
+            .unwrap();
+        assert_eq!(released_capsule.state, AssetState::Promoted);
     }
 
     #[tokio::test]
