@@ -16,6 +16,12 @@ Minor release adding real kernel observability snapshots and trace-aware timelin
 - cargo test -p oris-runtime --features "execution-server,sqlite-persistence" run_to_worker_flow_propagates_trace_context_end_to_end -- --nocapture
 - cargo test -p oris-kernel --features "sqlite-persistence,kernel-postgres" -- --nocapture
 - cargo test --workspace
+- /bin/zsh -lc "unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo build --verbose --all --release --all-features"
+- /bin/zsh -lc "unset ORT_LIB_LOCATION ORT_PREFER_DYNAMIC_LINK ORT_LIB_PROFILE; cargo test --release --all-features"
+- cargo publish -p oris-execution-runtime --dry-run --registry crates-io
+- cargo publish -p oris-execution-runtime --registry crates-io
+- cargo publish -p oris-runtime --all-features --dry-run --registry crates-io --config 'patch.crates-io.oris-execution-runtime.path="/Users/jiafan/Desktop/work-code/Oris/crates/oris-execution-runtime"' --config 'patch.crates-io.oris-evokernel.path="/Users/jiafan/Desktop/work-code/Oris/crates/oris-evokernel"'
+- cargo publish -p oris-runtime --all-features --registry crates-io --config 'patch.crates-io.oris-execution-runtime.path="/Users/jiafan/Desktop/work-code/Oris/crates/oris-execution-runtime"' --config 'patch.crates-io.oris-evokernel.path="/Users/jiafan/Desktop/work-code/Oris/crates/oris-evokernel"'
 
 ## Links
 
