@@ -15,6 +15,7 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
 - `ExecutionFeedback`
 - `AgentCapabilityLevel`
 - `ProposalTarget`
+- `examples/evo_oris_repo` exercises the proposal path through `oris-runtime` with `full-evolution-experimental`
 
 Not yet implemented in the checked-in code:
 
