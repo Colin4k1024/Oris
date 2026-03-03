@@ -871,6 +871,12 @@ fn exact_match_candidate(
 ) -> Option<GeneCandidate> {
     let projection = store.rebuild_projection().ok()?;
     let capsules = projection.capsules.clone();
+    let spec_ids_by_gene = projection.spec_ids_by_gene.clone();
+    let requested_spec_id = input
+        .spec_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let signal_set = input
         .signals
         .iter()
@@ -879,6 +885,19 @@ fn exact_match_candidate(
     projection.genes.into_iter().find_map(|gene| {
         if gene.state != AssetState::Promoted {
             return None;
+        }
+        if let Some(spec_id) = requested_spec_id {
+            let matches_spec = spec_ids_by_gene
+                .get(&gene.id)
+                .map(|values| {
+                    values
+                        .iter()
+                        .any(|value| value.eq_ignore_ascii_case(spec_id))
+                })
+                .unwrap_or(false);
+            if !matches_spec {
+                return None;
+            }
         }
         let gene_signals = gene
             .signals
@@ -1318,6 +1337,7 @@ index 0000000..1111111
                     target_triple: "x86_64-unknown-linux-gnu".into(),
                     os: std::env::consts::OS.into(),
                 },
+                spec_id: None,
                 limit: 1,
             })
             .await

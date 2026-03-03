@@ -108,6 +108,7 @@ index 0000000..1111111
                 ),
                 os: std::env::consts::OS.into(),
             },
+            spec_id: None,
             limit: 1,
         })
         .await?;

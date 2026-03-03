@@ -14,12 +14,11 @@ The current `crates/oris-spec` and `crates/oris-evokernel` crates implement:
 - `SpecCompiler` producing a `CompiledMutationPlan`
 - `prepare_mutation_from_spec(...)`
 - `MutationIntent.spec_id` and `EvolutionEvent::SpecLinked`
+- repository-native `specs/behavior`, `specs/repair`, `specs/optimization`, and `specs/evolution` skeleton directories
 - experimental re-export through `oris-runtime::spec_contract`
 
 Not yet implemented in the checked-in code:
 
-- default repository `specs/` directories created by tooling
-- selector narrowing by `spec_id`
 - spec version migration workflows
 
 ## 1. Purpose
@@ -196,7 +195,7 @@ Ambiguous intent is rejected.
   `- evolution/
 ```
 
-This is the intended repository layout. The current scaffold does not create these directories automatically.
+This is the default repository layout checked into the workspace. Tooling around spec authoring and migration is still minimal.
 
 ## 14. Spec Execution Flow
 
@@ -228,7 +227,7 @@ Signal
 -> Capsule Replay
 ```
 
-Current replay integration is limited to `spec_id` tracking in mutation intents and `SpecLinked` evolution events. Selector-side spec matching is still planned.
+Current replay integration includes `spec_id` tracking in mutation intents, `SpecLinked` evolution events, and optional selector narrowing by `spec_id`.
 
 ## 17. Spec and Agents
 

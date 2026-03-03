@@ -223,12 +223,14 @@ pub struct EvolutionProjection {
     pub reuse_counts: BTreeMap<GeneId, u64>,
     pub attempt_counts: BTreeMap<GeneId, u64>,
     pub last_updated_at: BTreeMap<GeneId, String>,
+    pub spec_ids_by_gene: BTreeMap<GeneId, BTreeSet<String>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SelectorInput {
     pub signals: Vec<String>,
     pub env: EnvFingerprint,
+    pub spec_id: Option<String>,
     pub limit: usize,
 }
 
@@ -414,10 +416,30 @@ impl ProjectionSelector {
 
 impl Selector for ProjectionSelector {
     fn select(&self, input: &SelectorInput) -> Vec<GeneCandidate> {
+        let requested_spec_id = input
+            .spec_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let mut out = Vec::new();
         for gene in &self.projection.genes {
             if gene.state != AssetState::Promoted {
                 continue;
+            }
+            if let Some(spec_id) = requested_spec_id {
+                let matches_spec = self
+                    .projection
+                    .spec_ids_by_gene
+                    .get(&gene.id)
+                    .map(|values| {
+                        values
+                            .iter()
+                            .any(|value| value.eq_ignore_ascii_case(spec_id))
+                    })
+                    .unwrap_or(false);
+                if !matches_spec {
+                    continue;
+                }
             }
             let capsules = self
                 .projection
@@ -520,10 +542,23 @@ pub fn rebuild_projection_from_events(events: &[StoredEvolutionEvent]) -> Evolut
     let mut reuse_counts = BTreeMap::<GeneId, u64>::new();
     let mut attempt_counts = BTreeMap::<GeneId, u64>::new();
     let mut last_updated_at = BTreeMap::<GeneId, String>::new();
+    let mut spec_ids_by_gene = BTreeMap::<GeneId, BTreeSet<String>>::new();
     let mut mutation_to_gene = HashMap::<MutationId, GeneId>::new();
+    let mut mutation_spec_ids = HashMap::<MutationId, String>::new();
 
     for stored in events {
         match &stored.event {
+            EvolutionEvent::MutationDeclared { mutation } => {
+                if let Some(spec_id) = mutation
+                    .intent
+                    .spec_id
+                    .as_ref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                {
+                    mutation_spec_ids.insert(mutation.intent.id.clone(), spec_id.to_string());
+                }
+            }
             EvolutionEvent::GeneProjected { gene } => {
                 genes.insert(gene.id.clone(), gene.clone());
                 last_updated_at.insert(gene.id.clone(), stored.timestamp.clone());
@@ -556,6 +591,12 @@ pub fn rebuild_projection_from_events(events: &[StoredEvolutionEvent]) -> Evolut
                 mutation_to_gene.insert(capsule.mutation_id.clone(), capsule.gene_id.clone());
                 capsules.insert(capsule.id.clone(), capsule.clone());
                 *attempt_counts.entry(capsule.gene_id.clone()).or_insert(0) += 1;
+                if let Some(spec_id) = mutation_spec_ids.get(&capsule.mutation_id) {
+                    spec_ids_by_gene
+                        .entry(capsule.gene_id.clone())
+                        .or_default()
+                        .insert(spec_id.clone());
+                }
                 last_updated_at.insert(capsule.gene_id.clone(), stored.timestamp.clone());
             }
             EvolutionEvent::CapsuleQuarantined { capsule_id } => {
@@ -610,6 +651,7 @@ pub fn rebuild_projection_from_events(events: &[StoredEvolutionEvent]) -> Evolut
         reuse_counts,
         attempt_counts,
         last_updated_at,
+        spec_ids_by_gene,
     }
 }
 
@@ -831,6 +873,59 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_projection_tracks_spec_ids_for_genes() {
+        let root = temp_root("projection-spec");
+        let store = JsonlEvolutionStore::new(&root);
+        let mut mutation = sample_mutation();
+        mutation.intent.id = "mutation-spec".into();
+        mutation.intent.spec_id = Some("spec-repair-1".into());
+        let gene = Gene {
+            id: "gene-spec".into(),
+            signals: vec!["rust borrow error".into()],
+            strategy: vec!["crates".into()],
+            validation: vec!["oris-default".into()],
+            state: AssetState::Promoted,
+        };
+        let capsule = Capsule {
+            id: "capsule-spec".into(),
+            gene_id: gene.id.clone(),
+            mutation_id: mutation.intent.id.clone(),
+            run_id: "run-spec".into(),
+            diff_hash: "abc".into(),
+            confidence: 0.7,
+            env: EnvFingerprint {
+                rustc_version: "rustc 1.80".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            outcome: Outcome {
+                success: true,
+                validation_profile: "oris-default".into(),
+                validation_duration_ms: 100,
+                changed_files: vec!["crates/oris-kernel/src/lib.rs".into()],
+                validator_hash: "vh".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+        store
+            .append_event(EvolutionEvent::MutationDeclared { mutation })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::GeneProjected { gene })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::CapsuleCommitted { capsule })
+            .unwrap();
+
+        let projection = store.rebuild_projection().unwrap();
+        let spec_ids = projection.spec_ids_by_gene.get("gene-spec").unwrap();
+        assert!(spec_ids.contains("spec-repair-1"));
+    }
+
+    #[test]
     fn selector_orders_results_stably() {
         let projection = EvolutionProjection {
             genes: vec![
@@ -905,6 +1000,7 @@ mod tests {
                 ("gene-a".into(), Utc::now().to_rfc3339()),
                 ("gene-b".into(), Utc::now().to_rfc3339()),
             ]),
+            spec_ids_by_gene: BTreeMap::new(),
         };
         let selector = ProjectionSelector::new(projection);
         let input = SelectorInput {
@@ -915,6 +1011,7 @@ mod tests {
                 target_triple: "x86_64-unknown-linux-gnu".into(),
                 os: "linux".into(),
             },
+            spec_id: None,
             limit: 2,
         };
         let first = selector.select(&input);
@@ -930,5 +1027,102 @@ mod tests {
                 .map(|candidate| candidate.gene.id.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn selector_can_narrow_by_spec_id() {
+        let projection = EvolutionProjection {
+            genes: vec![
+                Gene {
+                    id: "gene-a".into(),
+                    signals: vec!["signal".into()],
+                    strategy: vec!["a".into()],
+                    validation: vec!["oris-default".into()],
+                    state: AssetState::Promoted,
+                },
+                Gene {
+                    id: "gene-b".into(),
+                    signals: vec!["signal".into()],
+                    strategy: vec!["b".into()],
+                    validation: vec!["oris-default".into()],
+                    state: AssetState::Promoted,
+                },
+            ],
+            capsules: vec![
+                Capsule {
+                    id: "capsule-a".into(),
+                    gene_id: "gene-a".into(),
+                    mutation_id: "m1".into(),
+                    run_id: "r1".into(),
+                    diff_hash: "1".into(),
+                    confidence: 0.7,
+                    env: EnvFingerprint {
+                        rustc_version: "rustc".into(),
+                        cargo_lock_hash: "lock".into(),
+                        target_triple: "x86_64-unknown-linux-gnu".into(),
+                        os: "linux".into(),
+                    },
+                    outcome: Outcome {
+                        success: true,
+                        validation_profile: "oris-default".into(),
+                        validation_duration_ms: 1,
+                        changed_files: vec!["crates/oris-kernel".into()],
+                        validator_hash: "v".into(),
+                        lines_changed: 1,
+                        replay_verified: false,
+                    },
+                    state: AssetState::Promoted,
+                },
+                Capsule {
+                    id: "capsule-b".into(),
+                    gene_id: "gene-b".into(),
+                    mutation_id: "m2".into(),
+                    run_id: "r2".into(),
+                    diff_hash: "2".into(),
+                    confidence: 0.7,
+                    env: EnvFingerprint {
+                        rustc_version: "rustc".into(),
+                        cargo_lock_hash: "lock".into(),
+                        target_triple: "x86_64-unknown-linux-gnu".into(),
+                        os: "linux".into(),
+                    },
+                    outcome: Outcome {
+                        success: true,
+                        validation_profile: "oris-default".into(),
+                        validation_duration_ms: 1,
+                        changed_files: vec!["crates/oris-kernel".into()],
+                        validator_hash: "v".into(),
+                        lines_changed: 1,
+                        replay_verified: false,
+                    },
+                    state: AssetState::Promoted,
+                },
+            ],
+            reuse_counts: BTreeMap::from([("gene-a".into(), 3), ("gene-b".into(), 3)]),
+            attempt_counts: BTreeMap::from([("gene-a".into(), 1), ("gene-b".into(), 1)]),
+            last_updated_at: BTreeMap::from([
+                ("gene-a".into(), Utc::now().to_rfc3339()),
+                ("gene-b".into(), Utc::now().to_rfc3339()),
+            ]),
+            spec_ids_by_gene: BTreeMap::from([
+                ("gene-a".into(), BTreeSet::from(["spec-a".to_string()])),
+                ("gene-b".into(), BTreeSet::from(["spec-b".to_string()])),
+            ]),
+        };
+        let selector = ProjectionSelector::new(projection);
+        let input = SelectorInput {
+            signals: vec!["signal".into()],
+            env: EnvFingerprint {
+                rustc_version: "rustc".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            spec_id: Some("spec-b".into()),
+            limit: 2,
+        };
+        let selected = selector.select(&input);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].gene.id, "gene-b");
     }
 }
