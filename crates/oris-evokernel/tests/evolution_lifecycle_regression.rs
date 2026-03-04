@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
@@ -14,7 +14,8 @@ use oris_evokernel::{
     SignalExtractionInput, ValidationPlan, ValidationStage,
 };
 use oris_evolution::{
-    compute_artifact_hash, stable_hash_json, EvolutionEvent, PreparedMutation, StoredEvolutionEvent,
+    compute_artifact_hash, rebuild_projection_from_events, stable_hash_json, EvolutionEvent,
+    PreparedMutation, StoredEvolutionEvent,
 };
 use oris_governor::{DefaultGovernor, GovernorConfig};
 use oris_kernel::{
@@ -214,6 +215,82 @@ fn test_evo(label: &str) -> (PathBuf, Arc<JsonlEvolutionStore>, EvoKernel<TestSt
 fn test_evo_with_store(
     label: &str,
     store: Arc<JsonlEvolutionStore>,
+) -> (PathBuf, EvoKernel<TestState>) {
+    let workspace = temp_workspace();
+    let sandbox_root = unique_path(&format!("{label}-sandbox"));
+    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let sandbox = Arc::new(LocalProcessSandbox::new(
+        format!("run-{label}"),
+        &workspace,
+        &sandbox_root,
+    ));
+    let evo = EvoKernel::new(test_kernel(), sandbox, validator, store)
+        .with_governor(Arc::new(DefaultGovernor::new(GovernorConfig {
+            promote_after_successes: 1,
+            ..Default::default()
+        })))
+        .with_sandbox_policy(sandbox_policy())
+        .with_validation_plan(lightweight_plan());
+    (workspace, evo)
+}
+
+struct SeededStore {
+    events: Mutex<Vec<StoredEvolutionEvent>>,
+}
+
+impl SeededStore {
+    fn new(events: Vec<StoredEvolutionEvent>) -> Self {
+        Self {
+            events: Mutex::new(events),
+        }
+    }
+}
+
+impl EvoEvolutionStore for SeededStore {
+    fn append_event(&self, event: EvolutionEvent) -> Result<u64, oris_evolution::EvolutionError> {
+        let mut events = self.events.lock().unwrap();
+        let seq = events.len() as u64 + 1;
+        let timestamp = Utc::now().to_rfc3339();
+        let prev_hash = events
+            .last()
+            .map(|stored| stored.record_hash.clone())
+            .unwrap_or_default();
+        let record_hash = stable_hash_json(&(seq, &timestamp, &prev_hash, &event))
+            .unwrap_or_else(|_| format!("hash-{seq}"));
+        events.push(StoredEvolutionEvent {
+            seq,
+            timestamp,
+            prev_hash,
+            record_hash,
+            event,
+        });
+        Ok(seq)
+    }
+
+    fn scan(
+        &self,
+        from_seq: u64,
+    ) -> Result<Vec<StoredEvolutionEvent>, oris_evolution::EvolutionError> {
+        Ok(self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|stored| stored.seq >= from_seq)
+            .cloned()
+            .collect())
+    }
+
+    fn rebuild_projection(
+        &self,
+    ) -> Result<oris_evolution::EvolutionProjection, oris_evolution::EvolutionError> {
+        Ok(rebuild_projection_from_events(&self.events.lock().unwrap()))
+    }
+}
+
+fn test_evo_with_seeded_store(
+    label: &str,
+    store: Arc<SeededStore>,
 ) -> (PathBuf, EvoKernel<TestState>) {
     let workspace = temp_workspace();
     let sandbox_root = unique_path(&format!("{label}-sandbox"));
@@ -583,6 +660,90 @@ async fn normalized_signal_variants_can_replay_learned_capsule() {
         .capsules
         .iter()
         .any(|capsule| capsule.id == captured.id));
+}
+
+#[tokio::test]
+async fn stale_confidence_forces_revalidation_before_replay() {
+    let old_timestamp = (Utc::now() - Duration::hours(48)).to_rfc3339();
+    let mutation = sample_mutation_with_id("mutation-stale-confidence");
+    let workspace = temp_workspace();
+    let capsule_env = replay_input("missing readme", &workspace).env;
+    let gene = oris_evolution::Gene {
+        id: "gene-stale-confidence".into(),
+        signals: vec!["missing readme".into()],
+        strategy: vec!["README.md".into()],
+        validation: vec!["regression".into()],
+        state: EvoAssetState::Promoted,
+    };
+    let capsule = oris_evolution::Capsule {
+        id: "capsule-stale-confidence".into(),
+        gene_id: gene.id.clone(),
+        mutation_id: mutation.intent.id.clone(),
+        run_id: "run-stale-confidence".into(),
+        diff_hash: mutation.artifact.content_hash.clone(),
+        confidence: 0.8,
+        env: capsule_env,
+        outcome: oris_evolution::Outcome {
+            success: true,
+            validation_profile: "regression".into(),
+            validation_duration_ms: 1,
+            changed_files: vec!["README.md".into()],
+            validator_hash: "validator".into(),
+            lines_changed: 1,
+            replay_verified: false,
+        },
+        state: EvoAssetState::Promoted,
+    };
+    let store = Arc::new(SeededStore::new(vec![
+        StoredEvolutionEvent {
+            seq: 1,
+            timestamp: old_timestamp.clone(),
+            prev_hash: String::new(),
+            record_hash: "seed-1".into(),
+            event: EvolutionEvent::MutationDeclared {
+                mutation: mutation.clone(),
+            },
+        },
+        StoredEvolutionEvent {
+            seq: 2,
+            timestamp: old_timestamp.clone(),
+            prev_hash: "seed-1".into(),
+            record_hash: "seed-2".into(),
+            event: EvolutionEvent::GeneProjected { gene: gene.clone() },
+        },
+        StoredEvolutionEvent {
+            seq: 3,
+            timestamp: old_timestamp,
+            prev_hash: "seed-2".into(),
+            record_hash: "seed-3".into(),
+            event: EvolutionEvent::CapsuleCommitted {
+                capsule: capsule.clone(),
+            },
+        },
+    ]));
+    let (_seeded_workspace, evo) = test_evo_with_seeded_store("stale-confidence", store.clone());
+
+    let decision = evo
+        .replay_or_fallback(replay_input("missing readme", &workspace))
+        .await
+        .unwrap();
+    let projection = store.rebuild_projection().unwrap();
+    let events = store.scan(1).unwrap();
+    let metrics = evo.metrics_snapshot().unwrap();
+
+    assert!(!decision.used_capsule);
+    assert!(decision.fallback_to_planner);
+    assert_eq!(decision.capsule_id, None);
+    assert_eq!(projection.genes[0].state, EvoAssetState::Quarantined);
+    assert_eq!(projection.capsules[0].state, EvoAssetState::Quarantined);
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::PromotionEvaluated { gene_id, state, reason }
+            if gene_id == &gene.id
+                && *state == EvoAssetState::Quarantined
+                && reason.contains("confidence decayed")
+    )));
+    assert_eq!(metrics.confidence_revalidations_total, 1);
 }
 
 #[tokio::test]

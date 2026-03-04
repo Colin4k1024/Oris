@@ -173,6 +173,12 @@ Focus:
 - automatic demotion / revocation on drift
 - freshness-aware candidate ranking
 
+Current deterministic boundary:
+
+- replay ranking now multiplies signal quality by decayed confidence
+- stale promoted assets can be lazily demoted back to `Quarantined` on replay lookup
+- `oris_evolution_confidence_revalidations_total` exposes confidence-driven revalidation events
+
 Definition of done:
 
 - stale or environment-diverged assets lose priority automatically before they become harmful

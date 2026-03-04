@@ -14,10 +14,11 @@ use oris_agent_contract::{
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
-    compute_artifact_hash, next_id, stable_hash_json, AssetState, BlastRadius, CandidateSource,
-    Capsule, CapsuleId, EnvFingerprint, EvolutionError, EvolutionEvent, EvolutionProjection,
-    EvolutionStore, Gene, GeneCandidate, MutationId, PreparedMutation, Selector, SelectorInput,
-    StoreBackedSelector, StoredEvolutionEvent, ValidationSnapshot,
+    compute_artifact_hash, decayed_replay_confidence, next_id, stable_hash_json, AssetState,
+    BlastRadius, CandidateSource, Capsule, CapsuleId, EnvFingerprint, EvolutionError,
+    EvolutionEvent, EvolutionProjection, EvolutionStore, Gene, GeneCandidate, MutationId,
+    PreparedMutation, Selector, SelectorInput, StoreBackedSelector, StoredEvolutionEvent,
+    ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -735,6 +736,7 @@ impl ReplayExecutor for StoreReplayExecutor {
 
 impl StoreReplayExecutor {
     fn collect_replay_candidates(&self, input: &SelectorInput) -> ReplayCandidates {
+        self.apply_confidence_revalidation();
         let mut selector_input = input.clone();
         if self.economics.is_some() && self.remote_publishers.is_some() {
             selector_input.limit = selector_input.limit.max(4);
@@ -763,6 +765,38 @@ impl StoreReplayExecutor {
         ReplayCandidates {
             candidates,
             exact_match,
+        }
+    }
+
+    fn apply_confidence_revalidation(&self) {
+        let Ok(projection) = projection_snapshot(self.store.as_ref()) else {
+            return;
+        };
+        for target in stale_replay_revalidation_targets(&projection, Utc::now()) {
+            let reason = format!(
+                "confidence decayed to {:.3}; revalidation required before replay",
+                target.decayed_confidence
+            );
+            if self
+                .store
+                .append_event(EvolutionEvent::PromotionEvaluated {
+                    gene_id: target.gene_id.clone(),
+                    state: AssetState::Quarantined,
+                    reason: reason.clone(),
+                })
+                .is_err()
+            {
+                continue;
+            }
+            for capsule_id in target.capsule_ids {
+                if self
+                    .store
+                    .append_event(EvolutionEvent::CapsuleQuarantined { capsule_id })
+                    .is_err()
+                {
+                    break;
+                }
+            }
         }
     }
 
@@ -1101,6 +1135,67 @@ impl StoreReplayExecutor {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ConfidenceRevalidationTarget {
+    gene_id: String,
+    capsule_ids: Vec<String>,
+    decayed_confidence: f32,
+}
+
+fn stale_replay_revalidation_targets(
+    projection: &EvolutionProjection,
+    now: DateTime<Utc>,
+) -> Vec<ConfidenceRevalidationTarget> {
+    projection
+        .genes
+        .iter()
+        .filter(|gene| gene.state == AssetState::Promoted)
+        .filter_map(|gene| {
+            let promoted_capsules = projection
+                .capsules
+                .iter()
+                .filter(|capsule| {
+                    capsule.gene_id == gene.id && capsule.state == AssetState::Promoted
+                })
+                .collect::<Vec<_>>();
+            if promoted_capsules.is_empty() {
+                return None;
+            }
+            let age_secs = projection
+                .last_updated_at
+                .get(&gene.id)
+                .and_then(|timestamp| seconds_since_timestamp_for_confidence(timestamp, now));
+            let decayed_confidence = promoted_capsules
+                .iter()
+                .map(|capsule| decayed_replay_confidence(capsule.confidence, age_secs))
+                .fold(0.0_f32, f32::max);
+            if decayed_confidence >= MIN_REPLAY_CONFIDENCE {
+                return None;
+            }
+            Some(ConfidenceRevalidationTarget {
+                gene_id: gene.id.clone(),
+                capsule_ids: promoted_capsules
+                    .into_iter()
+                    .map(|capsule| capsule.id.clone())
+                    .collect(),
+                decayed_confidence,
+            })
+        })
+        .collect()
+}
+
+fn seconds_since_timestamp_for_confidence(timestamp: &str, now: DateTime<Utc>) -> Option<u64> {
+    let parsed = DateTime::parse_from_rfc3339(timestamp)
+        .ok()?
+        .with_timezone(&Utc);
+    let elapsed = now.signed_duration_since(parsed);
+    if elapsed < Duration::zero() {
+        Some(0)
+    } else {
+        u64::try_from(elapsed.num_seconds()).ok()
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum EvoKernelError {
     #[error("sandbox error: {0}")]
@@ -1131,6 +1226,7 @@ pub struct EvolutionMetricsSnapshot {
     pub replay_attempts_total: u64,
     pub replay_success_total: u64,
     pub replay_success_rate: f64,
+    pub confidence_revalidations_total: u64,
     pub mutation_declared_total: u64,
     pub promoted_mutations_total: u64,
     pub promotion_ratio: f64,
@@ -2805,6 +2901,10 @@ fn evolution_metrics_snapshot(
         .filter(|stored| is_replay_validation_failure(&stored.event))
         .count() as u64;
     let replay_attempts_total = replay_success_total + replay_failures_total;
+    let confidence_revalidations_total = events
+        .iter()
+        .filter(|stored| is_confidence_revalidation_event(&stored.event))
+        .count() as u64;
     let mutation_declared_total = events
         .iter()
         .filter(|stored| matches!(stored.event, EvolutionEvent::MutationDeclared { .. }))
@@ -2839,6 +2939,7 @@ fn evolution_metrics_snapshot(
         replay_attempts_total,
         replay_success_total,
         replay_success_rate: safe_ratio(replay_success_total, replay_attempts_total),
+        confidence_revalidations_total,
         mutation_declared_total,
         promoted_mutations_total,
         promotion_ratio: safe_ratio(promoted_mutations_total, mutation_declared_total),
@@ -2884,6 +2985,12 @@ fn render_evolution_metrics_prometheus(
     out.push_str(&format!(
         "oris_evolution_replay_success_rate {:.6}\n",
         snapshot.replay_success_rate
+    ));
+    out.push_str("# HELP oris_evolution_confidence_revalidations_total Total confidence-driven demotions that require revalidation before replay.\n");
+    out.push_str("# TYPE oris_evolution_confidence_revalidations_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_confidence_revalidations_total {}\n",
+        snapshot.confidence_revalidations_total
     ));
     out.push_str(
         "# HELP oris_evolution_mutation_declared_total Total declared mutations recorded in the evolution log.\n",
@@ -2983,6 +3090,15 @@ fn is_replay_validation_failure(event: &EvolutionEvent) -> bool {
             gene_id: Some(_),
             ..
         }
+    )
+}
+
+fn is_confidence_revalidation_event(event: &EvolutionEvent) -> bool {
+    matches!(
+        event,
+        EvolutionEvent::PromotionEvaluated { state, reason, .. }
+            if *state == AssetState::Quarantined
+                && reason.contains("confidence decayed")
     )
 }
 
@@ -3741,6 +3857,7 @@ index 0000000..1111111
         assert_eq!(snapshot.replay_attempts_total, 1);
         assert_eq!(snapshot.replay_success_total, 1);
         assert_eq!(snapshot.replay_success_rate, 1.0);
+        assert_eq!(snapshot.confidence_revalidations_total, 0);
         assert_eq!(snapshot.mutation_declared_total, 1);
         assert_eq!(snapshot.promoted_mutations_total, 1);
         assert_eq!(snapshot.promotion_ratio, 1.0);
@@ -3752,10 +3869,58 @@ index 0000000..1111111
 
         let rendered = evo.render_metrics_prometheus().unwrap();
         assert!(rendered.contains("oris_evolution_replay_success_rate 1.000000"));
+        assert!(rendered.contains("oris_evolution_confidence_revalidations_total 0"));
         assert!(rendered.contains("oris_evolution_promotion_ratio 1.000000"));
         assert!(rendered.contains("oris_evolution_revoke_frequency_last_hour 1"));
         assert!(rendered.contains("oris_evolution_mutation_velocity_last_hour 1"));
         assert!(rendered.contains("oris_evolution_health 1"));
+    }
+
+    #[test]
+    fn stale_replay_targets_require_confidence_revalidation() {
+        let now = Utc::now();
+        let projection = EvolutionProjection {
+            genes: vec![Gene {
+                id: "gene-stale".into(),
+                signals: vec!["missing readme".into()],
+                strategy: vec!["README.md".into()],
+                validation: vec!["test".into()],
+                state: AssetState::Promoted,
+            }],
+            capsules: vec![Capsule {
+                id: "capsule-stale".into(),
+                gene_id: "gene-stale".into(),
+                mutation_id: "mutation-stale".into(),
+                run_id: "run-stale".into(),
+                diff_hash: "hash".into(),
+                confidence: 0.8,
+                env: replay_input("missing readme").env,
+                outcome: Outcome {
+                    success: true,
+                    validation_profile: "test".into(),
+                    validation_duration_ms: 1,
+                    changed_files: vec!["README.md".into()],
+                    validator_hash: "validator".into(),
+                    lines_changed: 1,
+                    replay_verified: false,
+                },
+                state: AssetState::Promoted,
+            }],
+            reuse_counts: BTreeMap::from([("gene-stale".into(), 1)]),
+            attempt_counts: BTreeMap::from([("gene-stale".into(), 1)]),
+            last_updated_at: BTreeMap::from([(
+                "gene-stale".into(),
+                (now - Duration::hours(48)).to_rfc3339(),
+            )]),
+            spec_ids_by_gene: BTreeMap::new(),
+        };
+
+        let targets = stale_replay_revalidation_targets(&projection, now);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].gene_id, "gene-stale");
+        assert_eq!(targets[0].capsule_ids, vec!["capsule-stale".to_string()]);
+        assert!(targets[0].decayed_confidence < MIN_REPLAY_CONFIDENCE);
     }
 
     #[tokio::test]

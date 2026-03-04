@@ -1,14 +1,13 @@
 //! Evolution domain model, append-only event store, projections, and selector logic.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::f64::consts::E;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use oris_kernel::RunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,6 +16,9 @@ use thiserror::Error;
 pub type MutationId = String;
 pub type GeneId = String;
 pub type CapsuleId = String;
+
+pub const REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR: f32 = 0.05;
+pub const MIN_REPLAY_CONFIDENCE: f32 = 0.35;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AssetState {
@@ -521,20 +523,31 @@ impl Selector for ProjectionSelector {
                 .unwrap_or(0) as f64;
             let reuse_count_factor = 1.0 + (1.0 + successful_reuses).ln();
             let signal_overlap = normalized_signal_overlap(&gene.signals, &input.signals);
-            let recency_decay = self
+            let age_secs = self
                 .projection
                 .last_updated_at
                 .get(&gene.id)
-                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                .map(|dt| {
-                    let age_days = (self.now - dt.with_timezone(&Utc)).num_days().max(0) as f64;
-                    E.powf(-age_days / 30.0)
-                })
-                .unwrap_or(0.0);
+                .and_then(|value| seconds_since_timestamp(value, self.now));
+            let peak_confidence = capsules
+                .iter()
+                .map(|capsule| capsule.confidence)
+                .fold(0.0_f32, f32::max) as f64;
+            let freshness_confidence = capsules
+                .iter()
+                .map(|capsule| decayed_replay_confidence(capsule.confidence, age_secs))
+                .fold(0.0_f32, f32::max) as f64;
+            if freshness_confidence < MIN_REPLAY_CONFIDENCE as f64 {
+                continue;
+            }
+            let freshness_factor = if peak_confidence <= 0.0 {
+                0.0
+            } else {
+                (freshness_confidence / peak_confidence).clamp(0.0, 1.0)
+            };
             let score = (success_rate
                 * reuse_count_factor
                 * env_match_factor
-                * recency_decay
+                * freshness_factor
                 * signal_overlap) as f32;
             if score < 0.35 {
                 continue;
@@ -746,6 +759,15 @@ pub fn next_id(prefix: &str) -> String {
     format!("{prefix}-{nanos:x}")
 }
 
+pub fn decayed_replay_confidence(confidence: f32, age_secs: Option<u64>) -> f32 {
+    if confidence <= 0.0 {
+        return 0.0;
+    }
+    let age_hours = age_secs.unwrap_or(0) as f32 / 3600.0;
+    let decay = (-REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR * age_hours).exp();
+    (confidence * decay).clamp(0.0, 1.0)
+}
+
 fn normalized_signal_overlap(gene_signals: &[String], input_signals: &[String]) -> f64 {
     if input_signals.is_empty() {
         return 0.0;
@@ -760,6 +782,18 @@ fn normalized_signal_overlap(gene_signals: &[String], input_signals: &[String]) 
         .collect::<BTreeSet<_>>();
     let matched = input.iter().filter(|signal| gene.contains(*signal)).count() as f64;
     matched / input.len() as f64
+}
+
+fn seconds_since_timestamp(timestamp: &str, now: DateTime<Utc>) -> Option<u64> {
+    let parsed = DateTime::parse_from_rfc3339(timestamp)
+        .ok()?
+        .with_timezone(&Utc);
+    let elapsed = now.signed_duration_since(parsed);
+    if elapsed < Duration::zero() {
+        Some(0)
+    } else {
+        u64::try_from(elapsed.num_seconds()).ok()
+    }
 }
 
 fn environment_match_factor(input: &EnvFingerprint, candidate: &EnvFingerprint) -> f64 {
@@ -1653,6 +1687,133 @@ mod tests {
         assert_eq!(selected[0].gene.id, "gene-a");
         assert_eq!(selected[0].capsules[0].id, "capsule-a-best");
         assert!(selected[0].score > selected[1].score);
+    }
+
+    #[test]
+    fn selector_preserves_fresh_candidate_scores_while_ranking_by_confidence() {
+        let now = Utc::now();
+        let projection = EvolutionProjection {
+            genes: vec![Gene {
+                id: "gene-fresh".into(),
+                signals: vec!["missing".into()],
+                strategy: vec!["a".into()],
+                validation: vec!["oris-default".into()],
+                state: AssetState::Promoted,
+            }],
+            capsules: vec![Capsule {
+                id: "capsule-fresh".into(),
+                gene_id: "gene-fresh".into(),
+                mutation_id: "m1".into(),
+                run_id: "r1".into(),
+                diff_hash: "1".into(),
+                confidence: 0.7,
+                env: EnvFingerprint {
+                    rustc_version: "rustc".into(),
+                    cargo_lock_hash: "lock".into(),
+                    target_triple: "x86_64-unknown-linux-gnu".into(),
+                    os: "linux".into(),
+                },
+                outcome: Outcome {
+                    success: true,
+                    validation_profile: "oris-default".into(),
+                    validation_duration_ms: 1,
+                    changed_files: vec!["README.md".into()],
+                    validator_hash: "v".into(),
+                    lines_changed: 1,
+                    replay_verified: false,
+                },
+                state: AssetState::Promoted,
+            }],
+            reuse_counts: BTreeMap::from([("gene-fresh".into(), 1)]),
+            attempt_counts: BTreeMap::from([("gene-fresh".into(), 1)]),
+            last_updated_at: BTreeMap::from([("gene-fresh".into(), now.to_rfc3339())]),
+            spec_ids_by_gene: BTreeMap::new(),
+        };
+        let selector = ProjectionSelector::with_now(projection, now);
+        let input = SelectorInput {
+            signals: vec![
+                "missing".into(),
+                "token-a".into(),
+                "token-b".into(),
+                "token-c".into(),
+            ],
+            env: EnvFingerprint {
+                rustc_version: "rustc".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            spec_id: None,
+            limit: 1,
+        };
+
+        let selected = selector.select(&input);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].gene.id, "gene-fresh");
+        assert!(selected[0].score > 0.35);
+    }
+
+    #[test]
+    fn selector_skips_stale_candidates_after_confidence_decay() {
+        let now = Utc::now();
+        let projection = EvolutionProjection {
+            genes: vec![Gene {
+                id: "gene-stale".into(),
+                signals: vec!["missing readme".into()],
+                strategy: vec!["a".into()],
+                validation: vec!["oris-default".into()],
+                state: AssetState::Promoted,
+            }],
+            capsules: vec![Capsule {
+                id: "capsule-stale".into(),
+                gene_id: "gene-stale".into(),
+                mutation_id: "m1".into(),
+                run_id: "r1".into(),
+                diff_hash: "1".into(),
+                confidence: 0.8,
+                env: EnvFingerprint {
+                    rustc_version: "rustc".into(),
+                    cargo_lock_hash: "lock".into(),
+                    target_triple: "x86_64-unknown-linux-gnu".into(),
+                    os: "linux".into(),
+                },
+                outcome: Outcome {
+                    success: true,
+                    validation_profile: "oris-default".into(),
+                    validation_duration_ms: 1,
+                    changed_files: vec!["README.md".into()],
+                    validator_hash: "v".into(),
+                    lines_changed: 1,
+                    replay_verified: false,
+                },
+                state: AssetState::Promoted,
+            }],
+            reuse_counts: BTreeMap::from([("gene-stale".into(), 2)]),
+            attempt_counts: BTreeMap::from([("gene-stale".into(), 1)]),
+            last_updated_at: BTreeMap::from([(
+                "gene-stale".into(),
+                (now - chrono::Duration::hours(48)).to_rfc3339(),
+            )]),
+            spec_ids_by_gene: BTreeMap::new(),
+        };
+        let selector = ProjectionSelector::with_now(projection, now);
+        let input = SelectorInput {
+            signals: vec!["missing readme".into()],
+            env: EnvFingerprint {
+                rustc_version: "rustc".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            spec_id: None,
+            limit: 1,
+        };
+
+        let selected = selector.select(&input);
+
+        assert!(selected.is_empty());
+        assert!(decayed_replay_confidence(0.8, Some(48 * 60 * 60)) < MIN_REPLAY_CONFIDENCE);
     }
 
     #[test]
