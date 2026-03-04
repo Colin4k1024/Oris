@@ -747,19 +747,68 @@ pub fn next_id(prefix: &str) -> String {
 }
 
 fn normalized_signal_overlap(gene_signals: &[String], input_signals: &[String]) -> f64 {
-    if input_signals.is_empty() {
+    let gene = canonical_signal_phrases(gene_signals);
+    let input = canonical_signal_phrases(input_signals);
+    if input.is_empty() || gene.is_empty() {
         return 0.0;
     }
-    let gene = gene_signals
+    let matched = input
         .iter()
-        .map(|signal| signal.to_ascii_lowercase())
-        .collect::<BTreeSet<_>>();
-    let input = input_signals
-        .iter()
-        .map(|signal| signal.to_ascii_lowercase())
-        .collect::<BTreeSet<_>>();
-    let matched = input.iter().filter(|signal| gene.contains(*signal)).count() as f64;
+        .map(|signal| best_signal_match(&gene, signal))
+        .sum::<f64>();
     matched / input.len() as f64
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CanonicalSignal {
+    phrase: String,
+    tokens: BTreeSet<String>,
+}
+
+fn canonical_signal_phrases(signals: &[String]) -> Vec<CanonicalSignal> {
+    signals
+        .iter()
+        .filter_map(|signal| canonical_signal_phrase(signal))
+        .collect()
+}
+
+fn canonical_signal_phrase(input: &str) -> Option<CanonicalSignal> {
+    let tokens = input
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token.len() >= 3)
+        .collect::<BTreeSet<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    let phrase = tokens.iter().cloned().collect::<Vec<_>>().join(" ");
+    Some(CanonicalSignal { phrase, tokens })
+}
+
+fn best_signal_match(gene_signals: &[CanonicalSignal], input: &CanonicalSignal) -> f64 {
+    gene_signals
+        .iter()
+        .map(|candidate| deterministic_phrase_match(candidate, input))
+        .fold(0.0, f64::max)
+}
+
+fn deterministic_phrase_match(candidate: &CanonicalSignal, input: &CanonicalSignal) -> f64 {
+    if candidate.phrase == input.phrase {
+        return 1.0;
+    }
+    if candidate.tokens.len() < 2 || input.tokens.len() < 2 {
+        return 0.0;
+    }
+    let shared = candidate.tokens.intersection(&input.tokens).count();
+    if shared < 2 {
+        return 0.0;
+    }
+    let overlap = shared as f64 / candidate.tokens.len().min(input.tokens.len()) as f64;
+    if overlap >= 0.67 {
+        overlap
+    } else {
+        0.0
+    }
 }
 
 fn environment_match_factor(input: &EnvFingerprint, candidate: &EnvFingerprint) -> f64 {

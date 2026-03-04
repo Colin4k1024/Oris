@@ -155,6 +155,11 @@ Focus:
 - ranking improvements that distinguish near-match from true no-match
 - negative controls that keep false positives at zero or near zero
 
+Current deterministic boundary:
+
+- reordered or superset multi-token signal phrases can match when at least two normalized tokens align
+- isolated single-token overlap does not qualify as task-class replay on its own
+
 Definition of done:
 
 - one learned fix can help multiple semantically equivalent task variants, not just near-identical ones
