@@ -2,7 +2,45 @@
 
 Source: https://www.notion.so/317e8a70eec580cfb252f8b09a40d21c
 
-Last synced: March 2, 2026
+Last synced: March 4, 2026
+
+## Current Baseline Update (March 4, 2026)
+
+The repository now passes a concrete self-evolution baseline.
+
+What is already true in the checked-in code:
+
+- verified mutations can be captured into the evolution store
+- the same learned task can replay on a later run
+- repeated learned tasks increase replay utilization in regression coverage
+- remote assets remain quarantined until a local replay validates them
+- replay behavior survives restart when the same persistent store is reused
+- unrelated tasks do not falsely replay in the current black-box suite
+
+This means the accurate current state is:
+
+> constrained replay-driven self-evolution
+
+It is not yet accurate to describe the repository as a closed-loop autonomous
+self-development system.
+
+The acceptance baseline and current test gate now live in:
+
+- `docs/evokernel/self-evolution-acceptance-checklist.md`
+
+The planning issue for the next staged evolution pass is:
+
+- GitHub issue `#86`, `[EVO] Track staged self-evolution from replay baseline to supervised devloop`
+
+## Near-Term Execution Priorities
+
+Before pushing further into autonomy, the next implementation priority order is:
+
+1. Expand task-class generalization beyond current normalized signal matching.
+2. Introduce continuous confidence control, including decay, revalidation, and demotion.
+3. Close the agent feedback loop so replay results measurably reduce future reasoning.
+4. Move toward supervised DEVLOOP orchestration for bounded development tasks.
+5. Harden federated evolution with stronger attribution, economics, and revocation propagation.
 
 ## 1. Objective
 
