@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
-    AgentTask, BoundedTaskClass, HumanApproval, MutationProposal, SupervisedDevloopRequest,
-    SupervisedDevloopStatus, ReplayPlannerDirective,
+    AgentTask, BoundedTaskClass, HumanApproval, MutationProposal, ReplayPlannerDirective,
+    SupervisedDevloopRequest, SupervisedDevloopStatus,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
