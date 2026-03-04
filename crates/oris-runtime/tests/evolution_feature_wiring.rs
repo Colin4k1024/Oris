@@ -18,6 +18,7 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::capture_from_proposal;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::coordinate;
+    let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::bootstrap_if_empty;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_candidates;
     let _ = oris_runtime::governor::DefaultGovernor::default;
     let _ = oris_runtime::economics::EvuLedger::default;
@@ -42,6 +43,8 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::economics::StakePolicy>();
     assert_type::<oris_runtime::evolution::SignalExtractionInput>();
     assert_type::<oris_runtime::evolution::SignalExtractionOutput>();
+    assert_type::<oris_runtime::evolution::SeedTemplate>();
+    assert_type::<oris_runtime::evolution::BootstrapReport>();
     assert_type::<oris_runtime::evolution::ValidationPlan>();
     assert_type::<oris_runtime::evolution_network::FetchQuery>();
     assert_type::<oris_runtime::governor::GovernorConfig>();

@@ -187,6 +187,27 @@ fn replay_input(signal: &str, workspace: &std::path::Path) -> EvoSelectorInput {
     }
 }
 
+fn test_evo(label: &str) -> (PathBuf, Arc<JsonlEvolutionStore>, EvoKernel<TestState>) {
+    let workspace = temp_workspace();
+    let sandbox_root = unique_path(&format!("{label}-sandbox"));
+    let store_root = unique_path(&format!("{label}-store"));
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let sandbox = Arc::new(LocalProcessSandbox::new(
+        format!("run-{label}"),
+        &workspace,
+        &sandbox_root,
+    ));
+    let evo = EvoKernel::new(test_kernel(), sandbox, validator, store.clone())
+        .with_governor(Arc::new(DefaultGovernor::new(GovernorConfig {
+            promote_after_successes: 1,
+            ..Default::default()
+        })))
+        .with_sandbox_policy(sandbox_policy())
+        .with_validation_plan(lightweight_plan());
+    (workspace, store, evo)
+}
+
 #[tokio::test]
 async fn capture_then_replay_records_full_lifecycle() {
     let workspace = temp_workspace();
@@ -378,6 +399,123 @@ async fn local_selector_query_returns_captured_gene() {
         .capsules
         .iter()
         .any(|capsule| capsule.id == captured.id));
+}
+
+#[test]
+fn bootstrap_if_empty_seeds_exactly_four_genes_and_four_capsules() {
+    let (_workspace, store, evo) = test_evo("bootstrap-seed-count");
+
+    let report = evo
+        .bootstrap_if_empty(&"run-bootstrap-seed-count".to_string())
+        .unwrap();
+    let projection = store.rebuild_projection().unwrap();
+    let events = store.scan(1).unwrap();
+
+    assert_eq!(
+        report,
+        oris_evokernel::BootstrapReport {
+            seeded: true,
+            genes_added: 4,
+            capsules_added: 4,
+        }
+    );
+    assert_eq!(projection.genes.len(), 4);
+    assert_eq!(projection.capsules.len(), 4);
+    assert_eq!(events.len(), 24);
+}
+
+#[test]
+fn bootstrap_capsules_start_quarantined() {
+    let (_workspace, store, evo) = test_evo("bootstrap-quarantine");
+
+    evo.bootstrap_if_empty(&"run-bootstrap-quarantine".to_string())
+        .unwrap();
+    let projection = store.rebuild_projection().unwrap();
+
+    assert_eq!(projection.genes.len(), 4);
+    assert!(projection
+        .genes
+        .iter()
+        .all(|gene| gene.state == EvoAssetState::Quarantined));
+    assert!(projection
+        .capsules
+        .iter()
+        .all(|capsule| capsule.state == EvoAssetState::Quarantined));
+}
+
+#[test]
+fn bootstrap_if_empty_is_idempotent() {
+    let (_workspace, store, evo) = test_evo("bootstrap-idempotent");
+
+    let first = evo
+        .bootstrap_if_empty(&"run-bootstrap-idempotent-1".to_string())
+        .unwrap();
+    let event_count_after_first = store.scan(1).unwrap().len();
+    let second = evo
+        .bootstrap_if_empty(&"run-bootstrap-idempotent-2".to_string())
+        .unwrap();
+    let event_count_after_second = store.scan(1).unwrap().len();
+
+    assert!(first.seeded);
+    assert_eq!(
+        second,
+        oris_evokernel::BootstrapReport {
+            seeded: false,
+            genes_added: 0,
+            capsules_added: 0,
+        }
+    );
+    assert_eq!(event_count_after_first, event_count_after_second);
+}
+
+#[test]
+fn bootstrap_appends_records_without_overwriting_existing_events() {
+    let (_workspace, store, evo) = test_evo("bootstrap-append-only");
+
+    store
+        .append_event(EvolutionEvent::MutationDeclared {
+            mutation: sample_mutation_with_id("bootstrap-preexisting"),
+        })
+        .unwrap();
+
+    evo.bootstrap_if_empty(&"run-bootstrap-append-only".to_string())
+        .unwrap();
+    let events = store.scan(1).unwrap();
+
+    assert_eq!(events.len(), 25);
+    assert!(matches!(
+        &events[0].event,
+        EvolutionEvent::MutationDeclared { mutation }
+            if mutation.intent.id == "bootstrap-preexisting"
+    ));
+}
+
+#[tokio::test]
+async fn bootstrap_seeds_are_discoverable_but_replay_refuses_quarantined_capsules() {
+    let (workspace, store, evo) = test_evo("bootstrap-discoverable");
+
+    evo.bootstrap_if_empty(&"run-bootstrap-discoverable".to_string())
+        .unwrap();
+
+    let candidates = evo.select_candidates(&replay_input("bootstrap readme", &workspace));
+    let decision = evo
+        .replay_or_fallback(replay_input("bootstrap readme", &workspace))
+        .await
+        .unwrap();
+    let projection = store.rebuild_projection().unwrap();
+
+    assert!(!candidates.is_empty());
+    assert!(candidates[0]
+        .capsules
+        .iter()
+        .all(|capsule| capsule.state == EvoAssetState::Quarantined));
+    assert!(!decision.used_capsule);
+    assert!(decision.fallback_to_planner);
+    assert_eq!(decision.reason, "no matching gene");
+    assert!(projection
+        .capsules
+        .iter()
+        .all(|capsule| capsule.state == EvoAssetState::Quarantined));
 }
 
 #[tokio::test]

@@ -140,6 +140,22 @@ pub struct SignalExtractionOutput {
     pub hash: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SeedTemplate {
+    pub id: String,
+    pub intent: String,
+    pub signals: Vec<String>,
+    pub diff_payload: String,
+    pub validation_profile: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapReport {
+    pub seeded: bool,
+    pub genes_added: usize,
+    pub capsules_added: usize,
+}
+
 impl ValidationReport {
     pub fn to_snapshot(&self, profile: &str) -> ValidationSnapshot {
         ValidationSnapshot {
@@ -1199,7 +1215,81 @@ impl<S: KernelState> EvoKernel<S> {
     }
 
     pub fn select_candidates(&self, input: &SelectorInput) -> Vec<GeneCandidate> {
-        self.selector.select(input)
+        let mut candidates = self.selector.select(input);
+        let mut seen = candidates
+            .iter()
+            .map(|candidate| candidate.gene.id.clone())
+            .collect::<BTreeSet<_>>();
+        for candidate in bootstrap_seed_candidates(self.store.as_ref(), input) {
+            if seen.insert(candidate.gene.id.clone()) {
+                candidates.push(candidate);
+            }
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.gene.id.cmp(&right.gene.id))
+        });
+        candidates.truncate(input.limit.max(1));
+        candidates
+    }
+
+    pub fn bootstrap_if_empty(&self, run_id: &RunId) -> Result<BootstrapReport, EvoKernelError> {
+        let projection = self.store.rebuild_projection().map_err(store_err)?;
+        if !projection.genes.is_empty() {
+            return Ok(BootstrapReport::default());
+        }
+
+        let templates = built_in_seed_templates();
+        for template in &templates {
+            let mutation = build_seed_mutation(template);
+            let extracted = extract_seed_signals(template);
+            let gene = build_bootstrap_gene(template, &extracted)
+                .map_err(|err| EvoKernelError::Validation(err.to_string()))?;
+            let capsule = build_bootstrap_capsule(run_id, template, &mutation, &gene)
+                .map_err(|err| EvoKernelError::Validation(err.to_string()))?;
+
+            self.store
+                .append_event(EvolutionEvent::MutationDeclared {
+                    mutation: mutation.clone(),
+                })
+                .map_err(store_err)?;
+            self.store
+                .append_event(EvolutionEvent::SignalsExtracted {
+                    mutation_id: mutation.intent.id.clone(),
+                    hash: extracted.hash.clone(),
+                    signals: extracted.values.clone(),
+                })
+                .map_err(store_err)?;
+            self.store
+                .append_event(EvolutionEvent::GeneProjected { gene: gene.clone() })
+                .map_err(store_err)?;
+            self.store
+                .append_event(EvolutionEvent::PromotionEvaluated {
+                    gene_id: gene.id.clone(),
+                    state: AssetState::Quarantined,
+                    reason: "bootstrap seeds require local validation before replay".into(),
+                })
+                .map_err(store_err)?;
+            self.store
+                .append_event(EvolutionEvent::CapsuleCommitted {
+                    capsule: capsule.clone(),
+                })
+                .map_err(store_err)?;
+            self.store
+                .append_event(EvolutionEvent::CapsuleQuarantined {
+                    capsule_id: capsule.id,
+                })
+                .map_err(store_err)?;
+        }
+
+        Ok(BootstrapReport {
+            seeded: true,
+            genes_added: templates.len(),
+            capsules_added: templates.len(),
+        })
     }
 
     pub async fn capture_successful_mutation(
@@ -1572,6 +1662,282 @@ pub fn default_evolution_store() -> Arc<dyn EvolutionStore> {
     Arc::new(oris_evolution::JsonlEvolutionStore::new(
         default_store_root(),
     ))
+}
+
+fn built_in_seed_templates() -> Vec<SeedTemplate> {
+    vec![
+        SeedTemplate {
+            id: "bootstrap-readme".into(),
+            intent: "Seed a baseline README recovery pattern".into(),
+            signals: vec!["bootstrap readme".into(), "missing readme".into()],
+            diff_payload: "\
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,3 @@
++# Oris
++Bootstrap documentation seed
++"
+            .into(),
+            validation_profile: "bootstrap-seed".into(),
+        },
+        SeedTemplate {
+            id: "bootstrap-test-fix".into(),
+            intent: "Seed a deterministic test stabilization pattern".into(),
+            signals: vec!["bootstrap test fix".into(), "failing tests".into()],
+            diff_payload: "\
+diff --git a/src/lib.rs b/src/lib.rs
+index 1111111..2222222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1 +1,2 @@
+ pub fn demo() -> usize { 1 }
++pub fn normalize_test_output() -> bool { true }
+"
+            .into(),
+            validation_profile: "bootstrap-seed".into(),
+        },
+        SeedTemplate {
+            id: "bootstrap-refactor".into(),
+            intent: "Seed a low-risk refactor capsule".into(),
+            signals: vec!["bootstrap refactor".into(), "small refactor".into()],
+            diff_payload: "\
+diff --git a/src/lib.rs b/src/lib.rs
+index 2222222..3333333 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1 +1,3 @@
+ pub fn demo() -> usize { 1 }
++
++fn extract_strategy_key(input: &str) -> &str { input }
+"
+            .into(),
+            validation_profile: "bootstrap-seed".into(),
+        },
+        SeedTemplate {
+            id: "bootstrap-logging".into(),
+            intent: "Seed a baseline structured logging mutation".into(),
+            signals: vec!["bootstrap logging".into(), "structured logs".into()],
+            diff_payload: "\
+diff --git a/src/lib.rs b/src/lib.rs
+index 3333333..4444444 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1 +1,3 @@
+ pub fn demo() -> usize { 1 }
++
++fn emit_bootstrap_log() { println!(\"bootstrap-log\"); }
+"
+            .into(),
+            validation_profile: "bootstrap-seed".into(),
+        },
+    ]
+}
+
+fn build_seed_mutation(template: &SeedTemplate) -> PreparedMutation {
+    let changed_files = seed_changed_files(&template.diff_payload);
+    let target = if changed_files.is_empty() {
+        MutationTarget::WorkspaceRoot
+    } else {
+        MutationTarget::Paths {
+            allow: changed_files,
+        }
+    };
+    prepare_mutation(
+        MutationIntent {
+            id: stable_hash_json(&("bootstrap-mutation", &template.id))
+                .unwrap_or_else(|_| format!("bootstrap-mutation-{}", template.id)),
+            intent: template.intent.clone(),
+            target,
+            expected_effect: format!("seed {}", template.id),
+            risk: RiskLevel::Low,
+            signals: template.signals.clone(),
+            spec_id: None,
+        },
+        template.diff_payload.clone(),
+        None,
+    )
+}
+
+fn extract_seed_signals(template: &SeedTemplate) -> SignalExtractionOutput {
+    let mut signals = BTreeSet::new();
+    for declared in &template.signals {
+        if let Some(phrase) = normalize_signal_phrase(declared) {
+            signals.insert(phrase);
+        }
+        extend_signal_tokens(&mut signals, declared);
+    }
+    extend_signal_tokens(&mut signals, &template.intent);
+    extend_signal_tokens(&mut signals, &template.diff_payload);
+    for changed_file in seed_changed_files(&template.diff_payload) {
+        extend_signal_tokens(&mut signals, &changed_file);
+    }
+    let values = signals.into_iter().take(32).collect::<Vec<_>>();
+    let hash =
+        stable_hash_json(&values).unwrap_or_else(|_| compute_artifact_hash(&values.join("\n")));
+    SignalExtractionOutput { values, hash }
+}
+
+fn seed_changed_files(diff_payload: &str) -> Vec<String> {
+    let mut changed_files = BTreeSet::new();
+    for line in diff_payload.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            let normalized = path.trim();
+            if !normalized.is_empty() {
+                changed_files.insert(normalized.to_string());
+            }
+        }
+    }
+    changed_files.into_iter().collect()
+}
+
+fn build_bootstrap_gene(
+    template: &SeedTemplate,
+    extracted: &SignalExtractionOutput,
+) -> Result<Gene, EvolutionError> {
+    let strategy = vec![template.id.clone(), "bootstrap".into()];
+    let id = stable_hash_json(&(
+        "bootstrap-gene",
+        &template.id,
+        &extracted.values,
+        &template.validation_profile,
+    ))?;
+    Ok(Gene {
+        id,
+        signals: extracted.values.clone(),
+        strategy,
+        validation: vec![template.validation_profile.clone()],
+        state: AssetState::Quarantined,
+    })
+}
+
+fn build_bootstrap_capsule(
+    run_id: &RunId,
+    template: &SeedTemplate,
+    mutation: &PreparedMutation,
+    gene: &Gene,
+) -> Result<Capsule, EvolutionError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf());
+    let env = current_env_fingerprint(&cwd);
+    let diff_hash = mutation.artifact.content_hash.clone();
+    let changed_files = seed_changed_files(&template.diff_payload);
+    let validator_hash = stable_hash_json(&(
+        "bootstrap-validator",
+        &template.id,
+        &template.validation_profile,
+        &diff_hash,
+    ))?;
+    let id = stable_hash_json(&(
+        "bootstrap-capsule",
+        &template.id,
+        run_id,
+        &gene.id,
+        &diff_hash,
+        &env,
+    ))?;
+    Ok(Capsule {
+        id,
+        gene_id: gene.id.clone(),
+        mutation_id: mutation.intent.id.clone(),
+        run_id: run_id.clone(),
+        diff_hash,
+        confidence: 0.0,
+        env,
+        outcome: Outcome {
+            success: false,
+            validation_profile: template.validation_profile.clone(),
+            validation_duration_ms: 0,
+            changed_files,
+            validator_hash,
+            lines_changed: compute_blast_radius(&template.diff_payload).lines_changed,
+            replay_verified: false,
+        },
+        state: AssetState::Quarantined,
+    })
+}
+
+fn bootstrap_seed_candidates(
+    store: &dyn EvolutionStore,
+    input: &SelectorInput,
+) -> Vec<GeneCandidate> {
+    let normalized_signals = input
+        .signals
+        .iter()
+        .map(|signal| signal.trim().to_ascii_lowercase())
+        .filter(|signal| !signal.is_empty())
+        .collect::<Vec<_>>();
+    if normalized_signals.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(projection) = store.rebuild_projection() else {
+        return Vec::new();
+    };
+    let capsules = projection.capsules.clone();
+    let mut candidates = projection
+        .genes
+        .into_iter()
+        .filter_map(|gene| {
+            if gene.state != AssetState::Quarantined {
+                return None;
+            }
+
+            let matched_signal_count = gene
+                .signals
+                .iter()
+                .filter(|candidate| {
+                    let candidate = candidate.to_ascii_lowercase();
+                    normalized_signals.iter().any(|signal| {
+                        candidate.contains(signal) || signal.contains(candidate.as_str())
+                    })
+                })
+                .count();
+            if matched_signal_count == 0 {
+                return None;
+            }
+
+            let mut matched_capsules = capsules
+                .iter()
+                .filter(|capsule| {
+                    capsule.gene_id == gene.id
+                        && capsule.state == AssetState::Quarantined
+                        && capsule.outcome.validation_profile == "bootstrap-seed"
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if matched_capsules.is_empty() {
+                return None;
+            }
+
+            matched_capsules.sort_by(|left, right| {
+                replay_environment_match_factor(&input.env, &right.env)
+                    .partial_cmp(&replay_environment_match_factor(&input.env, &left.env))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+
+            let overlap = matched_signal_count as f32 / normalized_signals.len() as f32;
+            let env_score = matched_capsules
+                .first()
+                .map(|capsule| replay_environment_match_factor(&input.env, &capsule.env))
+                .unwrap_or(0.0);
+            Some(GeneCandidate {
+                gene,
+                score: overlap.max(env_score),
+                capsules: matched_capsules,
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.gene.id.cmp(&right.gene.id))
+    });
+    candidates
 }
 
 fn derive_gene(
