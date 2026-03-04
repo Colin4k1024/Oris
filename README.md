@@ -314,7 +314,7 @@ cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolu
 ```
 
 What exists today: proposal-driven capture, sandboxed validation, JSONL evolution storage, and replay-first reuse.
-Use `replay_or_fallback_for_run` when you want an explicit replay audit id; `replay_or_fallback` still works and auto-generates one.
+Use `replay_or_fallback_for_run` when you want an explicit replay audit id; it records `CapsuleReused.replay_run_id` while preserving the capsule's original `run_id`. `replay_or_fallback` still works and auto-generates one.
 What is still design-target only: always-on autonomous dev loops, issue intake, and automatic branch/release orchestration.
 
 - [EvoKernel docs index](docs/evokernel/README.md)

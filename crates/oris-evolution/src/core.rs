@@ -183,6 +183,8 @@ pub enum EvolutionEvent {
         capsule_id: CapsuleId,
         gene_id: GeneId,
         run_id: RunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_run_id: Option<RunId>,
     },
     GeneProjected {
         gene: Gene,
@@ -1272,5 +1274,38 @@ mod tests {
         assert_eq!(selected[0].gene.id, "gene-a");
         assert_eq!(selected[0].capsules[0].id, "capsule-a-best");
         assert!(selected[0].score > selected[1].score);
+    }
+
+    #[test]
+    fn legacy_capsule_reused_events_deserialize_without_replay_run_id() {
+        let serialized = r#"{
+  "seq": 1,
+  "timestamp": "2026-03-04T00:00:00Z",
+  "prev_hash": "",
+  "record_hash": "hash",
+  "event": {
+    "kind": "capsule_reused",
+    "capsule_id": "capsule-1",
+    "gene_id": "gene-1",
+    "run_id": "run-1"
+  }
+}"#;
+
+        let stored = serde_json::from_str::<StoredEvolutionEvent>(serialized).unwrap();
+
+        match stored.event {
+            EvolutionEvent::CapsuleReused {
+                capsule_id,
+                gene_id,
+                run_id,
+                replay_run_id,
+            } => {
+                assert_eq!(capsule_id, "capsule-1");
+                assert_eq!(gene_id, "gene-1");
+                assert_eq!(run_id, "run-1");
+                assert_eq!(replay_run_id, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

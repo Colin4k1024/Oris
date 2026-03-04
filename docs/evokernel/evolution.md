@@ -159,7 +159,8 @@ If replay succeeds, LLM reasoning is skipped.
 
 When the caller needs the reuse event tied to a specific execution, use
 `replay_or_fallback_for_run(...)` so the resulting `CapsuleReused` event carries
-that replay run id explicitly.
+that replay run id in `replay_run_id` while preserving the capsule's original
+`run_id`.
 
 ## 9. Evolution Store Requirements
 
