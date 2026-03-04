@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use oris_runtime::agent_contract::{
     AgentCapabilityLevel, AgentTask, ExecutionFeedback, MutationProposal, ProposalTarget,
+    ReplayFeedback,
 };
 use oris_runtime::evolution::{
     CommandValidator, EvoEnvFingerprint as EnvFingerprint, EvoEvolutionStore as EvolutionStore,
@@ -138,14 +139,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
+    let replay_feedback =
+        EvoKernel::<ExampleState>::replay_feedback_for_agent(&planner_proposal.files, &decision);
 
     print_feedback("planner-agent", &planner_capability, &planner_feedback);
     print_feedback("review-agent", &reviewer_capability, &reviewer_feedback);
     println!("captured capsule: {}", planner_outcome.capsule.id);
-    println!(
-        "replay decision: run_id={}, used_capsule={}, reason={}",
-        replay_run_id, decision.used_capsule, decision.reason
-    );
+    print_replay_feedback(&replay_run_id, &replay_feedback);
     Ok(())
 }
 
@@ -212,5 +212,17 @@ fn print_feedback(source: &str, capability: &AgentCapabilityLevel, feedback: &Ex
     println!(
         "{source} ({capability:?}) feedback: accepted={}, asset_state={:?}, summary={}",
         feedback.accepted, feedback.asset_state, feedback.summary
+    );
+}
+
+fn print_replay_feedback(run_id: &str, feedback: &ReplayFeedback) {
+    println!(
+        "replay feedback: run_id={}, planner_directive={:?}, used_capsule={}, reasoning_steps_avoided={}, task_label={}, summary={}",
+        run_id,
+        feedback.planner_directive,
+        feedback.used_capsule,
+        feedback.reasoning_steps_avoided,
+        feedback.task_label,
+        feedback.summary
     );
 }

@@ -16,7 +16,7 @@ The current `crates/oris-evolution` and `crates/oris-evokernel` layers implement
 - mutation preparation plus capsule capture and replay-first fallback flows
 - caller-attributable replay reuse events when `replay_or_fallback_for_run(...)` is used
 - `spec_id` linkage for spec-driven mutations
-- store-derived Prometheus metrics for replay success, promotion ratio, revoke frequency, and mutation velocity
+- store-derived Prometheus metrics for replay success, replay reasoning avoided by task class, promotion ratio, revoke frequency, and mutation velocity
 - runtime `/metrics` and `/healthz` endpoints that surface the current evolution observability snapshot
 
 Not yet fully implemented in the checked-in code:
@@ -158,6 +158,12 @@ Signal Detection
 ```
 
 If replay succeeds, LLM reasoning is skipped.
+
+Agent-facing callers can now convert a replay result into structured
+`ReplayFeedback` via `replay_feedback_for_agent(...)`. That boundary exposes a
+deterministic task-class id, a human-readable task label, a planner directive
+(`SkipPlanner` vs `PlanFallback`), and explicit fallback reasons so proposal
+pipelines can decide whether to continue planning or accept reuse immediately.
 
 When the caller needs the reuse event tied to a specific execution, use
 `replay_or_fallback_for_run(...)` so the resulting `CapsuleReused` event carries

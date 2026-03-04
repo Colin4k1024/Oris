@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
     AgentRole, CoordinationMessage, CoordinationPlan, CoordinationPrimitive, CoordinationResult,
-    CoordinationTask, ExecutionFeedback, MutationProposal as AgentMutationProposal,
+    CoordinationTask, ExecutionFeedback, MutationProposal as AgentMutationProposal, ReplayFeedback,
+    ReplayPlannerDirective,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -315,6 +316,14 @@ pub struct ReplayDecision {
     pub capsule_id: Option<CapsuleId>,
     pub fallback_to_planner: bool,
     pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayTaskClassMetrics {
+    pub task_class_id: String,
+    pub task_label: String,
+    pub replay_success_total: u64,
+    pub reasoning_steps_avoided_total: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1227,6 +1236,8 @@ pub struct EvolutionMetricsSnapshot {
     pub replay_success_total: u64,
     pub replay_success_rate: f64,
     pub confidence_revalidations_total: u64,
+    pub replay_reasoning_avoided_total: u64,
+    pub replay_task_classes: Vec<ReplayTaskClassMetrics>,
     pub mutation_declared_total: u64,
     pub promoted_mutations_total: u64,
     pub promotion_ratio: f64,
@@ -1711,6 +1722,43 @@ impl<S: KernelState> EvoKernel<S> {
             accepted: !matches!(outcome.governor_decision.target_state, AssetState::Revoked),
             asset_state: Some(format!("{:?}", outcome.governor_decision.target_state)),
             summary: outcome.governor_decision.reason.clone(),
+        }
+    }
+
+    pub fn replay_feedback_for_agent(
+        signals: &[String],
+        decision: &ReplayDecision,
+    ) -> ReplayFeedback {
+        let (task_class_id, task_label) = replay_task_descriptor(signals);
+        let planner_directive = if decision.used_capsule {
+            ReplayPlannerDirective::SkipPlanner
+        } else {
+            ReplayPlannerDirective::PlanFallback
+        };
+        let reasoning_steps_avoided = u64::from(decision.used_capsule);
+        let fallback_reason = if decision.fallback_to_planner {
+            Some(decision.reason.clone())
+        } else {
+            None
+        };
+        let summary = if decision.used_capsule {
+            format!("reused prior capsule for task class '{task_label}'; skip planner")
+        } else {
+            format!(
+                "planner fallback required for task class '{task_label}': {}",
+                decision.reason
+            )
+        };
+
+        ReplayFeedback {
+            used_capsule: decision.used_capsule,
+            capsule_id: decision.capsule_id.clone(),
+            planner_directive,
+            reasoning_steps_avoided,
+            fallback_reason,
+            task_class_id,
+            task_label,
+            summary,
         }
     }
 
@@ -2205,6 +2253,28 @@ fn normalize_signal_phrase(input: &str) -> Option<String> {
     } else {
         Some(normalized)
     }
+}
+
+fn replay_task_descriptor(signals: &[String]) -> (String, String) {
+    let normalized = signals
+        .iter()
+        .filter_map(|signal| normalize_signal_phrase(signal))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if normalized.is_empty() {
+        return ("unknown".into(), "unknown".into());
+    }
+    let task_label = normalized
+        .iter()
+        .find(|value| {
+            value.as_str() != "validation passed" && value.as_str() != "validation failed"
+        })
+        .cloned()
+        .unwrap_or_else(|| normalized[0].clone());
+    let task_class_id = stable_hash_json(&normalized)
+        .unwrap_or_else(|_| compute_artifact_hash(&normalized.join("\n")));
+    (task_class_id, task_label)
 }
 
 fn is_rust_error_code(value: &str) -> bool {
@@ -2892,10 +2962,40 @@ fn evolution_metrics_snapshot(
     store: &dyn EvolutionStore,
 ) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
     let (events, projection) = scan_projection(store)?;
+    let gene_task_classes = projection
+        .genes
+        .iter()
+        .map(|gene| (gene.id.clone(), replay_task_descriptor(&gene.signals)))
+        .collect::<BTreeMap<_, _>>();
     let replay_success_total = events
         .iter()
         .filter(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. }))
         .count() as u64;
+    let mut replay_task_class_totals = BTreeMap::<(String, String), u64>::new();
+    for stored in &events {
+        if let EvolutionEvent::CapsuleReused { gene_id, .. } = &stored.event {
+            if let Some((task_class_id, task_label)) = gene_task_classes.get(gene_id) {
+                *replay_task_class_totals
+                    .entry((task_class_id.clone(), task_label.clone()))
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+    let replay_task_classes = replay_task_class_totals
+        .into_iter()
+        .map(
+            |((task_class_id, task_label), replay_success_total)| ReplayTaskClassMetrics {
+                task_class_id,
+                task_label,
+                replay_success_total,
+                reasoning_steps_avoided_total: replay_success_total,
+            },
+        )
+        .collect::<Vec<_>>();
+    let replay_reasoning_avoided_total = replay_task_classes
+        .iter()
+        .map(|entry| entry.reasoning_steps_avoided_total)
+        .sum();
     let replay_failures_total = events
         .iter()
         .filter(|stored| is_replay_validation_failure(&stored.event))
@@ -2940,6 +3040,8 @@ fn evolution_metrics_snapshot(
         replay_success_total,
         replay_success_rate: safe_ratio(replay_success_total, replay_attempts_total),
         confidence_revalidations_total,
+        replay_reasoning_avoided_total,
+        replay_task_classes,
         mutation_declared_total,
         promoted_mutations_total,
         promotion_ratio: safe_ratio(promoted_mutations_total, mutation_declared_total),
@@ -2980,6 +3082,32 @@ fn render_evolution_metrics_prometheus(
         "oris_evolution_replay_success_total {}\n",
         snapshot.replay_success_total
     ));
+    out.push_str("# HELP oris_evolution_replay_reasoning_avoided_total Total planner steps avoided by successful replay.\n");
+    out.push_str("# TYPE oris_evolution_replay_reasoning_avoided_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_replay_reasoning_avoided_total {}\n",
+        snapshot.replay_reasoning_avoided_total
+    ));
+    out.push_str("# HELP oris_evolution_replay_utilization_by_task_class_total Successful replay reuse counts grouped by deterministic task class.\n");
+    out.push_str("# TYPE oris_evolution_replay_utilization_by_task_class_total counter\n");
+    for task_class in &snapshot.replay_task_classes {
+        out.push_str(&format!(
+            "oris_evolution_replay_utilization_by_task_class_total{{task_class_id=\"{}\",task_label=\"{}\"}} {}\n",
+            prometheus_label_value(&task_class.task_class_id),
+            prometheus_label_value(&task_class.task_label),
+            task_class.replay_success_total
+        ));
+    }
+    out.push_str("# HELP oris_evolution_replay_reasoning_avoided_by_task_class_total Planner steps avoided by successful replay grouped by deterministic task class.\n");
+    out.push_str("# TYPE oris_evolution_replay_reasoning_avoided_by_task_class_total counter\n");
+    for task_class in &snapshot.replay_task_classes {
+        out.push_str(&format!(
+            "oris_evolution_replay_reasoning_avoided_by_task_class_total{{task_class_id=\"{}\",task_label=\"{}\"}} {}\n",
+            prometheus_label_value(&task_class.task_class_id),
+            prometheus_label_value(&task_class.task_label),
+            task_class.reasoning_steps_avoided_total
+        ));
+    }
     out.push_str("# HELP oris_evolution_replay_success_rate Successful replay attempts divided by replay attempts that reached validation.\n");
     out.push_str("# TYPE oris_evolution_replay_success_rate gauge\n");
     out.push_str(&format!(
@@ -3075,6 +3203,13 @@ fn count_recent_events(
                     .unwrap_or(false)
         })
         .count() as u64
+}
+
+fn prometheus_label_value(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('"', "\\\"")
 }
 
 fn parse_event_timestamp(raw: &str) -> Option<DateTime<Utc>> {
@@ -3858,6 +3993,14 @@ index 0000000..1111111
         assert_eq!(snapshot.replay_success_total, 1);
         assert_eq!(snapshot.replay_success_rate, 1.0);
         assert_eq!(snapshot.confidence_revalidations_total, 0);
+        assert_eq!(snapshot.replay_reasoning_avoided_total, 1);
+        assert_eq!(snapshot.replay_task_classes.len(), 1);
+        assert_eq!(snapshot.replay_task_classes[0].replay_success_total, 1);
+        assert_eq!(
+            snapshot.replay_task_classes[0].reasoning_steps_avoided_total,
+            1
+        );
+        assert_eq!(snapshot.confidence_revalidations_total, 0);
         assert_eq!(snapshot.mutation_declared_total, 1);
         assert_eq!(snapshot.promoted_mutations_total, 1);
         assert_eq!(snapshot.promotion_ratio, 1.0);
@@ -3868,6 +4011,9 @@ index 0000000..1111111
         assert_eq!(snapshot.promoted_capsules, 0);
 
         let rendered = evo.render_metrics_prometheus().unwrap();
+        assert!(rendered.contains("oris_evolution_replay_reasoning_avoided_total 1"));
+        assert!(rendered.contains("oris_evolution_replay_utilization_by_task_class_total"));
+        assert!(rendered.contains("oris_evolution_replay_reasoning_avoided_by_task_class_total"));
         assert!(rendered.contains("oris_evolution_replay_success_rate 1.000000"));
         assert!(rendered.contains("oris_evolution_confidence_revalidations_total 0"));
         assert!(rendered.contains("oris_evolution_promotion_ratio 1.000000"));
