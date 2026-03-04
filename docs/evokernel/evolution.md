@@ -15,6 +15,7 @@ The current `crates/oris-evolution` and `crates/oris-evokernel` layers implement
 - selector ranking by signal overlap, success rate, reuse count, recency, and environment match
 - mutation preparation plus capsule capture and replay-first fallback flows
 - caller-attributable replay reuse events when `replay_or_fallback_for_run(...)` is used
+- a narrow supervised DEVLOOP path for single-file `docs/*.md` tasks with explicit human approval gating
 - `spec_id` linkage for spec-driven mutations
 - store-derived Prometheus metrics for replay success, promotion ratio, revoke frequency, and mutation velocity
 - runtime `/metrics` and `/healthz` endpoints that surface the current evolution observability snapshot
@@ -161,6 +162,19 @@ When the caller needs the reuse event tied to a specific execution, use
 `replay_or_fallback_for_run(...)` so the resulting `CapsuleReused` event carries
 that replay run id in `replay_run_id` while preserving the capsule's original
 `run_id`.
+
+## 8.1 Supervised DEVLOOP (Bounded Scope)
+
+The checked-in runtime now exposes `run_supervised_devloop(...)` for one bounded
+task class: a single Markdown file under `docs/`. The flow stays policy-first:
+
+- classify the incoming proposal into the bounded scope
+- stop immediately if the proposal is outside that scope
+- stop at an explicit human approval boundary when approval is not granted
+- only then reuse the existing proposal capture and validation pipeline
+
+This keeps the DEVLOOP supervised and auditable while stopping short of
+autonomous branch, PR, or release behavior.
 
 ## 9. Evolution Store Requirements
 

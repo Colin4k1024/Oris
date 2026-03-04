@@ -78,9 +78,44 @@ pub struct MutationProposal {
     pub expected_effect: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutionFeedback {
     pub accepted: bool,
     pub asset_state: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BoundedTaskClass {
+    DocsSingleFile,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HumanApproval {
+    pub approved: bool,
+    pub approver: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SupervisedDevloopRequest {
+    pub task: AgentTask,
+    pub proposal: MutationProposal,
+    pub approval: HumanApproval,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SupervisedDevloopStatus {
+    AwaitingApproval,
+    RejectedByPolicy,
+    Executed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SupervisedDevloopOutcome {
+    pub task_id: String,
+    pub task_class: Option<BoundedTaskClass>,
+    pub status: SupervisedDevloopStatus,
+    pub execution_feedback: Option<ExecutionFeedback>,
     pub summary: String,
 }
