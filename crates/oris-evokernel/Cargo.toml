@@ -13,11 +13,11 @@ chrono = { version = "0.4", default-features = true }
 oris-agent-contract = { version = "0.1.0", path = "../oris-agent-contract" }
 oris-economics = { version = "0.1.1", path = "../oris-economics" }
 oris-evolution = { version = "0.2.0", path = "../oris-evolution" }
-oris-evolution-network = { version = "0.1.0", path = "../oris-evolution-network" }
-oris-governor = { version = "0.2.0", path = "../oris-governor" }
+oris-evolution-network = { version = "0.2.0", path = "../oris-evolution-network" }
+oris-governor = { version = "0.3.0", path = "../oris-governor" }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel" }
-oris-sandbox = { version = "0.1.0", path = "../oris-sandbox" }
-oris-spec = { version = "0.1.0", path = "../oris-spec" }
+oris-sandbox = { version = "0.2.0", path = "../oris-sandbox" }
+oris-spec = { version = "0.2.0", path = "../oris-spec" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.0"
