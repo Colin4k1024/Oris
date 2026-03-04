@@ -211,6 +211,28 @@ fn test_evo(label: &str) -> (PathBuf, Arc<JsonlEvolutionStore>, EvoKernel<TestSt
     (workspace, store, evo)
 }
 
+fn test_evo_with_store(
+    label: &str,
+    store: Arc<JsonlEvolutionStore>,
+) -> (PathBuf, EvoKernel<TestState>) {
+    let workspace = temp_workspace();
+    let sandbox_root = unique_path(&format!("{label}-sandbox"));
+    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let sandbox = Arc::new(LocalProcessSandbox::new(
+        format!("run-{label}"),
+        &workspace,
+        &sandbox_root,
+    ));
+    let evo = EvoKernel::new(test_kernel(), sandbox, validator, store)
+        .with_governor(Arc::new(DefaultGovernor::new(GovernorConfig {
+            promote_after_successes: 1,
+            ..Default::default()
+        })))
+        .with_sandbox_policy(sandbox_policy())
+        .with_validation_plan(lightweight_plan());
+    (workspace, evo)
+}
+
 fn backdate_store_events(store: &JsonlEvolutionStore, age: Duration) {
     let events_path = store.root_dir().join("events.jsonl");
     let contents = fs::read_to_string(&events_path).unwrap();
@@ -431,6 +453,408 @@ async fn local_selector_query_returns_captured_gene() {
         .capsules
         .iter()
         .any(|capsule| capsule.id == captured.id));
+}
+
+#[tokio::test]
+async fn single_task_learns_and_replays_on_second_run() {
+    let (workspace, store, evo) = test_evo("self-evolve-second-run");
+
+    let cold_start = evo
+        .replay_or_fallback(replay_input("missing readme", &workspace))
+        .await
+        .unwrap();
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-second-run".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-second-run"),
+        )
+        .await
+        .unwrap();
+    let learned = evo
+        .replay_or_fallback(replay_input("missing readme", &workspace))
+        .await
+        .unwrap();
+    let events = store.scan(1).unwrap();
+    let metrics = evo.metrics_snapshot().unwrap();
+
+    assert!(!cold_start.used_capsule);
+    assert!(cold_start.fallback_to_planner);
+    assert_eq!(cold_start.capsule_id, None);
+    assert_eq!(cold_start.reason, "no matching gene");
+
+    assert!(learned.used_capsule);
+    assert!(!learned.fallback_to_planner);
+    assert_eq!(learned.capsule_id, Some(captured.id.clone()));
+    assert_eq!(metrics.replay_success_total, 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|stored| matches!(
+                &stored.event,
+                EvolutionEvent::CapsuleReused { capsule_id, .. } if capsule_id == &captured.id
+            ))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn repeated_tasks_shift_from_fallback_to_replay_after_learning() {
+    let (workspace, store, evo) = test_evo("self-evolve-hit-rate");
+
+    let mut pre_learning_hits = 0;
+    for _ in 0..2 {
+        let decision = evo
+            .replay_or_fallback(replay_input("missing readme", &workspace))
+            .await
+            .unwrap();
+        if decision.used_capsule {
+            pre_learning_hits += 1;
+        }
+    }
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-hit-rate".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-hit-rate"),
+        )
+        .await
+        .unwrap();
+
+    let mut post_learning_hits = 0;
+    for _ in 0..4 {
+        let decision = evo
+            .replay_or_fallback(replay_input("missing readme", &workspace))
+            .await
+            .unwrap();
+        if decision.used_capsule {
+            post_learning_hits += 1;
+        }
+        assert_eq!(decision.capsule_id, Some(captured.id.clone()));
+    }
+
+    let pre_learning_hit_rate = pre_learning_hits as f64 / 2.0;
+    let post_learning_hit_rate = post_learning_hits as f64 / 4.0;
+    let events = store.scan(1).unwrap();
+    let metrics = evo.metrics_snapshot().unwrap();
+
+    assert_eq!(pre_learning_hits, 0);
+    assert_eq!(pre_learning_hit_rate, 0.0);
+    assert_eq!(post_learning_hits, 4);
+    assert_eq!(post_learning_hit_rate, 1.0);
+    assert!(post_learning_hit_rate > pre_learning_hit_rate);
+    assert_eq!(metrics.replay_success_total, 4);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|stored| matches!(
+                &stored.event,
+                EvolutionEvent::CapsuleReused { capsule_id, .. } if capsule_id == &captured.id
+            ))
+            .count(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn normalized_signal_variants_can_replay_learned_capsule() {
+    let (workspace, _store, evo) = test_evo("self-evolve-normalized-signal");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-normalized-signal".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-normalized-signal"),
+        )
+        .await
+        .unwrap();
+
+    let decision = evo
+        .replay_or_fallback(replay_input("MISSING README", &workspace))
+        .await
+        .unwrap();
+    let candidates = evo.select_candidates(&replay_input("MISSING README", &workspace));
+
+    assert!(decision.used_capsule);
+    assert!(!decision.fallback_to_planner);
+    assert_eq!(decision.capsule_id, Some(captured.id.clone()));
+    assert!(!candidates.is_empty());
+    assert_eq!(candidates[0].gene.id, captured.gene_id);
+    assert!(candidates[0]
+        .capsules
+        .iter()
+        .any(|capsule| capsule.id == captured.id));
+}
+
+#[tokio::test]
+async fn long_repeated_sequence_reports_stable_replay_metrics_after_learning() {
+    let (workspace, store, evo) = test_evo("self-evolve-long-sequence");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-long-sequence".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-long-sequence"),
+        )
+        .await
+        .unwrap();
+
+    let replay_rounds = 8;
+    let mut hits = 0;
+    for _ in 0..replay_rounds {
+        let decision = evo
+            .replay_or_fallback(replay_input("missing readme", &workspace))
+            .await
+            .unwrap();
+        if decision.used_capsule {
+            hits += 1;
+        }
+        assert_eq!(decision.capsule_id, Some(captured.id.clone()));
+    }
+
+    let events = store.scan(1).unwrap();
+    let metrics = evo.metrics_snapshot().unwrap();
+
+    assert_eq!(hits, replay_rounds);
+    assert_eq!(metrics.replay_attempts_total, replay_rounds as u64);
+    assert_eq!(metrics.replay_success_total, replay_rounds as u64);
+    assert_eq!(metrics.replay_success_rate, 1.0);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|stored| matches!(
+                &stored.event,
+                EvolutionEvent::CapsuleReused { capsule_id, .. } if capsule_id == &captured.id
+            ))
+            .count(),
+        replay_rounds
+    );
+}
+
+#[tokio::test]
+async fn remote_learning_requires_local_validation_before_becoming_shareable() {
+    let (_producer_workspace, producer_store, producer) = test_evo("self-evolve-remote-producer");
+    let captured = producer
+        .capture_successful_mutation(
+            &"run-self-evolve-remote-producer".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-remote-producer"),
+        )
+        .await
+        .unwrap();
+    let publish = oris_evokernel::EvolutionNetworkNode::new(producer_store.clone())
+        .publish_local_assets("node-producer")
+        .unwrap();
+
+    let consumer_store = Arc::new(JsonlEvolutionStore::new(unique_path(
+        "self-evolve-remote-consumer-store",
+    )));
+    let (consumer_workspace, consumer) =
+        test_evo_with_store("self-evolve-remote-consumer", consumer_store.clone());
+    let import = consumer.import_remote_envelope(&publish).unwrap();
+    let before = consumer_store.rebuild_projection().unwrap();
+    let before_publish = oris_evokernel::EvolutionNetworkNode::new(consumer_store.clone())
+        .publish_local_assets("node-consumer")
+        .unwrap();
+
+    assert!(import.accepted);
+    assert!(!import.imported_asset_ids.is_empty());
+    let quarantined_gene = before
+        .genes
+        .iter()
+        .find(|gene| gene.id == captured.gene_id)
+        .unwrap();
+    let quarantined_capsule = before
+        .capsules
+        .iter()
+        .find(|capsule| capsule.id == captured.id)
+        .unwrap();
+    assert_eq!(quarantined_gene.state, EvoAssetState::Quarantined);
+    assert_eq!(quarantined_capsule.state, EvoAssetState::Quarantined);
+    assert!(before_publish.assets.is_empty());
+
+    let decision = consumer
+        .replay_or_fallback(replay_input("missing readme", &consumer_workspace))
+        .await
+        .unwrap();
+    let after = consumer_store.rebuild_projection().unwrap();
+    let after_publish = oris_evokernel::EvolutionNetworkNode::new(consumer_store.clone())
+        .publish_local_assets("node-consumer")
+        .unwrap();
+
+    assert!(decision.used_capsule);
+    assert_eq!(decision.capsule_id, Some(captured.id.clone()));
+    let promoted_gene = after
+        .genes
+        .iter()
+        .find(|gene| gene.id == captured.gene_id)
+        .unwrap();
+    let promoted_capsule = after
+        .capsules
+        .iter()
+        .find(|capsule| capsule.id == captured.id)
+        .unwrap();
+    assert_eq!(promoted_gene.state, EvoAssetState::Promoted);
+    assert_eq!(promoted_capsule.state, EvoAssetState::Promoted);
+    assert!(after_publish.assets.iter().any(|asset| matches!(
+        asset,
+        oris_evokernel::evolution_network::NetworkAsset::Gene { gene }
+            if gene.id == captured.gene_id
+    )));
+    assert!(after_publish.assets.iter().any(|asset| matches!(
+        asset,
+        oris_evokernel::evolution_network::NetworkAsset::Capsule { capsule }
+            if capsule.id == captured.id
+    )));
+}
+
+#[tokio::test]
+async fn distributed_learning_survives_restart_and_replays_again() {
+    let (_producer_workspace, producer_store, producer) =
+        test_evo("self-evolve-remote-restart-producer");
+    let captured = producer
+        .capture_successful_mutation(
+            &"run-self-evolve-remote-restart-producer".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-remote-restart-producer"),
+        )
+        .await
+        .unwrap();
+    let publish = oris_evokernel::EvolutionNetworkNode::new(producer_store.clone())
+        .publish_local_assets("node-producer")
+        .unwrap();
+
+    let consumer_store = Arc::new(JsonlEvolutionStore::new(unique_path(
+        "self-evolve-remote-restart-consumer-store",
+    )));
+    let (consumer_workspace, consumer) = test_evo_with_store(
+        "self-evolve-remote-restart-consumer",
+        consumer_store.clone(),
+    );
+    consumer.import_remote_envelope(&publish).unwrap();
+
+    let first = consumer
+        .replay_or_fallback(replay_input("missing readme", &consumer_workspace))
+        .await
+        .unwrap();
+
+    let (recovered_workspace, recovered) = test_evo_with_store(
+        "self-evolve-remote-restart-recovered",
+        consumer_store.clone(),
+    );
+    let second = recovered
+        .replay_or_fallback(replay_input("missing readme", &recovered_workspace))
+        .await
+        .unwrap();
+    let metrics = recovered.metrics_snapshot().unwrap();
+    let projection = consumer_store.rebuild_projection().unwrap();
+
+    assert!(first.used_capsule);
+    assert!(second.used_capsule);
+    assert_eq!(first.capsule_id, Some(captured.id.clone()));
+    assert_eq!(second.capsule_id, Some(captured.id.clone()));
+    assert_eq!(metrics.replay_attempts_total, 2);
+    assert_eq!(metrics.replay_success_total, 2);
+    assert_eq!(metrics.replay_success_rate, 1.0);
+    assert_eq!(
+        projection
+            .genes
+            .iter()
+            .find(|gene| gene.id == captured.gene_id)
+            .unwrap()
+            .state,
+        EvoAssetState::Promoted
+    );
+    assert_eq!(
+        projection
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == captured.id)
+            .unwrap()
+            .state,
+        EvoAssetState::Promoted
+    );
+}
+
+#[tokio::test]
+async fn unrelated_tasks_do_not_false_positive_after_learning() {
+    let (workspace, _store, evo) = test_evo("self-evolve-no-false-positive");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-no-false-positive".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-no-false-positive"),
+        )
+        .await
+        .unwrap();
+
+    let unrelated = replay_input("network timeout", &workspace);
+    let candidates = evo.select_candidates(&unrelated);
+    let decision = evo.replay_or_fallback(unrelated).await.unwrap();
+
+    assert!(candidates.is_empty());
+    assert!(!decision.used_capsule);
+    assert!(decision.fallback_to_planner);
+    assert_eq!(decision.capsule_id, None);
+    assert_eq!(decision.reason, "no matching gene");
+    assert_ne!(decision.capsule_id, Some(captured.id));
+}
+
+#[tokio::test]
+async fn mixed_task_sequence_only_replays_for_learned_signals() {
+    let (workspace, store, evo) = test_evo("self-evolve-mixed-sequence");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-mixed-sequence".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-mixed-sequence"),
+        )
+        .await
+        .unwrap();
+
+    let sequence = [
+        ("missing readme", true),
+        ("network timeout", false),
+        ("missing readme", true),
+        ("disk full", false),
+        ("missing readme", true),
+    ];
+    let mut hits = 0;
+    let mut misses = 0;
+
+    for (signal, should_hit) in sequence {
+        let decision = evo
+            .replay_or_fallback(replay_input(signal, &workspace))
+            .await
+            .unwrap();
+        if should_hit {
+            hits += 1;
+            assert!(decision.used_capsule);
+            assert!(!decision.fallback_to_planner);
+            assert_eq!(decision.capsule_id, Some(captured.id.clone()));
+        } else {
+            misses += 1;
+            assert!(!decision.used_capsule);
+            assert!(decision.fallback_to_planner);
+            assert_eq!(decision.capsule_id, None);
+            assert_eq!(decision.reason, "no matching gene");
+        }
+    }
+
+    let metrics = evo.metrics_snapshot().unwrap();
+    let events = store.scan(1).unwrap();
+
+    assert_eq!(hits, 3);
+    assert_eq!(misses, 2);
+    assert_eq!(metrics.replay_attempts_total, hits as u64);
+    assert_eq!(metrics.replay_success_total, hits as u64);
+    assert_eq!(metrics.replay_success_rate, 1.0);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|stored| matches!(
+                &stored.event,
+                EvolutionEvent::CapsuleReused { capsule_id, .. } if capsule_id == &captured.id
+            ))
+            .count(),
+        hits
+    );
 }
 
 #[test]
@@ -790,7 +1214,7 @@ async fn local_capture_uses_existing_confidence_context_for_governor() {
 }
 
 #[tokio::test]
-async fn replay_failure_threshold_revokes_promoted_gene() {
+async fn failed_replay_stops_immediate_reuse_without_revocation() {
     let workspace = temp_workspace();
     let sandbox_root = unique_path("replay-failure-sandbox");
     let store_root = unique_path("replay-failure-store");
@@ -848,6 +1272,7 @@ async fn replay_failure_threshold_revokes_promoted_gene() {
         .unwrap();
     let projection = store.rebuild_projection().unwrap();
     let events = store.scan(1).unwrap();
+    let metrics = replay_evo.metrics_snapshot().unwrap();
 
     assert!(!first.used_capsule);
     assert!(first.fallback_to_planner);
@@ -871,7 +1296,25 @@ async fn replay_failure_threshold_revokes_promoted_gene() {
         .unwrap();
     assert_eq!(stored_gene.state, EvoAssetState::Promoted);
     assert_eq!(stored_capsule.state, EvoAssetState::Promoted);
+    assert_eq!(metrics.replay_success_total, 0);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|stored| matches!(
+                &stored.event,
+                EvolutionEvent::ValidationFailed {
+                    gene_id: Some(gene_id),
+                    ..
+                } if gene_id == &captured.gene_id
+            ))
+            .count(),
+        1
+    );
     assert!(!events
         .iter()
         .any(|stored| matches!(stored.event, EvolutionEvent::GeneRevoked { .. })));
+    assert!(!events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::CapsuleReused { capsule_id, .. } if capsule_id == &captured.id
+    )));
 }
