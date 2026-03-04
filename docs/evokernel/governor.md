@@ -13,13 +13,16 @@ The current `crates/oris-governor` crate implements a narrow default policy:
 - promotion after a configurable success threshold
 - blast radius caps using changed file and line counts
 - replay-failure-based revocation
+- time-window mutation rate limiting with a cooldown derived from the active window
+- confidence regression checks using decayed confidence vs. historical peak
 - a promotion cooling window
 - `Candidate`, `Promoted`, and `Revoked` decisions
+- experimental re-export through `oris-runtime::governor` behind `governor-experimental`
 
 Not yet implemented in the checked-in crate:
 
-- time-window or concurrent mutation rate limits
-- confidence decay and confidence history
+- concurrent mutation rate limits
+- richer confidence history beyond the current peak-and-last-update inputs
 - automatic rollback orchestration
 - global pause or freeze controls
 
@@ -59,7 +62,7 @@ Governor approval is required before persistence.
 
 ## 4. Control Domains
 
-### 4.1 Mutation Rate Control (Target)
+### 4.1 Mutation Rate Control (Implemented Baseline)
 
 Limit evolution velocity.
 
@@ -104,7 +107,7 @@ Automatic response:
 revoke_gene(gene_id)
 ```
 
-### 4.5 Confidence Decay (Planned)
+### 4.5 Confidence Decay (Implemented Baseline)
 
 All experience ages:
 

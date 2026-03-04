@@ -125,22 +125,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     let reviewer_feedback = EvoKernel::<ExampleState>::feedback_for_agent(&reviewer_outcome);
+    let replay_run_id = "replay-run".to_string();
 
     let decision = evo
-        .replay_or_fallback(SelectorInput {
-            signals: planner_proposal.files.clone(),
-            env: current_env_fingerprint(),
-            spec_id: None,
-            limit: 1,
-        })
+        .replay_or_fallback_for_run(
+            &replay_run_id,
+            SelectorInput {
+                signals: planner_proposal.files.clone(),
+                env: current_env_fingerprint(),
+                spec_id: None,
+                limit: 1,
+            },
+        )
         .await?;
 
     print_feedback("planner-agent", &planner_capability, &planner_feedback);
     print_feedback("review-agent", &reviewer_capability, &reviewer_feedback);
     println!("captured capsule: {}", planner_outcome.capsule.id);
     println!(
-        "replay decision: used_capsule={}, reason={}",
-        decision.used_capsule, decision.reason
+        "replay decision: run_id={}, used_capsule={}, reason={}",
+        replay_run_id, decision.used_capsule, decision.reason
     );
     Ok(())
 }

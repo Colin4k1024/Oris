@@ -22,8 +22,13 @@ design:
 - `crates/oris-sandbox` applies mutations in a constrained local sandbox.
 - `crates/oris-evokernel` wires mutation capture, validation, capsule
   construction, and replay-first reuse.
-- `crates/oris-runtime/src/evolution.rs` re-exports the EvoKernel API behind the
-  experimental `evolution-experimental` feature.
+- `crates/oris-runtime/src/evolution.rs` re-exports the EvoKernel API as
+  `oris_runtime::evolution` behind the experimental `evolution-experimental`
+  feature.
+- The checked-in example and smoke test use `full-evolution-experimental` when
+  they need the aggregate `oris-runtime` experimental facade set (`evolution`,
+  `governor`, `evolution_network`, `economics`, `spec_contract`, and
+  `agent_contract`) at the same time.
 
 Today the implementation covers the execution hook, append-only storage,
 selector, and replay-first behavior in an experimental form. Governance,
@@ -261,7 +266,10 @@ Expected result:
 - stabilized behavior
 
 Current behavior: `StoreReplayExecutor` attempts capsule replay first and falls
-back to the planner when patch application or validation fails.
+back to the planner when patch application or validation fails. Callers that
+need explicit replay auditability can supply a replay run id through
+`replay_or_fallback_for_run(...)`; the convenience `replay_or_fallback(...)`
+path auto-generates one.
 
 ## 10. Evolution Governor (Stability Layer)
 

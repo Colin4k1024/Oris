@@ -80,6 +80,39 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/operator_cli --name my-oris-ops
 ```
 
+### Evo 实验路径（用于审查自演化能力）
+
+如果你当前要验证的是 EvoKernel 的“已落地实现”而不是 HTTP 执行服务，请直接使用：
+
+- `examples/evo_oris_repo`
+- `docs/evokernel/README.md`
+
+启用方式：
+
+```bash
+cargo add oris-runtime --features full-evolution-experimental
+cargo run -p evo_oris_repo
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+```
+
+这条路径对应当前仓库里真实可运行的实验闭环：
+
+```text
+AgentTask
+-> MutationProposal
+-> capture_from_proposal
+-> feedback_for_agent
+-> replay_or_fallback_for_run
+```
+
+需要明确两点：
+
+1. 如果你只需要 `oris_runtime::evolution` 这一层 API，可只启用 `evolution-experimental`。
+2. 仓库内现成示例与联调烟测依赖的是 `full-evolution-experimental`，因为它还会暴露 governor、agent contract、economics、spec 和 network 的实验 facade。
+3. 如果你要让 replay 事件可直接关联到当前执行，优先使用 `replay_or_fallback_for_run`；旧的 `replay_or_fallback` 会自动生成 replay run id。
+
+当前尚未形成可直接投产的自治闭环，仍缺少常驻调度、自动 issue intake、自动分支/发布编排等能力。
+
 ## 3. 如何接入现有 Rust 服务
 
 推荐接入方式：
@@ -98,6 +131,8 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 - `docs/kernel-api.md`
 - `docs/production-operations-guide.md`
 - `docs/incident-response-runbook.md`
+- `docs/evokernel/README.md`
+- `docs/evokernel/devloop.md`
 
 ## 4. 对外发布时的最小生产清单
 
@@ -110,6 +145,7 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 5. **可观测性**：日志、指标、trace 可关联到具体 thread/run。
 6. **操作面隔离**：operator API 与业务 API 分离，默认需要鉴权。
 7. **变更可控**：在 CI 中加入关键回归测试（run/list/inspect/resume/replay/cancel）。
+8. **实验能力隔离**：如果对外暴露 Evo 相关能力，必须保留 feature gate，并在 README/发布说明里明确标注 experimental 与当前未覆盖的自治能力边界。
 
 ## 5. 外部用户常见落地模式
 

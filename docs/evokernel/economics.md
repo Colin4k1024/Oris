@@ -14,7 +14,7 @@ The current `crates/oris-economics` crate is an experimental local ledger scaffo
 - `EconomicsSignal` plus `EvuLedger` helpers for:
   publish stake reservation, remote reuse settlement, validator divergence penalties,
   selector reputation bias, and governor-facing signal snapshots
-- experimental re-export through `oris-runtime::economics`
+- experimental re-export through `oris-runtime::economics` behind `economics-experimental`
 
 Currently wired into the checked-in EvoKernel flow:
 

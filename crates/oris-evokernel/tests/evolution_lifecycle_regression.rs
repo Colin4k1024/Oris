@@ -6,13 +6,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{Duration, Utc};
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
     EvoEnvFingerprint, EvoEvolutionStore, EvoKernel, EvoSandboxPolicy, EvoSelectorInput,
     JsonlEvolutionStore, LocalProcessSandbox, MutationIntent, MutationTarget, RiskLevel,
     SignalExtractionInput, ValidationPlan, ValidationStage,
 };
-use oris_evolution::{compute_artifact_hash, EvolutionEvent, PreparedMutation};
+use oris_evolution::{
+    compute_artifact_hash, stable_hash_json, EvolutionEvent, PreparedMutation, StoredEvolutionEvent,
+};
 use oris_governor::{DefaultGovernor, GovernorConfig};
 use oris_kernel::{
     AllowAllPolicy, InMemoryEventStore, Kernel, KernelMode, KernelState, NoopActionExecutor,
@@ -206,6 +209,35 @@ fn test_evo(label: &str) -> (PathBuf, Arc<JsonlEvolutionStore>, EvoKernel<TestSt
         .with_sandbox_policy(sandbox_policy())
         .with_validation_plan(lightweight_plan());
     (workspace, store, evo)
+}
+
+fn backdate_store_events(store: &JsonlEvolutionStore, age: Duration) {
+    let events_path = store.root_dir().join("events.jsonl");
+    let contents = fs::read_to_string(&events_path).unwrap();
+    let mut events = contents
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<StoredEvolutionEvent>(line).unwrap())
+        .collect::<Vec<_>>();
+    let timestamp = (Utc::now() - age).to_rfc3339();
+    let mut prev_hash = String::new();
+    for event in &mut events {
+        event.timestamp = timestamp.clone();
+        event.prev_hash = prev_hash.clone();
+        event.record_hash =
+            stable_hash_json(&(event.seq, &event.timestamp, &event.prev_hash, &event.event))
+                .unwrap();
+        prev_hash = event.record_hash.clone();
+    }
+    let mut serialized = events
+        .into_iter()
+        .map(|event| serde_json::to_string(&event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !serialized.is_empty() {
+        serialized.push('\n');
+    }
+    fs::write(events_path, serialized).unwrap();
 }
 
 #[tokio::test]
@@ -491,7 +523,7 @@ fn bootstrap_appends_records_without_overwriting_existing_events() {
 }
 
 #[tokio::test]
-async fn bootstrap_seeds_are_discoverable_but_replay_refuses_quarantined_capsules() {
+async fn bootstrap_seeds_remain_quarantined_and_do_not_appear_as_replay_candidates() {
     let (workspace, store, evo) = test_evo("bootstrap-discoverable");
 
     evo.bootstrap_if_empty(&"run-bootstrap-discoverable".to_string())
@@ -504,14 +536,14 @@ async fn bootstrap_seeds_are_discoverable_but_replay_refuses_quarantined_capsule
         .unwrap();
     let projection = store.rebuild_projection().unwrap();
 
-    assert!(!candidates.is_empty());
-    assert!(candidates[0]
-        .capsules
-        .iter()
-        .all(|capsule| capsule.state == EvoAssetState::Quarantined));
+    assert!(candidates.is_empty());
     assert!(!decision.used_capsule);
     assert!(decision.fallback_to_planner);
     assert_eq!(decision.reason, "no matching gene");
+    assert!(projection
+        .genes
+        .iter()
+        .all(|gene| gene.state == EvoAssetState::Quarantined));
     assert!(projection
         .capsules
         .iter()
@@ -691,6 +723,70 @@ async fn governor_cooling_window_blocks_rapid_repromotion() {
     );
     assert!(second.governor_decision.reason.contains("cooling"));
     assert!(second.governor_decision.cooling_window.is_some());
+}
+
+#[tokio::test]
+async fn local_capture_uses_existing_confidence_context_for_governor() {
+    let workspace = temp_workspace();
+    let sandbox_root = unique_path("governor-confidence-sandbox");
+    let store_root = unique_path("governor-confidence-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let sandbox = Arc::new(LocalProcessSandbox::new(
+        "run-governor-confidence",
+        &workspace,
+        &sandbox_root,
+    ));
+    let evo = EvoKernel::new(test_kernel(), sandbox, validator, store.clone())
+        .with_governor(Arc::new(DefaultGovernor::new(GovernorConfig {
+            promote_after_successes: 1,
+            cooldown_secs: 0,
+            retry_cooldown_secs: 30,
+            max_mutations_per_window: 100,
+            confidence_decay_rate_per_hour: 1.0,
+            max_confidence_drop: 0.2,
+            ..Default::default()
+        })))
+        .with_sandbox_policy(sandbox_policy())
+        .with_validation_plan(lightweight_plan());
+
+    let first = evo
+        .capture_mutation_with_governor(
+            &"run-governor-confidence".to_string(),
+            sample_mutation_with_id("mutation-governor-confidence-1"),
+        )
+        .await
+        .unwrap();
+    backdate_store_events(store.as_ref(), Duration::hours(2));
+    let second = evo
+        .capture_mutation_with_governor(
+            &"run-governor-confidence".to_string(),
+            sample_mutation_with_id("mutation-governor-confidence-2"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first.governor_decision.target_state,
+        EvoAssetState::Promoted
+    );
+    assert_eq!(
+        second.governor_decision.target_state,
+        EvoAssetState::Revoked
+    );
+    assert!(second
+        .governor_decision
+        .reason
+        .contains("confidence regression"));
+    assert_eq!(second.gene.state, EvoAssetState::Revoked);
+    assert_eq!(second.capsule.state, EvoAssetState::Revoked);
+    let events = store.scan(1).unwrap();
+    let metrics = evo.metrics_snapshot().unwrap();
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::GeneRevoked { gene_id, .. } if gene_id == &second.gene.id
+    )));
+    assert_eq!(metrics.gene_revocations_total, 1);
 }
 
 #[tokio::test]

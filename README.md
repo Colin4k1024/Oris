@@ -256,6 +256,8 @@ cargo add oris-runtime
 cargo add oris-runtime --features postgres
 # With SQLite persistence (production-ready checkpoints):
 cargo add oris-runtime --features sqlite-persistence
+# With the checked-in Evo experimental surface:
+cargo add oris-runtime --features full-evolution-experimental
 # With Ollama (local):
 cargo add oris-runtime --features ollama
 ```
@@ -286,6 +288,41 @@ Scaffold one of the starter archetypes directly:
 cargo install cargo-generate
 cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/axum_service --name my-oris-service
 ```
+
+## Experimental EvoKernel (current repo slice)
+
+The self-evolution stack is still experimental and intentionally feature-gated.
+
+- Use `evolution-experimental` when you only need `oris_runtime::evolution`.
+- Use `full-evolution-experimental` when you want the end-to-end facade used by the checked-in example (`evolution`, `governor`, `evolution_network`, `economics`, `spec_contract`, and `agent_contract`).
+
+The current repository-backed path is:
+
+```text
+AgentTask
+-> MutationProposal
+-> capture_from_proposal
+-> feedback_for_agent
+-> replay_or_fallback_for_run
+```
+
+Run the canonical example and smoke test:
+
+```bash
+cargo run -p evo_oris_repo
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+```
+
+What exists today: proposal-driven capture, sandboxed validation, JSONL evolution storage, and replay-first reuse.
+Use `replay_or_fallback_for_run` when you want an explicit replay audit id; `replay_or_fallback` still works and auto-generates one.
+What is still design-target only: always-on autonomous dev loops, issue intake, and automatic branch/release orchestration.
+
+- [EvoKernel docs index](docs/evokernel/README.md)
+- [EvoKernel overview](docs/evokernel-v0.1.md)
+- [DEVLOOP implementation snapshot](docs/evokernel/devloop.md)
+
+### More runtime examples and ops docs
+
 - [Durable agent job](crates/oris-runtime/examples/durable_agent_job.rs) — interrupt, restart, resume with same `thread_id`; state is checkpointed so it survives process restarts.
 - [Durable agent job with SQLite](crates/oris-runtime/examples/durable_agent_job_sqlite.rs) — same flow with SQLite persistence (run with `--features sqlite-persistence`).
 - [CLI durable job](crates/oris-runtime/examples/cli_durable_job.rs) — minimal operator CLI: `run`, `list`, `inspect`, `resume`, `replay`, `cancel` (requires `--features sqlite-persistence`).

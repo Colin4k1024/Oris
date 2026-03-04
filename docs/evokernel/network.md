@@ -14,7 +14,7 @@ The current `crates/oris-evolution-network` crate provides protocol contracts on
 - `Publish`, `Fetch`, `Report`, and `Revoke` message types
 - `Gene`, `Capsule`, and `EvolutionEvent` network asset variants
 - request and response structs for publish, fetch, and revoke flows
-- experimental re-export through `oris-runtime::evolution_network`
+- experimental re-export through `oris-runtime::evolution_network` behind `evolution-network-experimental`
 
 Not yet implemented in the checked-in crate:
 

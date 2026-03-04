@@ -14,13 +14,14 @@ The current `crates/oris-evolution` and `crates/oris-evokernel` layers implement
 - append-only JSONL-backed evolution storage
 - selector ranking by signal overlap, success rate, reuse count, recency, and environment match
 - mutation preparation plus capsule capture and replay-first fallback flows
+- caller-attributable replay reuse events when `replay_or_fallback_for_run(...)` is used
 - `spec_id` linkage for spec-driven mutations
 - store-derived Prometheus metrics for replay success, promotion ratio, revoke frequency, and mutation velocity
 - runtime `/metrics` and `/healthz` endpoints that surface the current evolution observability snapshot
 
 Not yet fully implemented in the checked-in code:
 
-- confidence decay over time
+- a dedicated confidence lifecycle owned by the evolution crate itself (current decay checks are governor-driven)
 - a dedicated runtime signal extraction stage that derives selector inputs automatically
 - the full detect/select/mutate pipeline as separate runtime stages
 - explicit multi-run promotion enforcement in the evolution crate itself
@@ -130,7 +131,7 @@ Target promotion policy requires:
 - acceptable blast radius
 - governor approval
 
-## 7. Confidence Model (Planned)
+## 7. Confidence Model (Implemented Baseline, Governor-Driven)
 
 Initial confidence derives from validation outcome and increases through reuse
 success. It decays with inactivity:
@@ -139,7 +140,9 @@ success. It decays with inactivity:
 confidence = confidence * e^(-lambda * t)
 ```
 
-This prevents stale evolution dominance.
+The current repository enforces the baseline decay/regression check through the
+governor path. The evolution crate still does not own a richer confidence
+history model by itself.
 
 ## 8. Replay Mechanism
 
@@ -153,6 +156,10 @@ Signal Detection
 ```
 
 If replay succeeds, LLM reasoning is skipped.
+
+When the caller needs the reuse event tied to a specific execution, use
+`replay_or_fallback_for_run(...)` so the resulting `CapsuleReused` event carries
+that replay run id explicitly.
 
 ## 9. Evolution Store Requirements
 

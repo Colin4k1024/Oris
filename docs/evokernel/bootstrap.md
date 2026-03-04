@@ -13,7 +13,7 @@ There is no dedicated bootstrap subsystem yet. Current bootstrap behavior is ass
 - human-directed or test-driven mutation preparation
 - validation through the sandbox and command validator
 - capsule capture through `capture_successful_mutation(...)`
-- replay-first reuse through `replay_or_fallback(...)`
+- replay-first reuse through `replay_or_fallback_for_run(...)` (or `replay_or_fallback(...)` when an auto-generated replay run id is acceptable)
 - conservative promotion via governor thresholds
 
 Not yet implemented in the checked-in code:

@@ -15,7 +15,9 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
 - `ExecutionFeedback`
 - `AgentCapabilityLevel`
 - `ProposalTarget`
+- direct `oris_runtime::agent_contract` access is gated by `agent-contract-experimental`
 - `examples/evo_oris_repo` exercises the proposal path through `oris-runtime` with `full-evolution-experimental`
+- the checked-in replay example uses `EvoKernel::replay_or_fallback_for_run(...)` so reuse events stay attributable to the current replay execution
 
 Not yet implemented in the checked-in code:
 
@@ -155,6 +157,11 @@ Kernel attempts Replay
 
 If replay succeeds, agent reasoning is skipped. Agents must tolerate
 non-invocation.
+
+When replay auditability matters, the caller should supply a run id through
+`EvoKernel::replay_or_fallback_for_run(...)`. The convenience
+`EvoKernel::replay_or_fallback(...)` path remains valid and auto-generates a
+replay run id.
 
 ## 9. Multi-Agent Compatibility
 

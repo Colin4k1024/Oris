@@ -10,9 +10,10 @@ Last synced: March 3, 2026
 
 The current repository supports part of the DEVLOOP design:
 
-- `examples/evo_oris_repo` demonstrates `AgentTask -> MutationProposal -> capture_from_proposal -> replay_or_fallback`
+- `examples/evo_oris_repo` demonstrates `AgentTask -> MutationProposal -> capture_from_proposal -> replay_or_fallback_for_run`
 - `oris-evokernel` can prepare mutations, validate them, capture successful capsules, and attempt replay-first reuse
-- the `full-evolution-experimental` feature wires the experimental facades together through `oris-runtime`
+- `evolution-experimental` is the narrow gate for `oris_runtime::evolution`
+- the checked-in example and smoke test use `full-evolution-experimental` to wire the experimental facades together through `oris-runtime`
 
 Still not implemented as a closed loop:
 

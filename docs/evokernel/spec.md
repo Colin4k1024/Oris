@@ -15,7 +15,7 @@ The current `crates/oris-spec` and `crates/oris-evokernel` crates implement:
 - `prepare_mutation_from_spec(...)`
 - `MutationIntent.spec_id` and `EvolutionEvent::SpecLinked`
 - repository-native `specs/behavior`, `specs/repair`, `specs/optimization`, and `specs/evolution` skeleton directories
-- experimental re-export through `oris-runtime::spec_contract`
+- experimental re-export through `oris-runtime::spec_contract` behind `spec-experimental`
 
 Not yet implemented in the checked-in code:
 
