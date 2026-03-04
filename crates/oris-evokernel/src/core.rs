@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use oris_agent_contract::{ExecutionFeedback, MutationProposal as AgentMutationProposal};
+use oris_agent_contract::{
+    AgentRole, CoordinationMessage, CoordinationPlan, CoordinationPrimitive, CoordinationResult,
+    CoordinationTask, ExecutionFeedback, MutationProposal as AgentMutationProposal,
+};
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
     compute_artifact_hash, next_id, stable_hash_json, AssetState, BlastRadius, CandidateSource,
@@ -295,6 +298,353 @@ pub struct ReplayDecision {
     pub capsule_id: Option<CapsuleId>,
     pub fallback_to_planner: bool,
     pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CoordinationTaskState {
+    Ready,
+    Waiting,
+    BlockedByFailure,
+    PermanentlyBlocked,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MultiAgentCoordinator;
+
+impl MultiAgentCoordinator {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn coordinate(&self, plan: CoordinationPlan) -> CoordinationResult {
+        let primitive = plan.primitive.clone();
+        let root_goal = plan.root_goal.clone();
+        let timeout_ms = plan.timeout_ms;
+        let max_retries = plan.max_retries;
+        let mut tasks = BTreeMap::new();
+        for task in plan.tasks {
+            tasks.entry(task.id.clone()).or_insert(task);
+        }
+
+        let mut pending = tasks.keys().cloned().collect::<BTreeSet<_>>();
+        let mut completed = BTreeSet::new();
+        let mut failed = BTreeSet::new();
+        let mut completed_order = Vec::new();
+        let mut failed_order = Vec::new();
+        let mut skipped = BTreeSet::new();
+        let mut attempts = BTreeMap::new();
+        let mut messages = Vec::new();
+
+        loop {
+            if matches!(primitive, CoordinationPrimitive::Conditional) {
+                self.apply_conditional_skips(
+                    &tasks,
+                    &mut pending,
+                    &completed,
+                    &failed,
+                    &mut skipped,
+                    &mut messages,
+                );
+            }
+
+            let mut ready = self.ready_task_ids(&tasks, &pending, &completed, &failed, &skipped);
+            if ready.is_empty() {
+                break;
+            }
+            if matches!(primitive, CoordinationPrimitive::Sequential) {
+                ready.truncate(1);
+            }
+
+            for task_id in ready {
+                let Some(task) = tasks.get(&task_id) else {
+                    continue;
+                };
+                if !pending.contains(&task_id) {
+                    continue;
+                }
+                self.record_handoff_messages(task, &tasks, &completed, &failed, &mut messages);
+
+                let prior_failures = attempts.get(&task_id).copied().unwrap_or(0);
+                if Self::simulate_task_failure(task, prior_failures) {
+                    let failure_count = prior_failures + 1;
+                    attempts.insert(task_id.clone(), failure_count);
+                    let will_retry = failure_count <= max_retries;
+                    messages.push(CoordinationMessage {
+                        from_role: task.role.clone(),
+                        to_role: task.role.clone(),
+                        task_id: task_id.clone(),
+                        content: if will_retry {
+                            format!("task {task_id} failed on attempt {failure_count} and will retry")
+                        } else {
+                            format!(
+                                "task {task_id} failed on attempt {failure_count} and exhausted retries"
+                            )
+                        },
+                    });
+                    if !will_retry {
+                        pending.remove(&task_id);
+                        if failed.insert(task_id.clone()) {
+                            failed_order.push(task_id);
+                        }
+                    }
+                    continue;
+                }
+
+                pending.remove(&task_id);
+                if completed.insert(task_id.clone()) {
+                    completed_order.push(task_id);
+                }
+            }
+        }
+
+        let blocked_ids = pending.into_iter().collect::<Vec<_>>();
+        for task_id in blocked_ids {
+            let Some(task) = tasks.get(&task_id) else {
+                continue;
+            };
+            let state = self.classify_task(task, &tasks, &completed, &failed, &skipped);
+            let content = match state {
+                CoordinationTaskState::BlockedByFailure => {
+                    format!("task {task_id} blocked by failed dependencies")
+                }
+                CoordinationTaskState::PermanentlyBlocked => {
+                    format!("task {task_id} has invalid coordination prerequisites")
+                }
+                CoordinationTaskState::Waiting => {
+                    format!("task {task_id} has unresolved dependencies")
+                }
+                CoordinationTaskState::Ready => {
+                    format!("task {task_id} was left pending unexpectedly")
+                }
+            };
+            messages.push(CoordinationMessage {
+                from_role: task.role.clone(),
+                to_role: task.role.clone(),
+                task_id: task_id.clone(),
+                content,
+            });
+            if failed.insert(task_id.clone()) {
+                failed_order.push(task_id);
+            }
+        }
+
+        CoordinationResult {
+            completed_tasks: completed_order,
+            failed_tasks: failed_order,
+            messages,
+            summary: format!(
+                "goal '{}' completed {} tasks, failed {}, skipped {} using {:?} coordination (timeout={}ms, max_retries={})",
+                root_goal,
+                completed.len(),
+                failed.len(),
+                skipped.len(),
+                primitive,
+                timeout_ms,
+                max_retries
+            ),
+        }
+    }
+
+    fn ready_task_ids(
+        &self,
+        tasks: &BTreeMap<String, CoordinationTask>,
+        pending: &BTreeSet<String>,
+        completed: &BTreeSet<String>,
+        failed: &BTreeSet<String>,
+        skipped: &BTreeSet<String>,
+    ) -> Vec<String> {
+        pending
+            .iter()
+            .filter_map(|task_id| {
+                let task = tasks.get(task_id)?;
+                (self.classify_task(task, tasks, completed, failed, skipped)
+                    == CoordinationTaskState::Ready)
+                    .then(|| task_id.clone())
+            })
+            .collect()
+    }
+
+    fn apply_conditional_skips(
+        &self,
+        tasks: &BTreeMap<String, CoordinationTask>,
+        pending: &mut BTreeSet<String>,
+        completed: &BTreeSet<String>,
+        failed: &BTreeSet<String>,
+        skipped: &mut BTreeSet<String>,
+        messages: &mut Vec<CoordinationMessage>,
+    ) {
+        let skip_ids = pending
+            .iter()
+            .filter_map(|task_id| {
+                let task = tasks.get(task_id)?;
+                (self.classify_task(task, tasks, completed, failed, skipped)
+                    == CoordinationTaskState::BlockedByFailure)
+                    .then(|| task_id.clone())
+            })
+            .collect::<Vec<_>>();
+
+        for task_id in skip_ids {
+            let Some(task) = tasks.get(&task_id) else {
+                continue;
+            };
+            pending.remove(&task_id);
+            skipped.insert(task_id.clone());
+            messages.push(CoordinationMessage {
+                from_role: task.role.clone(),
+                to_role: task.role.clone(),
+                task_id: task_id.clone(),
+                content: format!("task {task_id} skipped due to failed dependency chain"),
+            });
+        }
+    }
+
+    fn classify_task(
+        &self,
+        task: &CoordinationTask,
+        tasks: &BTreeMap<String, CoordinationTask>,
+        completed: &BTreeSet<String>,
+        failed: &BTreeSet<String>,
+        skipped: &BTreeSet<String>,
+    ) -> CoordinationTaskState {
+        match task.role {
+            AgentRole::Planner | AgentRole::Coder => {
+                let mut waiting = false;
+                for dependency_id in &task.depends_on {
+                    if !tasks.contains_key(dependency_id) {
+                        return CoordinationTaskState::PermanentlyBlocked;
+                    }
+                    if skipped.contains(dependency_id) || failed.contains(dependency_id) {
+                        return CoordinationTaskState::BlockedByFailure;
+                    }
+                    if !completed.contains(dependency_id) {
+                        waiting = true;
+                    }
+                }
+                if waiting {
+                    CoordinationTaskState::Waiting
+                } else {
+                    CoordinationTaskState::Ready
+                }
+            }
+            AgentRole::Repair => {
+                let mut waiting = false;
+                let mut has_coder_dependency = false;
+                let mut has_failed_coder = false;
+                for dependency_id in &task.depends_on {
+                    let Some(dependency) = tasks.get(dependency_id) else {
+                        return CoordinationTaskState::PermanentlyBlocked;
+                    };
+                    let is_coder = matches!(dependency.role, AgentRole::Coder);
+                    if is_coder {
+                        has_coder_dependency = true;
+                    }
+                    if skipped.contains(dependency_id) {
+                        return CoordinationTaskState::BlockedByFailure;
+                    }
+                    if failed.contains(dependency_id) {
+                        if is_coder {
+                            has_failed_coder = true;
+                        } else {
+                            return CoordinationTaskState::BlockedByFailure;
+                        }
+                        continue;
+                    }
+                    if !completed.contains(dependency_id) {
+                        waiting = true;
+                    }
+                }
+                if !has_coder_dependency {
+                    CoordinationTaskState::PermanentlyBlocked
+                } else if waiting {
+                    CoordinationTaskState::Waiting
+                } else if has_failed_coder {
+                    CoordinationTaskState::Ready
+                } else {
+                    CoordinationTaskState::PermanentlyBlocked
+                }
+            }
+            AgentRole::Optimizer => {
+                let mut waiting = false;
+                let mut has_impl_dependency = false;
+                let mut has_completed_impl = false;
+                let mut has_failed_impl = false;
+                for dependency_id in &task.depends_on {
+                    let Some(dependency) = tasks.get(dependency_id) else {
+                        return CoordinationTaskState::PermanentlyBlocked;
+                    };
+                    let is_impl = matches!(dependency.role, AgentRole::Coder | AgentRole::Repair);
+                    if is_impl {
+                        has_impl_dependency = true;
+                    }
+                    if skipped.contains(dependency_id) || failed.contains(dependency_id) {
+                        if is_impl {
+                            has_failed_impl = true;
+                            continue;
+                        }
+                        return CoordinationTaskState::BlockedByFailure;
+                    }
+                    if completed.contains(dependency_id) {
+                        if is_impl {
+                            has_completed_impl = true;
+                        }
+                        continue;
+                    }
+                    waiting = true;
+                }
+                if !has_impl_dependency {
+                    CoordinationTaskState::PermanentlyBlocked
+                } else if waiting {
+                    CoordinationTaskState::Waiting
+                } else if has_completed_impl {
+                    CoordinationTaskState::Ready
+                } else if has_failed_impl {
+                    CoordinationTaskState::BlockedByFailure
+                } else {
+                    CoordinationTaskState::PermanentlyBlocked
+                }
+            }
+        }
+    }
+
+    fn record_handoff_messages(
+        &self,
+        task: &CoordinationTask,
+        tasks: &BTreeMap<String, CoordinationTask>,
+        completed: &BTreeSet<String>,
+        failed: &BTreeSet<String>,
+        messages: &mut Vec<CoordinationMessage>,
+    ) {
+        let mut dependency_ids = task.depends_on.clone();
+        dependency_ids.sort();
+        dependency_ids.dedup();
+
+        for dependency_id in dependency_ids {
+            let Some(dependency) = tasks.get(&dependency_id) else {
+                continue;
+            };
+            if completed.contains(&dependency_id) {
+                messages.push(CoordinationMessage {
+                    from_role: dependency.role.clone(),
+                    to_role: task.role.clone(),
+                    task_id: task.id.clone(),
+                    content: format!("handoff from {dependency_id} to {}", task.id),
+                });
+            } else if failed.contains(&dependency_id) {
+                messages.push(CoordinationMessage {
+                    from_role: dependency.role.clone(),
+                    to_role: task.role.clone(),
+                    task_id: task.id.clone(),
+                    content: format!("failed dependency {dependency_id} routed to {}", task.id),
+                });
+            }
+        }
+    }
+
+    fn simulate_task_failure(task: &CoordinationTask, prior_failures: u32) -> bool {
+        let normalized = task.description.to_ascii_lowercase();
+        normalized.contains("force-fail")
+            || (normalized.contains("fail-once") && prior_failures == 0)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1074,6 +1424,10 @@ impl<S: KernelState> EvoKernel<S> {
             asset_state: Some(format!("{:?}", outcome.governor_decision.target_state)),
             summary: outcome.governor_decision.reason.clone(),
         }
+    }
+
+    pub fn coordinate(&self, plan: CoordinationPlan) -> CoordinationResult {
+        MultiAgentCoordinator::new().coordinate(plan)
     }
 
     pub fn export_promoted_assets(
@@ -2046,6 +2400,9 @@ fn store_err(err: EvolutionError) -> EvoKernelError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oris_agent_contract::{
+        AgentRole, CoordinationPlan, CoordinationPrimitive, CoordinationTask,
+    };
     use oris_kernel::{
         AllowAllPolicy, InMemoryEventStore, KernelMode, KernelState, NoopActionExecutor,
         NoopStepFn, StateUpdatedOnlyReducer,
@@ -2335,6 +2692,194 @@ index 0000000..1111111
                 },
             })
         }
+    }
+
+    #[test]
+    fn coordination_planner_to_coder_handoff_is_deterministic() {
+        let result = MultiAgentCoordinator::new().coordinate(CoordinationPlan {
+            root_goal: "ship feature".into(),
+            primitive: CoordinationPrimitive::Sequential,
+            tasks: vec![
+                CoordinationTask {
+                    id: "planner".into(),
+                    role: AgentRole::Planner,
+                    description: "split the work".into(),
+                    depends_on: Vec::new(),
+                },
+                CoordinationTask {
+                    id: "coder".into(),
+                    role: AgentRole::Coder,
+                    description: "implement the patch".into(),
+                    depends_on: vec!["planner".into()],
+                },
+            ],
+            timeout_ms: 5_000,
+            max_retries: 0,
+        });
+
+        assert_eq!(result.completed_tasks, vec!["planner", "coder"]);
+        assert!(result.failed_tasks.is_empty());
+        assert!(result.messages.iter().any(|message| {
+            message.from_role == AgentRole::Planner
+                && message.to_role == AgentRole::Coder
+                && message.task_id == "coder"
+        }));
+    }
+
+    #[test]
+    fn coordination_repair_runs_only_after_coder_failure() {
+        let result = MultiAgentCoordinator::new().coordinate(CoordinationPlan {
+            root_goal: "fix broken implementation".into(),
+            primitive: CoordinationPrimitive::Sequential,
+            tasks: vec![
+                CoordinationTask {
+                    id: "coder".into(),
+                    role: AgentRole::Coder,
+                    description: "force-fail initial implementation".into(),
+                    depends_on: Vec::new(),
+                },
+                CoordinationTask {
+                    id: "repair".into(),
+                    role: AgentRole::Repair,
+                    description: "patch the failed implementation".into(),
+                    depends_on: vec!["coder".into()],
+                },
+            ],
+            timeout_ms: 5_000,
+            max_retries: 0,
+        });
+
+        assert_eq!(result.completed_tasks, vec!["repair"]);
+        assert_eq!(result.failed_tasks, vec!["coder"]);
+        assert!(result.messages.iter().any(|message| {
+            message.from_role == AgentRole::Coder
+                && message.to_role == AgentRole::Repair
+                && message.task_id == "repair"
+        }));
+    }
+
+    #[test]
+    fn coordination_optimizer_runs_after_successful_implementation_step() {
+        let result = MultiAgentCoordinator::new().coordinate(CoordinationPlan {
+            root_goal: "ship optimized patch".into(),
+            primitive: CoordinationPrimitive::Sequential,
+            tasks: vec![
+                CoordinationTask {
+                    id: "coder".into(),
+                    role: AgentRole::Coder,
+                    description: "implement a working patch".into(),
+                    depends_on: Vec::new(),
+                },
+                CoordinationTask {
+                    id: "optimizer".into(),
+                    role: AgentRole::Optimizer,
+                    description: "tighten the implementation".into(),
+                    depends_on: vec!["coder".into()],
+                },
+            ],
+            timeout_ms: 5_000,
+            max_retries: 0,
+        });
+
+        assert_eq!(result.completed_tasks, vec!["coder", "optimizer"]);
+        assert!(result.failed_tasks.is_empty());
+    }
+
+    #[test]
+    fn coordination_parallel_waves_preserve_sorted_merge_order() {
+        let result = MultiAgentCoordinator::new().coordinate(CoordinationPlan {
+            root_goal: "parallelize safe tasks".into(),
+            primitive: CoordinationPrimitive::Parallel,
+            tasks: vec![
+                CoordinationTask {
+                    id: "z-task".into(),
+                    role: AgentRole::Planner,
+                    description: "analyze z".into(),
+                    depends_on: Vec::new(),
+                },
+                CoordinationTask {
+                    id: "a-task".into(),
+                    role: AgentRole::Coder,
+                    description: "implement a".into(),
+                    depends_on: Vec::new(),
+                },
+                CoordinationTask {
+                    id: "mid-task".into(),
+                    role: AgentRole::Optimizer,
+                    description: "polish after both".into(),
+                    depends_on: vec!["z-task".into(), "a-task".into()],
+                },
+            ],
+            timeout_ms: 5_000,
+            max_retries: 0,
+        });
+
+        assert_eq!(result.completed_tasks, vec!["a-task", "z-task", "mid-task"]);
+        assert!(result.failed_tasks.is_empty());
+    }
+
+    #[test]
+    fn coordination_retries_stop_at_max_retries() {
+        let result = MultiAgentCoordinator::new().coordinate(CoordinationPlan {
+            root_goal: "retry then stop".into(),
+            primitive: CoordinationPrimitive::Sequential,
+            tasks: vec![CoordinationTask {
+                id: "coder".into(),
+                role: AgentRole::Coder,
+                description: "force-fail this task".into(),
+                depends_on: Vec::new(),
+            }],
+            timeout_ms: 5_000,
+            max_retries: 1,
+        });
+
+        assert!(result.completed_tasks.is_empty());
+        assert_eq!(result.failed_tasks, vec!["coder"]);
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .filter(|message| message.task_id == "coder" && message.content.contains("failed"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn coordination_conditional_mode_skips_downstream_tasks_on_failure() {
+        let result = MultiAgentCoordinator::new().coordinate(CoordinationPlan {
+            root_goal: "skip blocked follow-up work".into(),
+            primitive: CoordinationPrimitive::Conditional,
+            tasks: vec![
+                CoordinationTask {
+                    id: "coder".into(),
+                    role: AgentRole::Coder,
+                    description: "force-fail the implementation".into(),
+                    depends_on: Vec::new(),
+                },
+                CoordinationTask {
+                    id: "optimizer".into(),
+                    role: AgentRole::Optimizer,
+                    description: "only optimize a successful implementation".into(),
+                    depends_on: vec!["coder".into()],
+                },
+            ],
+            timeout_ms: 5_000,
+            max_retries: 0,
+        });
+
+        assert!(result.completed_tasks.is_empty());
+        assert_eq!(result.failed_tasks, vec!["coder"]);
+        assert!(result.messages.iter().any(|message| {
+            message.task_id == "optimizer"
+                && message
+                    .content
+                    .contains("skipped due to failed dependency chain")
+        }));
+        assert!(!result
+            .failed_tasks
+            .iter()
+            .any(|task_id| task_id == "optimizer"));
     }
 
     #[tokio::test]

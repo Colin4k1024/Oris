@@ -17,6 +17,7 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::prepare_mutation;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::capture_from_proposal;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::feedback_for_agent;
+    let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::coordinate;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_candidates;
     let _ = oris_runtime::governor::DefaultGovernor::default;
     let _ = oris_runtime::economics::EvuLedger::default;
@@ -28,6 +29,12 @@ fn full_evolution_experimental_paths_resolve() {
 
     assert_type::<oris_runtime::agent_contract::AgentTask>();
     assert_type::<oris_runtime::agent_contract::AgentCapabilityLevel>();
+    assert_type::<oris_runtime::agent_contract::AgentRole>();
+    assert_type::<oris_runtime::agent_contract::CoordinationPrimitive>();
+    assert_type::<oris_runtime::agent_contract::CoordinationTask>();
+    assert_type::<oris_runtime::agent_contract::CoordinationMessage>();
+    assert_type::<oris_runtime::agent_contract::CoordinationPlan>();
+    assert_type::<oris_runtime::agent_contract::CoordinationResult>();
     assert_type::<oris_runtime::agent_contract::MutationProposal>();
     assert_type::<oris_runtime::agent_contract::ProposalTarget>();
     assert_type::<oris_runtime::agent_contract::ExecutionFeedback>();
