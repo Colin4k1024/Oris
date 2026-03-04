@@ -586,6 +586,54 @@ async fn normalized_signal_variants_can_replay_learned_capsule() {
 }
 
 #[tokio::test]
+async fn adjacent_task_class_signal_variants_can_replay_learned_capsule() {
+    let (workspace, _store, evo) = test_evo("self-evolve-adjacent-task-class");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-adjacent-task-class".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-adjacent-task-class"),
+        )
+        .await
+        .unwrap();
+
+    let decision = evo
+        .replay_or_fallback(replay_input("README file missing", &workspace))
+        .await
+        .unwrap();
+    let candidates = evo.select_candidates(&replay_input("README file missing", &workspace));
+
+    assert!(decision.used_capsule);
+    assert!(!decision.fallback_to_planner);
+    assert_eq!(decision.capsule_id, Some(captured.id.clone()));
+    assert!(!candidates.is_empty());
+    assert_eq!(candidates[0].gene.id, captured.gene_id);
+}
+
+#[tokio::test]
+async fn unrelated_task_class_signal_variants_do_not_replay() {
+    let (workspace, _store, evo) = test_evo("self-evolve-negative-task-class");
+
+    evo.capture_successful_mutation(
+        &"run-self-evolve-negative-task-class".to_string(),
+        sample_mutation_with_id("mutation-self-evolve-negative-task-class"),
+    )
+    .await
+    .unwrap();
+
+    let decision = evo
+        .replay_or_fallback(replay_input("Cargo lock missing", &workspace))
+        .await
+        .unwrap();
+    let candidates = evo.select_candidates(&replay_input("Cargo lock missing", &workspace));
+
+    assert!(!decision.used_capsule);
+    assert!(decision.fallback_to_planner);
+    assert_eq!(decision.capsule_id, None);
+    assert!(candidates.is_empty());
+}
+
+#[tokio::test]
 async fn long_repeated_sequence_reports_stable_replay_metrics_after_learning() {
     let (workspace, store, evo) = test_evo("self-evolve-long-sequence");
 
