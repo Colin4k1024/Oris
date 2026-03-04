@@ -14,6 +14,10 @@
 - cargo test -p oris-evokernel --test evolution_lifecycle_regression
 - ORT_LIB_LOCATION=/Users/jiafan/onnxruntime ORT_PREFER_DYNAMIC_LINK=0 cargo build --verbose --all --release --all-features
 - ORT_LIB_LOCATION=/Users/jiafan/onnxruntime ORT_PREFER_DYNAMIC_LINK=0 cargo test --release --all-features
+- cargo publish -p oris-evokernel --dry-run --registry crates-io
+- cargo publish -p oris-evokernel --registry crates-io
+- unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export CARGO_HTTP_PROXY=; export ORT_LIB_LOCATION=/Users/jiafan/onnxruntime; export ORT_PREFER_DYNAMIC_LINK=0; cargo publish -p oris-runtime --all-features --dry-run --registry crates-io
+- unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy; export CARGO_HTTP_PROXY=; export ORT_LIB_LOCATION=/Users/jiafan/onnxruntime; export ORT_PREFER_DYNAMIC_LINK=0; cargo publish -p oris-runtime --all-features --registry crates-io
 
 ## Links
 
