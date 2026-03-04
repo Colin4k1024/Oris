@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use oris_runtime::agent_contract::{
-    AgentCapabilityLevel, AgentTask, ExecutionFeedback, MutationProposal, ProposalTarget,
-    ReplayFeedback,
+    AgentCapabilityLevel, AgentTask, ExecutionFeedback, HumanApproval, MutationProposal,
+    ProposalTarget, ReplayFeedback, SupervisedDevloopOutcome,
 };
 use oris_runtime::evolution::{
     CommandValidator, EvoEnvFingerprint as EnvFingerprint, EvoEvolutionStore as EvolutionStore,
@@ -86,10 +86,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "planner-agent",
         "add the primary DEVLOOP note",
     );
-    let planner_outcome = evo
-        .capture_from_proposal(
+    let planner_devloop = evo
+        .run_supervised_devloop(
             &"example-run".into(),
-            &planner_proposal,
+            &oris_runtime::agent_contract::SupervisedDevloopRequest {
+                task: planner_task.clone(),
+                proposal: planner_proposal.clone(),
+                approval: HumanApproval {
+                    approved: true,
+                    approver: Some("maintainer".into()),
+                    note: Some("example flow".into()),
+                },
+            },
             proposal_diff(
                 single_path(&planner_target),
                 "EvoKernel Example",
@@ -98,7 +106,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_revision.clone(),
         )
         .await?;
-    let planner_feedback = EvoKernel::<ExampleState>::feedback_for_agent(&planner_outcome);
 
     let reviewer_task = AgentTask {
         id: "devloop-release-note".into(),
@@ -142,9 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let replay_feedback =
         EvoKernel::<ExampleState>::replay_feedback_for_agent(&planner_proposal.files, &decision);
 
-    print_feedback("planner-agent", &planner_capability, &planner_feedback);
+    if let Some(feedback) = planner_devloop.execution_feedback.as_ref() {
+        print_feedback("planner-agent", &planner_capability, feedback);
+    }
+    print_devloop_outcome(&planner_devloop);
     print_feedback("review-agent", &reviewer_capability, &reviewer_feedback);
-    println!("captured capsule: {}", planner_outcome.capsule.id);
     print_replay_feedback(&replay_run_id, &replay_feedback);
     Ok(())
 }
@@ -224,5 +233,12 @@ fn print_replay_feedback(run_id: &str, feedback: &ReplayFeedback) {
         feedback.reasoning_steps_avoided,
         feedback.task_label,
         feedback.summary
+    );
+}
+
+fn print_devloop_outcome(outcome: &SupervisedDevloopOutcome) {
+    println!(
+        "supervised devloop: task_id={}, status={:?}, task_class={:?}, summary={}",
+        outcome.task_id, outcome.status, outcome.task_class, outcome.summary
     );
 }

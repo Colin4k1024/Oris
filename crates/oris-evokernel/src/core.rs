@@ -9,9 +9,10 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
-    AgentRole, CoordinationMessage, CoordinationPlan, CoordinationPrimitive, CoordinationResult,
-    CoordinationTask, ExecutionFeedback, MutationProposal as AgentMutationProposal, ReplayFeedback,
-    ReplayPlannerDirective,
+    AgentRole, BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
+    CoordinationResult, CoordinationTask, ExecutionFeedback,
+    MutationProposal as AgentMutationProposal, ReplayFeedback, ReplayPlannerDirective,
+    SupervisedDevloopOutcome, SupervisedDevloopRequest, SupervisedDevloopStatus,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -1762,6 +1763,61 @@ impl<S: KernelState> EvoKernel<S> {
         }
     }
 
+    pub async fn run_supervised_devloop(
+        &self,
+        run_id: &RunId,
+        request: &SupervisedDevloopRequest,
+        diff_payload: String,
+        base_revision: Option<String>,
+    ) -> Result<SupervisedDevloopOutcome, EvoKernelError> {
+        let task_class = classify_supervised_devloop_request(request);
+        let Some(task_class) = task_class else {
+            return Ok(SupervisedDevloopOutcome {
+                task_id: request.task.id.clone(),
+                task_class: None,
+                status: SupervisedDevloopStatus::RejectedByPolicy,
+                execution_feedback: None,
+                summary: format!(
+                    "supervised devloop rejected task '{}' because it is an unsupported task outside the bounded scope",
+                    request.task.id
+                ),
+            });
+        };
+
+        if !request.approval.approved {
+            return Ok(SupervisedDevloopOutcome {
+                task_id: request.task.id.clone(),
+                task_class: Some(task_class),
+                status: SupervisedDevloopStatus::AwaitingApproval,
+                execution_feedback: None,
+                summary: format!(
+                    "supervised devloop paused task '{}' until explicit human approval is granted",
+                    request.task.id
+                ),
+            });
+        }
+
+        let capture = self
+            .capture_from_proposal(run_id, &request.proposal, diff_payload, base_revision)
+            .await?;
+        let approver = request
+            .approval
+            .approver
+            .as_deref()
+            .unwrap_or("unknown approver");
+
+        Ok(SupervisedDevloopOutcome {
+            task_id: request.task.id.clone(),
+            task_class: Some(task_class),
+            status: SupervisedDevloopStatus::Executed,
+            execution_feedback: Some(Self::feedback_for_agent(&capture)),
+            summary: format!(
+                "supervised devloop executed task '{}' with explicit approval from {approver}",
+                request.task.id
+            ),
+        })
+    }
+
     pub fn coordinate(&self, plan: CoordinationPlan) -> CoordinationResult {
         MultiAgentCoordinator::new().coordinate(plan)
     }
@@ -2281,6 +2337,21 @@ fn is_rust_error_code(value: &str) -> bool {
     value.len() == 5
         && matches!(value.as_bytes().first(), Some(b'e') | Some(b'E'))
         && value[1..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn classify_supervised_devloop_request(
+    request: &SupervisedDevloopRequest,
+) -> Option<BoundedTaskClass> {
+    let path = request.proposal.files.first()?.trim();
+    if request.proposal.files.len() != 1 || path.is_empty() {
+        return None;
+    }
+    let normalized = path.replace('\\', "/");
+    if normalized.starts_with("docs/") && normalized.ends_with(".md") {
+        Some(BoundedTaskClass::DocsSingleFile)
+    } else {
+        None
+    }
 }
 
 fn find_declared_mutation(
