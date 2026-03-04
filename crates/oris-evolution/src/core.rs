@@ -570,8 +570,8 @@ impl StoreBackedSelector {
 
 impl Selector for StoreBackedSelector {
     fn select(&self, input: &SelectorInput) -> Vec<GeneCandidate> {
-        match self.store.rebuild_projection() {
-            Ok(projection) => ProjectionSelector::new(projection).select(input),
+        match self.store.scan_projection() {
+            Ok((_, projection)) => ProjectionSelector::new(projection).select(input),
             Err(_) => Vec::new(),
         }
     }
@@ -1226,6 +1226,110 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(projection.genes.len(), 1);
         assert_eq!(projection.genes[0].id, scanned_gene.id);
+    }
+
+    #[test]
+    fn store_backed_selector_uses_scan_projection_contract() {
+        struct InconsistentSnapshotStore {
+            scanned_events: Vec<StoredEvolutionEvent>,
+            rebuilt_projection: EvolutionProjection,
+        }
+
+        impl EvolutionStore for InconsistentSnapshotStore {
+            fn append_event(&self, _event: EvolutionEvent) -> Result<u64, EvolutionError> {
+                Err(EvolutionError::Io("unused in test".into()))
+            }
+
+            fn scan(&self, from_seq: u64) -> Result<Vec<StoredEvolutionEvent>, EvolutionError> {
+                Ok(self
+                    .scanned_events
+                    .iter()
+                    .filter(|stored| stored.seq >= from_seq)
+                    .cloned()
+                    .collect())
+            }
+
+            fn rebuild_projection(&self) -> Result<EvolutionProjection, EvolutionError> {
+                Ok(self.rebuilt_projection.clone())
+            }
+        }
+
+        let scanned_gene = Gene {
+            id: "gene-scanned".into(),
+            signals: vec!["signal".into()],
+            strategy: vec!["a".into()],
+            validation: vec!["oris-default".into()],
+            state: AssetState::Promoted,
+        };
+        let scanned_capsule = Capsule {
+            id: "capsule-scanned".into(),
+            gene_id: scanned_gene.id.clone(),
+            mutation_id: "mutation-scanned".into(),
+            run_id: "run-scanned".into(),
+            diff_hash: "hash".into(),
+            confidence: 0.8,
+            env: EnvFingerprint {
+                rustc_version: "rustc 1.80".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            outcome: Outcome {
+                success: true,
+                validation_profile: "oris-default".into(),
+                validation_duration_ms: 100,
+                changed_files: vec!["file.rs".into()],
+                validator_hash: "validator".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+        let store = std::sync::Arc::new(InconsistentSnapshotStore {
+            scanned_events: vec![
+                StoredEvolutionEvent {
+                    seq: 1,
+                    timestamp: "2026-03-04T00:00:00Z".into(),
+                    prev_hash: String::new(),
+                    record_hash: "hash-1".into(),
+                    event: EvolutionEvent::GeneProjected {
+                        gene: scanned_gene.clone(),
+                    },
+                },
+                StoredEvolutionEvent {
+                    seq: 2,
+                    timestamp: "2026-03-04T00:00:01Z".into(),
+                    prev_hash: "hash-1".into(),
+                    record_hash: "hash-2".into(),
+                    event: EvolutionEvent::CapsuleCommitted {
+                        capsule: scanned_capsule.clone(),
+                    },
+                },
+            ],
+            rebuilt_projection: EvolutionProjection {
+                genes: vec![Gene {
+                    id: "gene-rebuilt".into(),
+                    signals: vec!["other".into()],
+                    strategy: vec!["b".into()],
+                    validation: vec!["oris-default".into()],
+                    state: AssetState::Promoted,
+                }],
+                ..Default::default()
+            },
+        });
+        let selector = StoreBackedSelector::new(store);
+        let input = SelectorInput {
+            signals: vec!["signal".into()],
+            env: scanned_capsule.env.clone(),
+            spec_id: None,
+            limit: 1,
+        };
+
+        let candidates = selector.select(&input);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].gene.id, scanned_gene.id);
+        assert_eq!(candidates[0].capsules[0].id, scanned_capsule.id);
     }
 
     #[test]
