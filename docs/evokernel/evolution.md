@@ -141,8 +141,10 @@ confidence = confidence * e^(-lambda * t)
 ```
 
 The current repository enforces the baseline decay/regression check through the
-governor path. The evolution crate still does not own a richer confidence
-history model by itself.
+governor path. Replay selection now also treats decayed confidence as a first-
+class ranking input and can lazily demote stale promoted assets back to
+`Quarantined` so they require revalidation before reuse. The evolution crate
+still does not own a full background confidence-history scheduler by itself.
 
 ## 8. Replay Mechanism
 
