@@ -14,11 +14,10 @@ use oris_agent_contract::{
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
-    compute_artifact_hash, next_id, rebuild_projection_from_events, stable_hash_json, AssetState,
-    BlastRadius, CandidateSource, Capsule, CapsuleId, EnvFingerprint, EvolutionError,
-    EvolutionEvent, EvolutionProjection, EvolutionStore, Gene, GeneCandidate, MutationId,
-    PreparedMutation, Selector, SelectorInput, StoreBackedSelector, StoredEvolutionEvent,
-    ValidationSnapshot,
+    compute_artifact_hash, next_id, stable_hash_json, AssetState, BlastRadius, CandidateSource,
+    Capsule, CapsuleId, EnvFingerprint, EvolutionError, EvolutionEvent, EvolutionProjection,
+    EvolutionStore, Gene, GeneCandidate, MutationId, PreparedMutation, Selector, SelectorInput,
+    StoreBackedSelector, StoredEvolutionEvent, ValidationSnapshot,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -706,6 +705,11 @@ pub struct StoreReplayExecutor {
     pub stake_policy: StakePolicy,
 }
 
+struct ReplayCandidates {
+    candidates: Vec<GeneCandidate>,
+    exact_match: bool,
+}
+
 #[async_trait]
 impl ReplayExecutor for StoreReplayExecutor {
     async fn try_replay(
@@ -730,13 +734,7 @@ impl ReplayExecutor for StoreReplayExecutor {
 }
 
 impl StoreReplayExecutor {
-    async fn try_replay_inner(
-        &self,
-        replay_run_id: Option<&RunId>,
-        input: &SelectorInput,
-        policy: &SandboxPolicy,
-        validation: &ValidationPlan,
-    ) -> Result<ReplayDecision, ReplayError> {
+    fn collect_replay_candidates(&self, input: &SelectorInput) -> ReplayCandidates {
         let mut selector_input = input.clone();
         if self.economics.is_some() && self.remote_publishers.is_some() {
             selector_input.limit = selector_input.limit.max(4);
@@ -762,6 +760,23 @@ impl StoreReplayExecutor {
             }
         }
         candidates.truncate(input.limit.max(1));
+        ReplayCandidates {
+            candidates,
+            exact_match,
+        }
+    }
+
+    async fn try_replay_inner(
+        &self,
+        replay_run_id: Option<&RunId>,
+        input: &SelectorInput,
+        policy: &SandboxPolicy,
+        validation: &ValidationPlan,
+    ) -> Result<ReplayDecision, ReplayError> {
+        let ReplayCandidates {
+            candidates,
+            exact_match,
+        } = self.collect_replay_candidates(input);
         let Some(best) = candidates.into_iter().next() else {
             return Ok(ReplayDecision {
                 used_capsule: false,
@@ -886,9 +901,6 @@ impl StoreReplayExecutor {
         let Some(ledger) = self.economics.as_ref() else {
             return;
         };
-        let Some(remote_publishers) = self.remote_publishers.as_ref() else {
-            return;
-        };
         let reputation_bias = ledger
             .lock()
             .ok()
@@ -897,11 +909,14 @@ impl StoreReplayExecutor {
         if reputation_bias.is_empty() {
             return;
         }
-        let publisher_map = remote_publishers
-            .lock()
-            .ok()
-            .map(|locked| locked.clone())
-            .unwrap_or_default();
+        let required_genes = candidates
+            .iter()
+            .map(|candidate| candidate.gene.id.as_str())
+            .collect::<Vec<_>>();
+        let publisher_map = self.remote_publishers_snapshot(&required_genes);
+        if publisher_map.is_empty() {
+            return;
+        }
         candidates.sort_by(|left, right| {
             effective_candidate_score(right, &publisher_map, &reputation_bias)
                 .partial_cmp(&effective_candidate_score(
@@ -915,12 +930,46 @@ impl StoreReplayExecutor {
     }
 
     fn publisher_for_gene(&self, gene_id: &str) -> Option<String> {
-        self.remote_publishers
-            .as_ref()?
-            .lock()
-            .ok()?
+        self.remote_publishers_snapshot(&[gene_id])
             .get(gene_id)
             .cloned()
+    }
+
+    fn remote_publishers_snapshot(&self, required_genes: &[&str]) -> BTreeMap<String, String> {
+        let cached = self
+            .remote_publishers
+            .as_ref()
+            .and_then(|remote_publishers| {
+                remote_publishers.lock().ok().map(|locked| locked.clone())
+            })
+            .unwrap_or_default();
+        if !cached.is_empty()
+            && required_genes
+                .iter()
+                .all(|gene_id| cached.contains_key(*gene_id))
+        {
+            return cached;
+        }
+
+        let persisted = remote_publishers_by_gene_from_store(self.store.as_ref());
+        if persisted.is_empty() {
+            return cached;
+        }
+
+        let mut merged = cached;
+        for (gene_id, sender_id) in persisted {
+            merged.entry(gene_id).or_insert(sender_id);
+        }
+
+        if let Some(remote_publishers) = self.remote_publishers.as_ref() {
+            if let Ok(mut locked) = remote_publishers.lock() {
+                for (gene_id, sender_id) in &merged {
+                    locked.entry(gene_id.clone()).or_insert(sender_id.clone());
+                }
+            }
+        }
+
+        merged
     }
 
     fn record_reuse_settlement(&self, publisher_id: Option<&str>, success: bool) {
@@ -1264,16 +1313,17 @@ impl<S: KernelState> EvoKernel<S> {
     }
 
     pub fn select_candidates(&self, input: &SelectorInput) -> Vec<GeneCandidate> {
-        let mut candidates = self.selector.select(input);
-        candidates.sort_by(|left, right| {
-            right
-                .score
-                .partial_cmp(&left.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| left.gene.id.cmp(&right.gene.id))
-        });
-        candidates.truncate(input.limit.max(1));
-        candidates
+        let executor = StoreReplayExecutor {
+            sandbox: self.sandbox.clone(),
+            validator: self.validator.clone(),
+            store: self.store.clone(),
+            selector: self.selector.clone(),
+            governor: self.governor.clone(),
+            economics: Some(self.economics.clone()),
+            remote_publishers: Some(self.remote_publishers.clone()),
+            stake_policy: self.stake_policy.clone(),
+        };
+        executor.collect_replay_candidates(input).candidates
     }
 
     pub fn bootstrap_if_empty(&self, run_id: &RunId) -> Result<BootstrapReport, EvoKernelError> {
@@ -2182,6 +2232,7 @@ fn quarantined_remote_exact_match_candidates(
                     EvolutionEvent::RemoteAssetImported {
                         source: CandidateSource::Remote,
                         asset_ids,
+                        ..
                     } => Some(asset_ids),
                     _ => None,
                 })
@@ -2350,9 +2401,7 @@ fn export_promoted_assets_from_store(
 fn scan_projection(
     store: &dyn EvolutionStore,
 ) -> Result<(Vec<StoredEvolutionEvent>, EvolutionProjection), EvoKernelError> {
-    let events = store.scan(1).map_err(store_err)?;
-    let projection = rebuild_projection_from_events(&events);
-    Ok((events, projection))
+    store.scan_projection().map_err(store_err)
 }
 
 fn replay_export_assets(
@@ -2428,10 +2477,41 @@ fn import_remote_envelope_into_store(
         ));
     }
 
+    let sender_id = normalized_sender_id(&envelope.sender_id);
+    let (events, projection) = scan_projection(store)?;
+    let mut known_gene_ids = projection
+        .genes
+        .into_iter()
+        .map(|gene| gene.id)
+        .collect::<BTreeSet<_>>();
+    let mut known_capsule_ids = projection
+        .capsules
+        .into_iter()
+        .map(|capsule| capsule.id)
+        .collect::<BTreeSet<_>>();
+    let mut known_mutation_ids = BTreeSet::new();
+    let mut known_spec_links = BTreeSet::new();
+    for stored in &events {
+        match &stored.event {
+            EvolutionEvent::MutationDeclared { mutation } => {
+                known_mutation_ids.insert(mutation.intent.id.clone());
+            }
+            EvolutionEvent::SpecLinked {
+                mutation_id,
+                spec_id,
+            } => {
+                known_spec_links.insert((mutation_id.clone(), spec_id.clone()));
+            }
+            _ => {}
+        }
+    }
     let mut imported_asset_ids = Vec::new();
     for asset in &envelope.assets {
         match asset {
             NetworkAsset::Gene { gene } => {
+                if !known_gene_ids.insert(gene.id.clone()) {
+                    continue;
+                }
                 imported_asset_ids.push(gene.id.clone());
                 let mut quarantined_gene = gene.clone();
                 quarantined_gene.state = AssetState::Quarantined;
@@ -2439,6 +2519,7 @@ fn import_remote_envelope_into_store(
                     .append_event(EvolutionEvent::RemoteAssetImported {
                         source: CandidateSource::Remote,
                         asset_ids: vec![gene.id.clone()],
+                        sender_id: sender_id.clone(),
                     })
                     .map_err(store_err)?;
                 store
@@ -2456,11 +2537,15 @@ fn import_remote_envelope_into_store(
                     .map_err(store_err)?;
             }
             NetworkAsset::Capsule { capsule } => {
+                if !known_capsule_ids.insert(capsule.id.clone()) {
+                    continue;
+                }
                 imported_asset_ids.push(capsule.id.clone());
                 store
                     .append_event(EvolutionEvent::RemoteAssetImported {
                         source: CandidateSource::Remote,
                         asset_ids: vec![capsule.id.clone()],
+                        sender_id: sender_id.clone(),
                     })
                     .map_err(store_err)?;
                 let mut quarantined = capsule.clone();
@@ -2478,7 +2563,18 @@ fn import_remote_envelope_into_store(
                     .map_err(store_err)?;
             }
             NetworkAsset::EvolutionEvent { event } => {
-                if should_import_remote_event(event) {
+                let should_append = match event {
+                    EvolutionEvent::MutationDeclared { mutation } => {
+                        known_mutation_ids.insert(mutation.intent.id.clone())
+                    }
+                    EvolutionEvent::SpecLinked {
+                        mutation_id,
+                        spec_id,
+                    } => known_spec_links.insert((mutation_id.clone(), spec_id.clone())),
+                    _ if should_import_remote_event(event) => true,
+                    _ => false,
+                };
+                if should_append {
                     store.append_event(event.clone()).map_err(store_err)?;
                 }
             }
@@ -2489,6 +2585,15 @@ fn import_remote_envelope_into_store(
         imported_asset_ids,
         accepted: true,
     })
+}
+
+fn normalized_sender_id(sender_id: &str) -> Option<String> {
+    let trimmed = sender_id.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn record_remote_publisher_for_asset(
@@ -2515,6 +2620,60 @@ fn record_remote_publisher_for_asset(
         }
         NetworkAsset::EvolutionEvent { .. } => {}
     }
+}
+
+fn remote_publishers_by_gene_from_store(store: &dyn EvolutionStore) -> BTreeMap<String, String> {
+    let Ok(events) = store.scan(1) else {
+        return BTreeMap::new();
+    };
+    remote_publishers_by_gene_from_events(&events)
+}
+
+fn remote_publishers_by_gene_from_events(
+    events: &[StoredEvolutionEvent],
+) -> BTreeMap<String, String> {
+    let mut imported_asset_publishers = BTreeMap::<String, String>::new();
+    let mut known_gene_ids = BTreeSet::<String>::new();
+    let mut capsule_gene_ids = BTreeMap::<String, String>::new();
+    let mut publishers_by_gene = BTreeMap::<String, String>::new();
+
+    for stored in events {
+        match &stored.event {
+            EvolutionEvent::RemoteAssetImported {
+                source: CandidateSource::Remote,
+                asset_ids,
+                sender_id,
+            } => {
+                let Some(sender_id) = sender_id.as_deref().and_then(normalized_sender_id) else {
+                    continue;
+                };
+                for asset_id in asset_ids {
+                    imported_asset_publishers.insert(asset_id.clone(), sender_id.clone());
+                    if known_gene_ids.contains(asset_id) {
+                        publishers_by_gene.insert(asset_id.clone(), sender_id.clone());
+                    }
+                    if let Some(gene_id) = capsule_gene_ids.get(asset_id) {
+                        publishers_by_gene.insert(gene_id.clone(), sender_id.clone());
+                    }
+                }
+            }
+            EvolutionEvent::GeneProjected { gene } => {
+                known_gene_ids.insert(gene.id.clone());
+                if let Some(sender_id) = imported_asset_publishers.get(&gene.id) {
+                    publishers_by_gene.insert(gene.id.clone(), sender_id.clone());
+                }
+            }
+            EvolutionEvent::CapsuleCommitted { capsule } => {
+                capsule_gene_ids.insert(capsule.id.clone(), capsule.gene_id.clone());
+                if let Some(sender_id) = imported_asset_publishers.get(&capsule.id) {
+                    publishers_by_gene.insert(capsule.gene_id.clone(), sender_id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    publishers_by_gene
 }
 
 fn should_import_remote_event(event: &EvolutionEvent) -> bool {
@@ -3686,6 +3845,67 @@ index 0000000..1111111
         assert!(candidates.iter().all(|candidate| candidate.score <= 1.0));
     }
 
+    #[test]
+    fn exact_match_candidates_respect_spec_linked_events() {
+        let (evo, _) = build_test_evo(
+            "spec-linked-filter",
+            "run-spec-linked-filter",
+            command_validator(),
+        );
+        let mut input = replay_input("missing readme");
+        input.spec_id = Some("spec-readme".into());
+
+        let mut mutation = sample_mutation();
+        mutation.intent.id = "mutation-spec-linked".into();
+        mutation.intent.spec_id = None;
+        let gene = Gene {
+            id: "gene-spec-linked".into(),
+            signals: vec!["missing readme".into()],
+            strategy: vec!["README.md".into()],
+            validation: vec!["test".into()],
+            state: AssetState::Promoted,
+        };
+        let capsule = Capsule {
+            id: "capsule-spec-linked".into(),
+            gene_id: gene.id.clone(),
+            mutation_id: mutation.intent.id.clone(),
+            run_id: "run-spec-linked".into(),
+            diff_hash: mutation.artifact.content_hash.clone(),
+            confidence: 0.9,
+            env: input.env.clone(),
+            outcome: Outcome {
+                success: true,
+                validation_profile: "test".into(),
+                validation_duration_ms: 1,
+                changed_files: vec!["README.md".into()],
+                validator_hash: "validator-hash".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+
+        evo.store
+            .append_event(EvolutionEvent::MutationDeclared { mutation })
+            .unwrap();
+        evo.store
+            .append_event(EvolutionEvent::GeneProjected { gene })
+            .unwrap();
+        evo.store
+            .append_event(EvolutionEvent::CapsuleCommitted { capsule })
+            .unwrap();
+        evo.store
+            .append_event(EvolutionEvent::SpecLinked {
+                mutation_id: "mutation-spec-linked".into(),
+                spec_id: "spec-readme".into(),
+            })
+            .unwrap();
+
+        let candidates = exact_match_candidates(evo.store.as_ref(), &input);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].gene.id, "gene-spec-linked");
+    }
+
     #[tokio::test]
     async fn remote_capsule_stays_quarantined_until_first_successful_replay() {
         let (evo, store) = build_test_evo(
@@ -3872,6 +4092,203 @@ index 0000000..1111111
         );
     }
 
+    #[test]
+    fn retry_remote_import_after_partial_failure_only_imports_missing_assets() {
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evokernel-remote-partial-retry-store-{}",
+            next_id("t")
+        ));
+        if store_root.exists() {
+            fs::remove_dir_all(&store_root).unwrap();
+        }
+        let store: Arc<dyn EvolutionStore> = Arc::new(FailOnAppendStore::new(store_root, 4));
+        let evo = build_test_evo_with_store(
+            "remote-partial-retry",
+            "run-remote-partial-retry",
+            command_validator(),
+            store.clone(),
+        );
+        let envelope = remote_publish_envelope(
+            "node-partial",
+            "run-remote-partial-retry",
+            "gene-partial-retry",
+            "capsule-partial-retry",
+            "mutation-partial-retry",
+            "partial-retry-signal",
+            "PARTIAL_RETRY.md",
+            "# partial retry",
+        );
+
+        let first = evo.import_remote_envelope(&envelope);
+        assert!(matches!(first, Err(EvoKernelError::Store(_))));
+
+        let retry = evo.import_remote_envelope(&envelope).unwrap();
+
+        assert_eq!(retry.imported_asset_ids, vec!["capsule-partial-retry"]);
+        let projection = store.rebuild_projection().unwrap();
+        let gene = projection
+            .genes
+            .iter()
+            .find(|gene| gene.id == "gene-partial-retry")
+            .unwrap();
+        assert_eq!(gene.state, AssetState::Quarantined);
+        let capsule = projection
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == "capsule-partial-retry")
+            .unwrap();
+        assert_eq!(capsule.state, AssetState::Quarantined);
+        assert_eq!(projection.attempt_counts["gene-partial-retry"], 1);
+
+        let events = store.scan(1).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        EvolutionEvent::MutationDeclared { mutation }
+                            if mutation.intent.id == "mutation-partial-retry"
+                    )
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        EvolutionEvent::GeneProjected { gene } if gene.id == "gene-partial-retry"
+                    )
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        EvolutionEvent::CapsuleCommitted { capsule }
+                            if capsule.id == "capsule-partial-retry"
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_remote_import_does_not_requarantine_locally_validated_assets() {
+        let (evo, store) = build_test_evo(
+            "remote-idempotent",
+            "run-remote-idempotent",
+            command_validator(),
+        );
+        let envelope = remote_publish_envelope(
+            "node-idempotent",
+            "run-remote-idempotent",
+            "gene-idempotent",
+            "capsule-idempotent",
+            "mutation-idempotent",
+            "idempotent-signal",
+            "IDEMPOTENT.md",
+            "# idempotent",
+        );
+
+        let first = evo.import_remote_envelope(&envelope).unwrap();
+        assert_eq!(
+            first.imported_asset_ids,
+            vec!["gene-idempotent", "capsule-idempotent"]
+        );
+
+        let decision = evo
+            .replay_or_fallback(replay_input("idempotent-signal"))
+            .await
+            .unwrap();
+        assert!(decision.used_capsule);
+        assert_eq!(decision.capsule_id, Some("capsule-idempotent".into()));
+
+        let projection_before = store.rebuild_projection().unwrap();
+        let attempts_before = projection_before.attempt_counts["gene-idempotent"];
+        let gene_before = projection_before
+            .genes
+            .iter()
+            .find(|gene| gene.id == "gene-idempotent")
+            .unwrap();
+        assert_eq!(gene_before.state, AssetState::Promoted);
+        let capsule_before = projection_before
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == "capsule-idempotent")
+            .unwrap();
+        assert_eq!(capsule_before.state, AssetState::Promoted);
+
+        let second = evo.import_remote_envelope(&envelope).unwrap();
+        assert!(second.imported_asset_ids.is_empty());
+
+        let projection_after = store.rebuild_projection().unwrap();
+        assert_eq!(
+            projection_after.attempt_counts["gene-idempotent"],
+            attempts_before
+        );
+        let gene_after = projection_after
+            .genes
+            .iter()
+            .find(|gene| gene.id == "gene-idempotent")
+            .unwrap();
+        assert_eq!(gene_after.state, AssetState::Promoted);
+        let capsule_after = projection_after
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == "capsule-idempotent")
+            .unwrap();
+        assert_eq!(capsule_after.state, AssetState::Promoted);
+
+        let events = store.scan(1).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        EvolutionEvent::MutationDeclared { mutation }
+                            if mutation.intent.id == "mutation-idempotent"
+                    )
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        EvolutionEvent::GeneProjected { gene } if gene.id == "gene-idempotent"
+                    )
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|stored| {
+                    matches!(
+                        &stored.event,
+                        EvolutionEvent::CapsuleCommitted { capsule }
+                            if capsule.id == "capsule-idempotent"
+                    )
+                })
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn insufficient_evu_blocks_publish_but_not_local_replay() {
         let (evo, _) = build_test_evo("stake-gate", "run-stake", command_validator());
@@ -4036,6 +4453,143 @@ index 0000000..1111111
             locked.selector_reputation_bias()["node-b"]
                 > locked.selector_reputation_bias()["node-a"]
         );
+    }
+
+    #[test]
+    fn select_candidates_surfaces_ranked_remote_cold_start_candidates() {
+        let ledger = Arc::new(Mutex::new(EvuLedger {
+            accounts: vec![],
+            reputations: vec![
+                oris_economics::ReputationRecord {
+                    node_id: "node-a".into(),
+                    publish_success_rate: 0.4,
+                    validator_accuracy: 0.4,
+                    reuse_impact: 0,
+                },
+                oris_economics::ReputationRecord {
+                    node_id: "node-b".into(),
+                    publish_success_rate: 0.95,
+                    validator_accuracy: 0.95,
+                    reuse_impact: 8,
+                },
+            ],
+        }));
+        let (evo, _) = build_test_evo("remote-select", "run-remote-select", command_validator());
+        let evo = evo.with_economics(ledger);
+
+        let envelope_a = remote_publish_envelope(
+            "node-a",
+            "run-remote-a",
+            "gene-a",
+            "capsule-a",
+            "mutation-a",
+            "shared-signal",
+            "A.md",
+            "# from a",
+        );
+        let envelope_b = remote_publish_envelope(
+            "node-b",
+            "run-remote-b",
+            "gene-b",
+            "capsule-b",
+            "mutation-b",
+            "shared-signal",
+            "B.md",
+            "# from b",
+        );
+
+        evo.import_remote_envelope(&envelope_a).unwrap();
+        evo.import_remote_envelope(&envelope_b).unwrap();
+
+        let candidates = evo.select_candidates(&replay_input("shared-signal"));
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].gene.id, "gene-b");
+        assert_eq!(candidates[0].capsules[0].id, "capsule-b");
+    }
+
+    #[tokio::test]
+    async fn remote_reuse_publisher_bias_survives_restart() {
+        let ledger = Arc::new(Mutex::new(EvuLedger {
+            accounts: vec![],
+            reputations: vec![
+                oris_economics::ReputationRecord {
+                    node_id: "node-a".into(),
+                    publish_success_rate: 0.4,
+                    validator_accuracy: 0.4,
+                    reuse_impact: 0,
+                },
+                oris_economics::ReputationRecord {
+                    node_id: "node-b".into(),
+                    publish_success_rate: 0.95,
+                    validator_accuracy: 0.95,
+                    reuse_impact: 8,
+                },
+            ],
+        }));
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evokernel-remote-restart-store-{}",
+            next_id("t")
+        ));
+        if store_root.exists() {
+            fs::remove_dir_all(&store_root).unwrap();
+        }
+        let store: Arc<dyn EvolutionStore> =
+            Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
+        let evo = build_test_evo_with_store(
+            "remote-success-restart-source",
+            "run-remote-restart-source",
+            command_validator(),
+            store.clone(),
+        )
+        .with_economics(ledger.clone());
+
+        let envelope_a = remote_publish_envelope(
+            "node-a",
+            "run-remote-a",
+            "gene-a",
+            "capsule-a",
+            "mutation-a",
+            "shared-signal",
+            "A.md",
+            "# from a",
+        );
+        let envelope_b = remote_publish_envelope(
+            "node-b",
+            "run-remote-b",
+            "gene-b",
+            "capsule-b",
+            "mutation-b",
+            "shared-signal",
+            "B.md",
+            "# from b",
+        );
+
+        evo.import_remote_envelope(&envelope_a).unwrap();
+        evo.import_remote_envelope(&envelope_b).unwrap();
+
+        let recovered = build_test_evo_with_store(
+            "remote-success-restart-recovered",
+            "run-remote-restart-recovered",
+            command_validator(),
+            store.clone(),
+        )
+        .with_economics(ledger.clone());
+
+        let decision = recovered
+            .replay_or_fallback(replay_input("shared-signal"))
+            .await
+            .unwrap();
+
+        assert!(decision.used_capsule);
+        assert_eq!(decision.capsule_id, Some("capsule-b".into()));
+        let locked = ledger.lock().unwrap();
+        let rewarded = locked
+            .accounts
+            .iter()
+            .find(|item| item.node_id == "node-b")
+            .unwrap();
+        assert_eq!(rewarded.balance, recovered.stake_policy.reuse_reward);
     }
 
     #[tokio::test]

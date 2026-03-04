@@ -207,6 +207,8 @@ pub enum EvolutionEvent {
     RemoteAssetImported {
         source: CandidateSource,
         asset_ids: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
     },
     SpecLinked {
         mutation_id: MutationId,
@@ -256,6 +258,14 @@ pub trait EvolutionStore: Send + Sync {
     fn append_event(&self, event: EvolutionEvent) -> Result<u64, EvolutionError>;
     fn scan(&self, from_seq: u64) -> Result<Vec<StoredEvolutionEvent>, EvolutionError>;
     fn rebuild_projection(&self) -> Result<EvolutionProjection, EvolutionError>;
+
+    fn scan_projection(
+        &self,
+    ) -> Result<(Vec<StoredEvolutionEvent>, EvolutionProjection), EvolutionError> {
+        let events = self.scan(1)?;
+        let projection = rebuild_projection_from_events(&events);
+        Ok((events, projection))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -400,6 +410,19 @@ impl EvolutionStore for JsonlEvolutionStore {
         let projection = rebuild_projection_from_events(&self.read_all_events()?);
         self.write_projection_files(&projection)?;
         Ok(projection)
+    }
+
+    fn scan_projection(
+        &self,
+    ) -> Result<(Vec<StoredEvolutionEvent>, EvolutionProjection), EvolutionError> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| EvolutionError::Io("evolution store lock poisoned".into()))?;
+        let events = self.read_all_events()?;
+        let projection = rebuild_projection_from_events(&events);
+        self.write_projection_files(&projection)?;
+        Ok((events, projection))
     }
 }
 
@@ -575,6 +598,27 @@ pub fn rebuild_projection_from_events(events: &[StoredEvolutionEvent]) -> Evolut
                     .filter(|value| !value.is_empty())
                 {
                     mutation_spec_ids.insert(mutation.intent.id.clone(), spec_id.to_string());
+                    if let Some(gene_id) = mutation_to_gene.get(&mutation.intent.id) {
+                        spec_ids_by_gene
+                            .entry(gene_id.clone())
+                            .or_default()
+                            .insert(spec_id.to_string());
+                    }
+                }
+            }
+            EvolutionEvent::SpecLinked {
+                mutation_id,
+                spec_id,
+            } => {
+                let spec_id = spec_id.trim();
+                if !spec_id.is_empty() {
+                    mutation_spec_ids.insert(mutation_id.clone(), spec_id.to_string());
+                    if let Some(gene_id) = mutation_to_gene.get(mutation_id) {
+                        spec_ids_by_gene
+                            .entry(gene_id.clone())
+                            .or_default()
+                            .insert(spec_id.to_string());
+                    }
                 }
             }
             EvolutionEvent::GeneProjected { gene } => {
@@ -954,6 +998,237 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_projection_tracks_spec_ids_from_spec_linked_events() {
+        let root = temp_root("projection-spec-linked");
+        let store = JsonlEvolutionStore::new(&root);
+        let mut mutation = sample_mutation();
+        mutation.intent.id = "mutation-spec-linked".into();
+        mutation.intent.spec_id = None;
+        let gene = Gene {
+            id: "gene-spec-linked".into(),
+            signals: vec!["rust borrow error".into()],
+            strategy: vec!["crates".into()],
+            validation: vec!["oris-default".into()],
+            state: AssetState::Promoted,
+        };
+        let capsule = Capsule {
+            id: "capsule-spec-linked".into(),
+            gene_id: gene.id.clone(),
+            mutation_id: mutation.intent.id.clone(),
+            run_id: "run-spec-linked".into(),
+            diff_hash: "abc".into(),
+            confidence: 0.7,
+            env: EnvFingerprint {
+                rustc_version: "rustc 1.80".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            outcome: Outcome {
+                success: true,
+                validation_profile: "oris-default".into(),
+                validation_duration_ms: 100,
+                changed_files: vec!["crates/oris-kernel/src/lib.rs".into()],
+                validator_hash: "vh".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+        store
+            .append_event(EvolutionEvent::MutationDeclared { mutation })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::GeneProjected { gene })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::CapsuleCommitted { capsule })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::SpecLinked {
+                mutation_id: "mutation-spec-linked".into(),
+                spec_id: "spec-repair-linked".into(),
+            })
+            .unwrap();
+
+        let projection = store.rebuild_projection().unwrap();
+        let spec_ids = projection.spec_ids_by_gene.get("gene-spec-linked").unwrap();
+        assert!(spec_ids.contains("spec-repair-linked"));
+    }
+
+    #[test]
+    fn rebuild_projection_tracks_inline_spec_ids_even_when_declared_late() {
+        let root = temp_root("projection-spec-inline-late");
+        let store = JsonlEvolutionStore::new(&root);
+        let mut mutation = sample_mutation();
+        mutation.intent.id = "mutation-inline-late".into();
+        mutation.intent.spec_id = Some("spec-inline-late".into());
+        let gene = Gene {
+            id: "gene-inline-late".into(),
+            signals: vec!["rust borrow error".into()],
+            strategy: vec!["crates".into()],
+            validation: vec!["oris-default".into()],
+            state: AssetState::Promoted,
+        };
+        let capsule = Capsule {
+            id: "capsule-inline-late".into(),
+            gene_id: gene.id.clone(),
+            mutation_id: mutation.intent.id.clone(),
+            run_id: "run-inline-late".into(),
+            diff_hash: "abc".into(),
+            confidence: 0.7,
+            env: EnvFingerprint {
+                rustc_version: "rustc 1.80".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            outcome: Outcome {
+                success: true,
+                validation_profile: "oris-default".into(),
+                validation_duration_ms: 100,
+                changed_files: vec!["crates/oris-kernel/src/lib.rs".into()],
+                validator_hash: "vh".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+        store
+            .append_event(EvolutionEvent::GeneProjected { gene })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::CapsuleCommitted { capsule })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::MutationDeclared { mutation })
+            .unwrap();
+
+        let projection = store.rebuild_projection().unwrap();
+        let spec_ids = projection.spec_ids_by_gene.get("gene-inline-late").unwrap();
+        assert!(spec_ids.contains("spec-inline-late"));
+    }
+
+    #[test]
+    fn scan_projection_recreates_projection_files() {
+        let root = temp_root("scan-projection");
+        let store = JsonlEvolutionStore::new(&root);
+        let mutation = sample_mutation();
+        let gene = Gene {
+            id: "gene-scan".into(),
+            signals: vec!["rust borrow error".into()],
+            strategy: vec!["crates".into()],
+            validation: vec!["oris-default".into()],
+            state: AssetState::Promoted,
+        };
+        let capsule = Capsule {
+            id: "capsule-scan".into(),
+            gene_id: gene.id.clone(),
+            mutation_id: mutation.intent.id.clone(),
+            run_id: "run-scan".into(),
+            diff_hash: "abc".into(),
+            confidence: 0.7,
+            env: EnvFingerprint {
+                rustc_version: "rustc 1.80".into(),
+                cargo_lock_hash: "lock".into(),
+                target_triple: "x86_64-unknown-linux-gnu".into(),
+                os: "linux".into(),
+            },
+            outcome: Outcome {
+                success: true,
+                validation_profile: "oris-default".into(),
+                validation_duration_ms: 100,
+                changed_files: vec!["crates/oris-kernel/src/lib.rs".into()],
+                validator_hash: "vh".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+        store
+            .append_event(EvolutionEvent::MutationDeclared { mutation })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::GeneProjected { gene })
+            .unwrap();
+        store
+            .append_event(EvolutionEvent::CapsuleCommitted { capsule })
+            .unwrap();
+        fs::remove_file(root.join("genes.json")).unwrap();
+        fs::remove_file(root.join("capsules.json")).unwrap();
+
+        let (events, projection) = store.scan_projection().unwrap();
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(projection.genes.len(), 1);
+        assert_eq!(projection.capsules.len(), 1);
+        assert!(root.join("genes.json").exists());
+        assert!(root.join("capsules.json").exists());
+    }
+
+    #[test]
+    fn default_scan_projection_uses_single_event_snapshot() {
+        struct InconsistentSnapshotStore {
+            scanned_events: Vec<StoredEvolutionEvent>,
+            rebuilt_projection: EvolutionProjection,
+        }
+
+        impl EvolutionStore for InconsistentSnapshotStore {
+            fn append_event(&self, _event: EvolutionEvent) -> Result<u64, EvolutionError> {
+                Err(EvolutionError::Io("unused in test".into()))
+            }
+
+            fn scan(&self, from_seq: u64) -> Result<Vec<StoredEvolutionEvent>, EvolutionError> {
+                Ok(self
+                    .scanned_events
+                    .iter()
+                    .filter(|stored| stored.seq >= from_seq)
+                    .cloned()
+                    .collect())
+            }
+
+            fn rebuild_projection(&self) -> Result<EvolutionProjection, EvolutionError> {
+                Ok(self.rebuilt_projection.clone())
+            }
+        }
+
+        let scanned_gene = Gene {
+            id: "gene-scanned".into(),
+            signals: vec!["signal".into()],
+            strategy: vec!["a".into()],
+            validation: vec!["oris-default".into()],
+            state: AssetState::Promoted,
+        };
+        let store = InconsistentSnapshotStore {
+            scanned_events: vec![StoredEvolutionEvent {
+                seq: 1,
+                timestamp: "2026-03-04T00:00:00Z".into(),
+                prev_hash: String::new(),
+                record_hash: "hash".into(),
+                event: EvolutionEvent::GeneProjected {
+                    gene: scanned_gene.clone(),
+                },
+            }],
+            rebuilt_projection: EvolutionProjection {
+                genes: vec![Gene {
+                    id: "gene-rebuilt".into(),
+                    signals: vec!["other".into()],
+                    strategy: vec!["b".into()],
+                    validation: vec!["oris-default".into()],
+                    state: AssetState::Promoted,
+                }],
+                ..Default::default()
+            },
+        };
+
+        let (events, projection) = store.scan_projection().unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(projection.genes.len(), 1);
+        assert_eq!(projection.genes[0].id, scanned_gene.id);
+    }
+
+    #[test]
     fn selector_orders_results_stably() {
         let projection = EvolutionProjection {
             genes: vec![
@@ -1304,6 +1579,36 @@ mod tests {
                 assert_eq!(gene_id, "gene-1");
                 assert_eq!(run_id, "run-1");
                 assert_eq!(replay_run_id, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_remote_asset_imported_events_deserialize_without_sender_id() {
+        let serialized = r#"{
+  "seq": 1,
+  "timestamp": "2026-03-04T00:00:00Z",
+  "prev_hash": "",
+  "record_hash": "hash",
+  "event": {
+    "kind": "remote_asset_imported",
+    "source": "Remote",
+    "asset_ids": ["gene-1"]
+  }
+}"#;
+
+        let stored = serde_json::from_str::<StoredEvolutionEvent>(serialized).unwrap();
+
+        match stored.event {
+            EvolutionEvent::RemoteAssetImported {
+                source,
+                asset_ids,
+                sender_id,
+            } => {
+                assert_eq!(source, CandidateSource::Remote);
+                assert_eq!(asset_ids, vec!["gene-1"]);
+                assert_eq!(sender_id, None);
             }
             other => panic!("unexpected event: {other:?}"),
         }
