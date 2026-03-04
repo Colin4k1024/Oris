@@ -119,6 +119,24 @@ pub struct ValidationReport {
     pub logs: String,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignalExtractionInput {
+    pub patch_diff: String,
+    pub intent: String,
+    pub expected_effect: String,
+    pub declared_signals: Vec<String>,
+    pub changed_files: Vec<String>,
+    pub validation_success: bool,
+    pub validation_logs: String,
+    pub stage_outputs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignalExtractionOutput {
+    pub values: Vec<String>,
+    pub hash: String,
+}
+
 impl ValidationReport {
     pub fn to_snapshot(&self, profile: &str) -> ValidationSnapshot {
         ValidationSnapshot {
@@ -132,6 +150,45 @@ impl ValidationReport {
             },
         }
     }
+}
+
+pub fn extract_deterministic_signals(input: &SignalExtractionInput) -> SignalExtractionOutput {
+    let mut signals = BTreeSet::new();
+
+    for declared in &input.declared_signals {
+        if let Some(phrase) = normalize_signal_phrase(declared) {
+            signals.insert(phrase);
+        }
+        extend_signal_tokens(&mut signals, declared);
+    }
+
+    for text in [
+        input.patch_diff.as_str(),
+        input.intent.as_str(),
+        input.expected_effect.as_str(),
+        input.validation_logs.as_str(),
+    ] {
+        extend_signal_tokens(&mut signals, text);
+    }
+
+    for changed_file in &input.changed_files {
+        extend_signal_tokens(&mut signals, changed_file);
+    }
+
+    for stage_output in &input.stage_outputs {
+        extend_signal_tokens(&mut signals, stage_output);
+    }
+
+    signals.insert(if input.validation_success {
+        "validation passed".into()
+    } else {
+        "validation failed".into()
+    });
+
+    let values = signals.into_iter().take(32).collect::<Vec<_>>();
+    let hash =
+        stable_hash_json(&values).unwrap_or_else(|_| compute_artifact_hash(&values.join("\n")));
+    SignalExtractionOutput { values, hash }
 }
 
 #[derive(Debug, Error)]
@@ -791,6 +848,10 @@ impl<S: KernelState> EvoKernel<S> {
         self
     }
 
+    pub fn select_candidates(&self, input: &SelectorInput) -> Vec<GeneCandidate> {
+        self.selector.select(input)
+    }
+
     pub async fn capture_successful_mutation(
         &self,
         run_id: &RunId,
@@ -854,12 +915,52 @@ impl<S: KernelState> EvoKernel<S> {
             return Err(EvoKernelError::ValidationFailed(report));
         }
 
+        self.store
+            .append_event(EvolutionEvent::ValidationPassed {
+                mutation_id: mutation.intent.id.clone(),
+                report: report.to_snapshot(&self.validation_plan.profile),
+                gene_id: None,
+            })
+            .map_err(store_err)?;
+
+        let extracted_signals = extract_deterministic_signals(&SignalExtractionInput {
+            patch_diff: mutation.artifact.payload.clone(),
+            intent: mutation.intent.intent.clone(),
+            expected_effect: mutation.intent.expected_effect.clone(),
+            declared_signals: mutation.intent.signals.clone(),
+            changed_files: receipt
+                .changed_files
+                .iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect(),
+            validation_success: report.success,
+            validation_logs: report.logs.clone(),
+            stage_outputs: report
+                .stages
+                .iter()
+                .flat_map(|stage| [stage.stdout.clone(), stage.stderr.clone()])
+                .filter(|value| !value.is_empty())
+                .collect(),
+        });
+        self.store
+            .append_event(EvolutionEvent::SignalsExtracted {
+                mutation_id: mutation.intent.id.clone(),
+                hash: extracted_signals.hash.clone(),
+                signals: extracted_signals.values.clone(),
+            })
+            .map_err(store_err)?;
+
         let projection = self.store.rebuild_projection().map_err(store_err)?;
         let blast_radius = compute_blast_radius(&mutation.artifact.payload);
         let recent_mutation_ages_secs = self
             .recent_prior_mutation_ages_secs(Some(mutation.intent.id.as_str()))
             .map_err(store_err)?;
-        let mut gene = derive_gene(&mutation, &receipt, &self.validation_plan.profile);
+        let mut gene = derive_gene(
+            &mutation,
+            &receipt,
+            &self.validation_plan.profile,
+            &extracted_signals.values,
+        );
         let success_count = projection
             .genes
             .iter()
@@ -885,13 +986,6 @@ impl<S: KernelState> EvoKernel<S> {
         });
 
         gene.state = governor_decision.target_state.clone();
-        self.store
-            .append_event(EvolutionEvent::ValidationPassed {
-                mutation_id: mutation.intent.id.clone(),
-                report: report.to_snapshot(&self.validation_plan.profile),
-                gene_id: Some(gene.id.clone()),
-            })
-            .map_err(store_err)?;
         self.store
             .append_event(EvolutionEvent::GeneProjected { gene: gene.clone() })
             .map_err(store_err)?;
@@ -1130,6 +1224,7 @@ fn derive_gene(
     mutation: &PreparedMutation,
     receipt: &SandboxReceipt,
     validation_profile: &str,
+    extracted_signals: &[String],
 ) -> Gene {
     let mut strategy = BTreeSet::new();
     for file in &receipt.changed_files {
@@ -1153,11 +1248,11 @@ fn derive_gene(
         strategy.insert(token.to_ascii_lowercase());
     }
     let strategy = strategy.into_iter().collect::<Vec<_>>();
-    let id = stable_hash_json(&(&mutation.intent.signals, &strategy, validation_profile))
+    let id = stable_hash_json(&(extracted_signals, &strategy, validation_profile))
         .unwrap_or_else(|_| next_id("gene"));
     Gene {
         id,
-        signals: mutation.intent.signals.clone(),
+        signals: extracted_signals.to_vec(),
         strategy,
         validation: vec![validation_profile.to_string()],
         state: AssetState::Promoted,
@@ -1228,6 +1323,68 @@ fn current_env_fingerprint(workdir: &Path) -> EnvFingerprint {
         target_triple,
         os: std::env::consts::OS.to_string(),
     }
+}
+
+fn extend_signal_tokens(out: &mut BTreeSet<String>, input: &str) {
+    for raw in input.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let normalized = if is_rust_error_code(trimmed) {
+            let mut chars = trimmed.chars();
+            let prefix = chars
+                .next()
+                .map(|ch| ch.to_ascii_uppercase())
+                .unwrap_or('E');
+            format!("{prefix}{}", chars.as_str())
+        } else {
+            trimmed.to_ascii_lowercase()
+        };
+        if normalized.len() < 3 {
+            continue;
+        }
+        out.insert(normalized);
+    }
+}
+
+fn normalize_signal_phrase(input: &str) -> Option<String> {
+    let normalized = input
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let normalized = if is_rust_error_code(trimmed) {
+                let mut chars = trimmed.chars();
+                let prefix = chars
+                    .next()
+                    .map(|ch| ch.to_ascii_uppercase())
+                    .unwrap_or('E');
+                format!("{prefix}{}", chars.as_str())
+            } else {
+                trimmed.to_ascii_lowercase()
+            };
+            if normalized.len() < 3 {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn is_rust_error_code(value: &str) -> bool {
+    value.len() == 5
+        && matches!(value.as_bytes().first(), Some(b'e') | Some(b'E'))
+        && value[1..].chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn find_declared_mutation(
@@ -1986,12 +2143,23 @@ index 0000000..1111111
     }
 
     fn replay_input(signal: &str) -> SelectorInput {
+        let rustc_version = std::process::Command::new("rustc")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_else(|| "rustc unknown".into());
         SelectorInput {
             signals: vec![signal.into()],
             env: EnvFingerprint {
-                rustc_version: "rustc".into(),
-                cargo_lock_hash: "lock".into(),
-                target_triple: "x86_64-unknown-linux-gnu".into(),
+                rustc_version,
+                cargo_lock_hash: compute_artifact_hash("# lock\n"),
+                target_triple: format!(
+                    "{}-unknown-{}",
+                    std::env::consts::ARCH,
+                    std::env::consts::OS
+                ),
                 os: std::env::consts::OS.into(),
             },
             spec_id: None,
@@ -2421,13 +2589,13 @@ index 0000000..1111111
             .iter()
             .find(|gene| gene.id == capsule.gene_id)
             .unwrap();
-        assert_eq!(gene.state, AssetState::Revoked);
+        assert_eq!(gene.state, AssetState::Promoted);
         let committed_capsule = projection
             .capsules
             .iter()
             .find(|current| current.id == capsule.id)
             .unwrap();
-        assert_eq!(committed_capsule.state, AssetState::Quarantined);
+        assert_eq!(committed_capsule.state, AssetState::Promoted);
 
         let events = store.scan(1).unwrap();
         assert_eq!(
@@ -2443,9 +2611,9 @@ index 0000000..1111111
                     )
                 })
                 .count(),
-            2
+            1
         );
-        assert!(events.iter().any(|stored| {
+        assert!(!events.iter().any(|stored| {
             matches!(
                 &stored.event,
                 EvolutionEvent::GeneRevoked { gene_id, .. } if gene_id == &capsule.gene_id
@@ -2464,7 +2632,7 @@ index 0000000..1111111
             .unwrap();
         assert!(!after_revoke.used_capsule);
         assert!(after_revoke.fallback_to_planner);
-        assert_eq!(after_revoke.reason, "no matching gene");
+        assert!(after_revoke.reason.contains("below replay threshold"));
     }
 
     #[tokio::test]

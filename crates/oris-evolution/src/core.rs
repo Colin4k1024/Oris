@@ -150,6 +150,11 @@ pub enum EvolutionEvent {
         patch_hash: String,
         changed_files: Vec<String>,
     },
+    SignalsExtracted {
+        mutation_id: MutationId,
+        hash: String,
+        signals: Vec<String>,
+    },
     MutationRejected {
         mutation_id: MutationId,
         reason: String,
