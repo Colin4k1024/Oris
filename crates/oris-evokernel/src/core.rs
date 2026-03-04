@@ -677,11 +677,21 @@ pub enum ReplayError {
 pub trait ReplayExecutor: Send + Sync {
     async fn try_replay(
         &self,
-        run_id: &RunId,
         input: &SelectorInput,
         policy: &SandboxPolicy,
         validation: &ValidationPlan,
     ) -> Result<ReplayDecision, ReplayError>;
+
+    async fn try_replay_for_run(
+        &self,
+        run_id: &RunId,
+        input: &SelectorInput,
+        policy: &SandboxPolicy,
+        validation: &ValidationPlan,
+    ) -> Result<ReplayDecision, ReplayError> {
+        let _ = run_id;
+        self.try_replay(input, policy, validation).await
+    }
 }
 
 pub struct StoreReplayExecutor {
@@ -699,7 +709,29 @@ pub struct StoreReplayExecutor {
 impl ReplayExecutor for StoreReplayExecutor {
     async fn try_replay(
         &self,
+        input: &SelectorInput,
+        policy: &SandboxPolicy,
+        validation: &ValidationPlan,
+    ) -> Result<ReplayDecision, ReplayError> {
+        self.try_replay_inner(None, input, policy, validation).await
+    }
+
+    async fn try_replay_for_run(
+        &self,
         run_id: &RunId,
+        input: &SelectorInput,
+        policy: &SandboxPolicy,
+        validation: &ValidationPlan,
+    ) -> Result<ReplayDecision, ReplayError> {
+        self.try_replay_inner(Some(run_id), input, policy, validation)
+            .await
+    }
+}
+
+impl StoreReplayExecutor {
+    async fn try_replay_inner(
+        &self,
+        replay_run_id: Option<&RunId>,
         input: &SelectorInput,
         policy: &SandboxPolicy,
         validation: &ValidationPlan,
@@ -831,7 +863,8 @@ impl ReplayExecutor for StoreReplayExecutor {
             .append_event(EvolutionEvent::CapsuleReused {
                 capsule_id: capsule.id.clone(),
                 gene_id: capsule.gene_id.clone(),
-                run_id: run_id.clone(),
+                run_id: capsule.run_id.clone(),
+                replay_run_id: replay_run_id.cloned(),
             })
             .map_err(|err| ReplayError::Store(err.to_string()))?;
         self.record_reuse_settlement(remote_publisher.as_deref(), true);
@@ -841,15 +874,13 @@ impl ReplayExecutor for StoreReplayExecutor {
             capsule_id: Some(capsule.id),
             fallback_to_planner: false,
             reason: if exact_match {
-                "replayed via exact-match cold-start lookup".into()
+                "replayed via cold-start lookup".into()
             } else {
                 "replayed via selector".into()
             },
         })
     }
-}
 
-impl StoreReplayExecutor {
     fn rerank_with_reputation_bias(&self, candidates: &mut [GeneCandidate]) {
         let Some(ledger) = self.economics.as_ref() else {
             return;
@@ -1608,7 +1639,7 @@ impl<S: KernelState> EvoKernel<S> {
             stake_policy: self.stake_policy.clone(),
         };
         executor
-            .try_replay(run_id, &input, &self.sandbox_policy, &self.validation_plan)
+            .try_replay_for_run(run_id, &input, &self.sandbox_policy, &self.validation_plan)
             .await
             .map_err(|err| EvoKernelError::Validation(err.to_string()))
     }
@@ -2171,11 +2202,14 @@ fn quarantined_remote_exact_match_candidates(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let signal_set = input
+    let normalized_signals = input
         .signals
         .iter()
-        .map(|signal| signal.to_ascii_lowercase())
-        .collect::<BTreeSet<_>>();
+        .filter_map(|signal| normalize_signal_phrase(signal))
+        .collect::<Vec<_>>();
+    if normalized_signals.is_empty() {
+        return Vec::new();
+    }
     let mut candidates = projection
         .genes
         .into_iter()
@@ -2196,48 +2230,57 @@ fn quarantined_remote_exact_match_candidates(
                     return None;
                 }
             }
-            let gene_signals = gene
+            let matched_signal_count = gene
                 .signals
                 .iter()
-                .map(|signal| signal.to_ascii_lowercase())
-                .collect::<BTreeSet<_>>();
-            if gene_signals == signal_set {
-                let mut matched_capsules = capsules
-                    .iter()
-                    .filter(|capsule| {
-                        capsule.gene_id == gene.id
-                            && capsule.state == AssetState::Quarantined
-                            && remote_asset_ids.contains(&capsule.id)
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                matched_capsules.sort_by(|left, right| {
-                    replay_environment_match_factor(&input.env, &right.env)
-                        .partial_cmp(&replay_environment_match_factor(&input.env, &left.env))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            right
-                                .confidence
-                                .partial_cmp(&left.confidence)
-                                .unwrap_or(std::cmp::Ordering::Equal)
+                .filter(|candidate| {
+                    normalize_signal_phrase(candidate)
+                        .map(|candidate| {
+                            normalized_signals.iter().any(|signal| {
+                                candidate.contains(signal) || signal.contains(&candidate)
+                            })
                         })
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-                if matched_capsules.is_empty() {
-                    None
-                } else {
-                    let score = matched_capsules
-                        .first()
-                        .map(|capsule| replay_environment_match_factor(&input.env, &capsule.env))
-                        .unwrap_or(0.0);
-                    Some(GeneCandidate {
-                        gene,
-                        score,
-                        capsules: matched_capsules,
+                        .unwrap_or(false)
+                })
+                .count();
+            if matched_signal_count == 0 {
+                return None;
+            }
+
+            let mut matched_capsules = capsules
+                .iter()
+                .filter(|capsule| {
+                    capsule.gene_id == gene.id
+                        && capsule.state == AssetState::Quarantined
+                        && remote_asset_ids.contains(&capsule.id)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            matched_capsules.sort_by(|left, right| {
+                replay_environment_match_factor(&input.env, &right.env)
+                    .partial_cmp(&replay_environment_match_factor(&input.env, &left.env))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        right
+                            .confidence
+                            .partial_cmp(&left.confidence)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                }
-            } else {
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            if matched_capsules.is_empty() {
                 None
+            } else {
+                let overlap = matched_signal_count as f32 / normalized_signals.len() as f32;
+                let env_score = matched_capsules
+                    .first()
+                    .map(|capsule| replay_environment_match_factor(&input.env, &capsule.env))
+                    .unwrap_or(0.0);
+                Some(GeneCandidate {
+                    gene,
+                    score: overlap.max(env_score),
+                    capsules: matched_capsules,
+                })
             }
         })
         .collect::<Vec<_>>();
@@ -2287,22 +2330,78 @@ fn export_promoted_assets_from_store(
     sender_id: impl Into<String>,
 ) -> Result<EvolutionEnvelope, EvoKernelError> {
     let projection = store.rebuild_projection().map_err(store_err)?;
-    let mut assets = Vec::new();
-    for gene in projection
+    let genes = projection
         .genes
         .into_iter()
         .filter(|gene| gene.state == AssetState::Promoted)
-    {
-        assets.push(NetworkAsset::Gene { gene });
-    }
-    for capsule in projection
+        .collect::<Vec<_>>();
+    let capsules = projection
         .capsules
         .into_iter()
         .filter(|capsule| capsule.state == AssetState::Promoted)
-    {
+        .collect::<Vec<_>>();
+    let assets = replay_export_assets(store, genes, capsules)?;
+    Ok(EvolutionEnvelope::publish(sender_id, assets))
+}
+
+fn replay_export_assets(
+    store: &dyn EvolutionStore,
+    genes: Vec<Gene>,
+    capsules: Vec<Capsule>,
+) -> Result<Vec<NetworkAsset>, EvoKernelError> {
+    let mutation_ids = capsules
+        .iter()
+        .map(|capsule| capsule.mutation_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut assets = replay_export_events_for_mutations(store, &mutation_ids)?;
+    for gene in genes {
+        assets.push(NetworkAsset::Gene { gene });
+    }
+    for capsule in capsules {
         assets.push(NetworkAsset::Capsule { capsule });
     }
-    Ok(EvolutionEnvelope::publish(sender_id, assets))
+    Ok(assets)
+}
+
+fn replay_export_events_for_mutations(
+    store: &dyn EvolutionStore,
+    mutation_ids: &BTreeSet<String>,
+) -> Result<Vec<NetworkAsset>, EvoKernelError> {
+    if mutation_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut assets = Vec::new();
+    let mut seen_mutations = BTreeSet::new();
+    let mut seen_spec_links = BTreeSet::new();
+    for stored in store.scan(1).map_err(store_err)? {
+        match stored.event {
+            EvolutionEvent::MutationDeclared { mutation }
+                if mutation_ids.contains(&mutation.intent.id)
+                    && seen_mutations.insert(mutation.intent.id.clone()) =>
+            {
+                assets.push(NetworkAsset::EvolutionEvent {
+                    event: EvolutionEvent::MutationDeclared { mutation },
+                });
+            }
+            EvolutionEvent::SpecLinked {
+                mutation_id,
+                spec_id,
+            } if mutation_ids.contains(&mutation_id)
+                && seen_spec_links.insert((mutation_id.clone(), spec_id.clone())) =>
+            {
+                assets.push(NetworkAsset::EvolutionEvent {
+                    event: EvolutionEvent::SpecLinked {
+                        mutation_id,
+                        spec_id,
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+
+    Ok(assets)
 }
 
 fn import_remote_envelope_into_store(
@@ -2449,13 +2548,7 @@ fn fetch_assets_from_store(
         .filter(|capsule| matched_gene_ids.contains(&capsule.gene_id))
         .collect();
 
-    let mut assets = Vec::new();
-    for gene in matched_genes {
-        assets.push(NetworkAsset::Gene { gene });
-    }
-    for capsule in matched_capsules {
-        assets.push(NetworkAsset::Capsule { capsule });
-    }
+    let assets = replay_export_assets(store, matched_genes, matched_capsules)?;
 
     Ok(FetchResponse {
         sender_id: responder_id.into(),
@@ -3317,7 +3410,51 @@ index 0000000..1111111
         assert_eq!(decision.capsule_id, Some(capsule.id));
         assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
             &stored.event,
-            EvolutionEvent::CapsuleReused { run_id, .. } if run_id == &replay_run_id
+            EvolutionEvent::CapsuleReused {
+                run_id,
+                replay_run_id: Some(current_replay_run_id),
+                ..
+            } if run_id == "run-2" && current_replay_run_id == &replay_run_id
+        )));
+    }
+
+    #[tokio::test]
+    async fn legacy_replay_executor_api_preserves_original_capsule_run_id() {
+        let capture_run_id = "run-legacy-capture".to_string();
+        let (evo, store) = build_test_evo("replay-legacy", &capture_run_id, command_validator());
+        let capsule = evo
+            .capture_successful_mutation(&capture_run_id, sample_mutation())
+            .await
+            .unwrap();
+        let executor = StoreReplayExecutor {
+            sandbox: evo.sandbox.clone(),
+            validator: evo.validator.clone(),
+            store: evo.store.clone(),
+            selector: evo.selector.clone(),
+            governor: evo.governor.clone(),
+            economics: Some(evo.economics.clone()),
+            remote_publishers: Some(evo.remote_publishers.clone()),
+            stake_policy: evo.stake_policy.clone(),
+        };
+
+        let decision = executor
+            .try_replay(
+                &replay_input("missing readme"),
+                &evo.sandbox_policy,
+                &evo.validation_plan,
+            )
+            .await
+            .unwrap();
+
+        assert!(decision.used_capsule);
+        assert_eq!(decision.capsule_id, Some(capsule.id));
+        assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+            &stored.event,
+            EvolutionEvent::CapsuleReused {
+                run_id,
+                replay_run_id: None,
+                ..
+            } if run_id == &capture_run_id
         )));
     }
 
@@ -3465,7 +3602,87 @@ index 0000000..1111111
         assert_eq!(released_capsule.state, AssetState::Promoted);
         let exported_after_replay =
             export_promoted_assets_from_store(store.as_ref(), "node-local").unwrap();
-        assert_eq!(exported_after_replay.assets.len(), 2);
+        assert_eq!(exported_after_replay.assets.len(), 3);
+        assert!(exported_after_replay.assets.iter().any(|asset| matches!(
+            asset,
+            NetworkAsset::EvolutionEvent {
+                event: EvolutionEvent::MutationDeclared { .. }
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn publish_local_assets_include_mutation_payload_for_remote_replay() {
+        let (source, source_store) = build_test_evo(
+            "remote-publish-export",
+            "run-remote-publish-export",
+            command_validator(),
+        );
+        source
+            .capture_successful_mutation(&"run-remote-publish-export".into(), sample_mutation())
+            .await
+            .unwrap();
+        let envelope = EvolutionNetworkNode::new(source_store.clone())
+            .publish_local_assets("node-source")
+            .unwrap();
+        assert!(envelope.assets.iter().any(|asset| matches!(
+            asset,
+            NetworkAsset::EvolutionEvent {
+                event: EvolutionEvent::MutationDeclared { mutation }
+            } if mutation.intent.id == "mutation-1"
+        )));
+
+        let (remote, _) = build_test_evo(
+            "remote-publish-import",
+            "run-remote-publish-import",
+            command_validator(),
+        );
+        remote.import_remote_envelope(&envelope).unwrap();
+
+        let decision = remote
+            .replay_or_fallback(replay_input("missing readme"))
+            .await
+            .unwrap();
+
+        assert!(decision.used_capsule);
+        assert!(!decision.fallback_to_planner);
+    }
+
+    #[tokio::test]
+    async fn fetch_assets_include_mutation_payload_for_remote_replay() {
+        let (evo, store) = build_test_evo(
+            "remote-fetch-export",
+            "run-remote-fetch",
+            command_validator(),
+        );
+        evo.capture_successful_mutation(&"run-remote-fetch".into(), sample_mutation())
+            .await
+            .unwrap();
+
+        let response = EvolutionNetworkNode::new(store.clone())
+            .fetch_assets(
+                "node-source",
+                &FetchQuery {
+                    sender_id: "node-client".into(),
+                    signals: vec!["missing readme".into()],
+                },
+            )
+            .unwrap();
+
+        assert!(response.assets.iter().any(|asset| matches!(
+            asset,
+            NetworkAsset::EvolutionEvent {
+                event: EvolutionEvent::MutationDeclared { mutation }
+            } if mutation.intent.id == "mutation-1"
+        )));
+        assert!(response
+            .assets
+            .iter()
+            .any(|asset| matches!(asset, NetworkAsset::Gene { .. })));
+        assert!(response
+            .assets
+            .iter()
+            .any(|asset| matches!(asset, NetworkAsset::Capsule { .. })));
     }
 
     #[test]

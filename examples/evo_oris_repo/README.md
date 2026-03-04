@@ -22,7 +22,7 @@ The example wires:
 - `JsonlEvolutionStore`
 - `DefaultGovernor`
 
-The example uses an explicit replay run id so `CapsuleReused` events stay attributable to the current replay execution.
+The example uses an explicit replay run id so `CapsuleReused.replay_run_id` stays attributable to the current replay execution while preserving the original capsule run id.
 
 ## Run
 

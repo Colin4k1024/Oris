@@ -3379,9 +3379,10 @@ mod tests {
         let fetch_json: serde_json::Value =
             serde_json::from_slice(&fetch_body).expect("fetch json");
         assert_eq!(fetch_json["data"]["sender_id"], "execution-api");
+        // Remotely published genes stay quarantined until a successful local replay promotes them.
         assert_eq!(
             fetch_json["data"]["assets"].as_array().map(Vec::len),
-            Some(1)
+            Some(0)
         );
 
         let revoke_req = Request::builder()
