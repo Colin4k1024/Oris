@@ -84,3 +84,21 @@ pub struct ExecutionFeedback {
     pub asset_state: Option<String>,
     pub summary: String,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplayPlannerDirective {
+    SkipPlanner,
+    PlanFallback,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayFeedback {
+    pub used_capsule: bool,
+    pub capsule_id: Option<String>,
+    pub planner_directive: ReplayPlannerDirective,
+    pub reasoning_steps_avoided: u64,
+    pub fallback_reason: Option<String>,
+    pub task_class_id: String,
+    pub task_label: String,
+    pub summary: String,
+}

@@ -17,6 +17,7 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::prepare_mutation;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::capture_from_proposal;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::feedback_for_agent;
+    let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::replay_feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::coordinate;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::bootstrap_if_empty;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_candidates;
@@ -39,6 +40,8 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::MutationProposal>();
     assert_type::<oris_runtime::agent_contract::ProposalTarget>();
     assert_type::<oris_runtime::agent_contract::ExecutionFeedback>();
+    assert_type::<oris_runtime::agent_contract::ReplayFeedback>();
+    assert_type::<oris_runtime::agent_contract::ReplayPlannerDirective>();
     assert_type::<oris_runtime::economics::EconomicsSignal>();
     assert_type::<oris_runtime::economics::StakePolicy>();
     assert_type::<oris_runtime::evolution::SignalExtractionInput>();

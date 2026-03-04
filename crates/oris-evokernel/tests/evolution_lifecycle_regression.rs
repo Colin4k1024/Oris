@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
+use oris_agent_contract::ReplayPlannerDirective;
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
     EvoEnvFingerprint, EvoEvolutionStore, EvoKernel, EvoSandboxPolicy, EvoSelectorInput,
@@ -496,6 +497,54 @@ async fn single_task_learns_and_replays_on_second_run() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
+    let (workspace, _store, evo) = test_evo("replay-feedback");
+    let signals = vec!["missing readme".to_string()];
+
+    let cold_start = evo
+        .replay_or_fallback(replay_input("missing readme", &workspace))
+        .await
+        .unwrap();
+    let cold_feedback = EvoKernel::<TestState>::replay_feedback_for_agent(&signals, &cold_start);
+
+    assert_eq!(
+        cold_feedback.planner_directive,
+        ReplayPlannerDirective::PlanFallback
+    );
+    assert_eq!(cold_feedback.reasoning_steps_avoided, 0);
+    assert_eq!(
+        cold_feedback.fallback_reason.as_deref(),
+        Some("no matching gene")
+    );
+    assert!(!cold_feedback.task_class_id.is_empty());
+    assert_eq!(cold_feedback.task_label, "missing readme");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-replay-feedback".to_string(),
+            sample_mutation_with_id("mutation-replay-feedback"),
+        )
+        .await
+        .unwrap();
+    let replay = evo
+        .replay_or_fallback(replay_input("missing readme", &workspace))
+        .await
+        .unwrap();
+    let replay_feedback = EvoKernel::<TestState>::replay_feedback_for_agent(&signals, &replay);
+
+    assert_eq!(
+        replay_feedback.planner_directive,
+        ReplayPlannerDirective::SkipPlanner
+    );
+    assert_eq!(replay_feedback.reasoning_steps_avoided, 1);
+    assert!(replay_feedback.used_capsule);
+    assert_eq!(replay_feedback.capsule_id, Some(captured.id));
+    assert_eq!(replay_feedback.fallback_reason, None);
+    assert_eq!(replay_feedback.task_class_id, cold_feedback.task_class_id);
+    assert_eq!(replay_feedback.task_label, "missing readme");
 }
 
 #[tokio::test]
