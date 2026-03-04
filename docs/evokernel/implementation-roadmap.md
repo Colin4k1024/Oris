@@ -42,6 +42,14 @@ Before pushing further into autonomy, the next implementation priority order is:
 4. Move toward supervised DEVLOOP orchestration for bounded development tasks.
 5. Harden federated evolution with stronger attribution, economics, and revocation propagation.
 
+The current stage-tracking issue split is:
+
+- `#87` `EVO-01`: expand deterministic task-class replay matching beyond normalized signals
+- `#88` `EVO-02`: add a continuous confidence lifecycle for evolution assets
+- `#89` `EVO-03`: close the replay feedback loop for agent callers
+- `#90` `EVO-04`: introduce supervised DEVLOOP orchestration for bounded tasks
+- `#91` `EVO-05`: harden federated evolution attribution, economics, and revocation
+
 ## 1. Objective
 
 Convert the architecture into a production-ready self-evolving kernel.
