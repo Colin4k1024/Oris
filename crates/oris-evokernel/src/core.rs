@@ -14,10 +14,11 @@ use oris_agent_contract::{
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
-    compute_artifact_hash, next_id, stable_hash_json, AssetState, BlastRadius, CandidateSource,
-    Capsule, CapsuleId, EnvFingerprint, EvolutionError, EvolutionEvent, EvolutionProjection,
-    EvolutionStore, Gene, GeneCandidate, MutationId, PreparedMutation, Selector, SelectorInput,
-    StoreBackedSelector, StoredEvolutionEvent, ValidationSnapshot,
+    compute_artifact_hash, next_id, rebuild_projection_from_events, stable_hash_json, AssetState,
+    BlastRadius, CandidateSource, Capsule, CapsuleId, EnvFingerprint, EvolutionError,
+    EvolutionEvent, EvolutionProjection, EvolutionStore, Gene, GeneCandidate, MutationId,
+    PreparedMutation, Selector, SelectorInput, StoreBackedSelector, StoredEvolutionEvent,
+    ValidationSnapshot,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -2206,6 +2207,8 @@ fn quarantined_remote_exact_match_candidates(
         .signals
         .iter()
         .filter_map(|signal| normalize_signal_phrase(signal))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
     if normalized_signals.is_empty() {
         return Vec::new();
@@ -2230,20 +2233,20 @@ fn quarantined_remote_exact_match_candidates(
                     return None;
                 }
             }
-            let matched_signal_count = gene
+            let normalized_gene_signals = gene
                 .signals
                 .iter()
-                .filter(|candidate| {
-                    normalize_signal_phrase(candidate)
-                        .map(|candidate| {
-                            normalized_signals.iter().any(|signal| {
-                                candidate.contains(signal) || signal.contains(&candidate)
-                            })
-                        })
-                        .unwrap_or(false)
+                .filter_map(|candidate| normalize_signal_phrase(candidate))
+                .collect::<Vec<_>>();
+            let matched_query_count = normalized_signals
+                .iter()
+                .filter(|signal| {
+                    normalized_gene_signals.iter().any(|candidate| {
+                        candidate.contains(signal.as_str()) || signal.contains(candidate)
+                    })
                 })
                 .count();
-            if matched_signal_count == 0 {
+            if matched_query_count == 0 {
                 return None;
             }
 
@@ -2271,7 +2274,7 @@ fn quarantined_remote_exact_match_candidates(
             if matched_capsules.is_empty() {
                 None
             } else {
-                let overlap = matched_signal_count as f32 / normalized_signals.len() as f32;
+                let overlap = matched_query_count as f32 / normalized_signals.len() as f32;
                 let env_score = matched_capsules
                     .first()
                     .map(|capsule| replay_environment_match_factor(&input.env, &capsule.env))
@@ -2329,7 +2332,7 @@ fn export_promoted_assets_from_store(
     store: &dyn EvolutionStore,
     sender_id: impl Into<String>,
 ) -> Result<EvolutionEnvelope, EvoKernelError> {
-    let projection = store.rebuild_projection().map_err(store_err)?;
+    let (events, projection) = scan_projection(store)?;
     let genes = projection
         .genes
         .into_iter()
@@ -2340,60 +2343,70 @@ fn export_promoted_assets_from_store(
         .into_iter()
         .filter(|capsule| capsule.state == AssetState::Promoted)
         .collect::<Vec<_>>();
-    let assets = replay_export_assets(store, genes, capsules)?;
+    let assets = replay_export_assets(&events, genes, capsules);
     Ok(EvolutionEnvelope::publish(sender_id, assets))
 }
 
-fn replay_export_assets(
+fn scan_projection(
     store: &dyn EvolutionStore,
+) -> Result<(Vec<StoredEvolutionEvent>, EvolutionProjection), EvoKernelError> {
+    let events = store.scan(1).map_err(store_err)?;
+    let projection = rebuild_projection_from_events(&events);
+    Ok((events, projection))
+}
+
+fn replay_export_assets(
+    events: &[StoredEvolutionEvent],
     genes: Vec<Gene>,
     capsules: Vec<Capsule>,
-) -> Result<Vec<NetworkAsset>, EvoKernelError> {
+) -> Vec<NetworkAsset> {
     let mutation_ids = capsules
         .iter()
         .map(|capsule| capsule.mutation_id.clone())
         .collect::<BTreeSet<_>>();
-    let mut assets = replay_export_events_for_mutations(store, &mutation_ids)?;
+    let mut assets = replay_export_events_for_mutations(events, &mutation_ids);
     for gene in genes {
         assets.push(NetworkAsset::Gene { gene });
     }
     for capsule in capsules {
         assets.push(NetworkAsset::Capsule { capsule });
     }
-    Ok(assets)
+    assets
 }
 
 fn replay_export_events_for_mutations(
-    store: &dyn EvolutionStore,
+    events: &[StoredEvolutionEvent],
     mutation_ids: &BTreeSet<String>,
-) -> Result<Vec<NetworkAsset>, EvoKernelError> {
+) -> Vec<NetworkAsset> {
     if mutation_ids.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let mut assets = Vec::new();
     let mut seen_mutations = BTreeSet::new();
     let mut seen_spec_links = BTreeSet::new();
-    for stored in store.scan(1).map_err(store_err)? {
-        match stored.event {
+    for stored in events {
+        match &stored.event {
             EvolutionEvent::MutationDeclared { mutation }
-                if mutation_ids.contains(&mutation.intent.id)
+                if mutation_ids.contains(mutation.intent.id.as_str())
                     && seen_mutations.insert(mutation.intent.id.clone()) =>
             {
                 assets.push(NetworkAsset::EvolutionEvent {
-                    event: EvolutionEvent::MutationDeclared { mutation },
+                    event: EvolutionEvent::MutationDeclared {
+                        mutation: mutation.clone(),
+                    },
                 });
             }
             EvolutionEvent::SpecLinked {
                 mutation_id,
                 spec_id,
-            } if mutation_ids.contains(&mutation_id)
+            } if mutation_ids.contains(mutation_id.as_str())
                 && seen_spec_links.insert((mutation_id.clone(), spec_id.clone())) =>
             {
                 assets.push(NetworkAsset::EvolutionEvent {
                     event: EvolutionEvent::SpecLinked {
-                        mutation_id,
-                        spec_id,
+                        mutation_id: mutation_id.clone(),
+                        spec_id: spec_id.clone(),
                     },
                 });
             }
@@ -2401,7 +2414,7 @@ fn replay_export_events_for_mutations(
         }
     }
 
-    Ok(assets)
+    assets
 }
 
 fn import_remote_envelope_into_store(
@@ -2516,7 +2529,7 @@ fn fetch_assets_from_store(
     responder_id: impl Into<String>,
     query: &FetchQuery,
 ) -> Result<FetchResponse, EvoKernelError> {
-    let projection = store.rebuild_projection().map_err(store_err)?;
+    let (events, projection) = scan_projection(store)?;
     let normalized_signals: Vec<String> = query
         .signals
         .iter()
@@ -2548,7 +2561,7 @@ fn fetch_assets_from_store(
         .filter(|capsule| matched_gene_ids.contains(&capsule.gene_id))
         .collect();
 
-    let assets = replay_export_assets(store, matched_genes, matched_capsules)?;
+    let assets = replay_export_assets(&events, matched_genes, matched_capsules);
 
     Ok(FetchResponse {
         sender_id: responder_id.into(),
@@ -3095,6 +3108,89 @@ index 0000000..1111111
         )
     }
 
+    fn remote_publish_envelope_with_signals(
+        sender_id: &str,
+        run_id: &str,
+        gene_id: &str,
+        capsule_id: &str,
+        mutation_id: &str,
+        mutation_signals: Vec<String>,
+        gene_signals: Vec<String>,
+        file_name: &str,
+        line: &str,
+        env: EnvFingerprint,
+    ) -> EvolutionEnvelope {
+        let mutation = prepare_mutation(
+            MutationIntent {
+                id: mutation_id.into(),
+                intent: format!("add {file_name}"),
+                target: MutationTarget::Paths {
+                    allow: vec![file_name.into()],
+                },
+                expected_effect: "replay should still validate".into(),
+                risk: RiskLevel::Low,
+                signals: mutation_signals,
+                spec_id: None,
+            },
+            format!(
+                "\
+diff --git a/{file_name} b/{file_name}
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/{file_name}
+@@ -0,0 +1 @@
++{line}
+"
+            ),
+            Some("HEAD".into()),
+        );
+        let gene = Gene {
+            id: gene_id.into(),
+            signals: gene_signals,
+            strategy: vec![file_name.into()],
+            validation: vec!["test".into()],
+            state: AssetState::Promoted,
+        };
+        let capsule = Capsule {
+            id: capsule_id.into(),
+            gene_id: gene_id.into(),
+            mutation_id: mutation_id.into(),
+            run_id: run_id.into(),
+            diff_hash: mutation.artifact.content_hash.clone(),
+            confidence: 0.9,
+            env,
+            outcome: Outcome {
+                success: true,
+                validation_profile: "test".into(),
+                validation_duration_ms: 1,
+                changed_files: vec![file_name.into()],
+                validator_hash: "validator-hash".into(),
+                lines_changed: 1,
+                replay_verified: false,
+            },
+            state: AssetState::Promoted,
+        };
+        EvolutionEnvelope::publish(
+            sender_id,
+            vec![
+                NetworkAsset::EvolutionEvent {
+                    event: EvolutionEvent::MutationDeclared { mutation },
+                },
+                NetworkAsset::Gene { gene: gene.clone() },
+                NetworkAsset::Capsule {
+                    capsule: capsule.clone(),
+                },
+                NetworkAsset::EvolutionEvent {
+                    event: EvolutionEvent::CapsuleReleased {
+                        capsule_id: capsule.id.clone(),
+                        state: AssetState::Promoted,
+                    },
+                },
+            ],
+        )
+    }
+
     struct FixedValidator {
         success: bool,
     }
@@ -3540,6 +3636,54 @@ index 0000000..1111111
         assert!(decision.used_capsule);
         assert_eq!(decision.capsule_id, Some("capsule-a".into()));
         assert!(!decision.fallback_to_planner);
+    }
+
+    #[test]
+    fn remote_cold_start_scoring_caps_distinct_query_coverage() {
+        let (evo, _) = build_test_evo("remote-score", "run-remote-score", command_validator());
+        let input = replay_input("missing readme");
+
+        let exact = remote_publish_envelope_with_signals(
+            "node-exact",
+            "run-remote-exact",
+            "gene-exact",
+            "capsule-exact",
+            "mutation-exact",
+            vec!["missing readme".into()],
+            vec!["missing readme".into()],
+            "EXACT.md",
+            "# exact",
+            input.env.clone(),
+        );
+        let overlapping = remote_publish_envelope_with_signals(
+            "node-overlap",
+            "run-remote-overlap",
+            "gene-overlap",
+            "capsule-overlap",
+            "mutation-overlap",
+            vec!["missing readme".into()],
+            vec!["missing".into(), "readme".into()],
+            "OVERLAP.md",
+            "# overlap",
+            input.env.clone(),
+        );
+
+        evo.import_remote_envelope(&exact).unwrap();
+        evo.import_remote_envelope(&overlapping).unwrap();
+
+        let candidates = quarantined_remote_exact_match_candidates(evo.store.as_ref(), &input);
+        let exact_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.gene.id == "gene-exact")
+            .unwrap();
+        let overlap_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.gene.id == "gene-overlap")
+            .unwrap();
+
+        assert_eq!(exact_candidate.score, 1.0);
+        assert_eq!(overlap_candidate.score, 1.0);
+        assert!(candidates.iter().all(|candidate| candidate.score <= 1.0));
     }
 
     #[tokio::test]
