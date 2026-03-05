@@ -4,9 +4,9 @@
 > **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec5808b9b0bd35bc45b4e91
 
-Last synced: March 3, 2026
+Last synced: March 5, 2026
 
-## Current Implementation Snapshot (March 3, 2026)
+## Current Implementation Snapshot (March 5, 2026)
 
 The current `crates/oris-agent-contract` crate is a proposal-only contract scaffold:
 
@@ -15,14 +15,18 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
 - `ExecutionFeedback`
 - `AgentCapabilityLevel`
 - `ProposalTarget`
+- A2A protocol constants (`oris.a2a@0.1.0-experimental`)
+- A2A handshake request/response and capability negotiation envelope types
+- A2A task lifecycle and standard error envelope types
 - direct `oris_runtime::agent_contract` access is gated by `agent-contract-experimental`
 - `examples/evo_oris_repo` exercises the proposal path through `oris-runtime` with `full-evolution-experimental`
 - the checked-in replay example uses `EvoKernel::replay_or_fallback_for_run(...)` so reuse events stay attributable to the current replay execution
+- execution-server exposes experimental `POST /v1/evolution/a2a/handshake` for protocol and capability negotiation when both `agent-contract-experimental` and `evolution-network-experimental` are enabled
 
 Not yet implemented in the checked-in code:
 
-- capability negotiation or enforcement
-- a transport/runtime protocol between agents and the kernel
+- runtime enforcement of negotiated capabilities on subsequent calls
+- an end-to-end remote agent task session protocol (beyond handshake + evo publish/fetch/revoke routes)
 - agent-managed execution privileges
 
 ## Related Documents

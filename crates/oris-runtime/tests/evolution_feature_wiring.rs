@@ -32,6 +32,14 @@ fn full_evolution_experimental_paths_resolve() {
 
     assert_type::<oris_runtime::agent_contract::AgentTask>();
     assert_type::<oris_runtime::agent_contract::AgentCapabilityLevel>();
+    assert_type::<oris_runtime::agent_contract::A2aProtocol>();
+    assert_type::<oris_runtime::agent_contract::A2aCapability>();
+    assert_type::<oris_runtime::agent_contract::A2aHandshakeRequest>();
+    assert_type::<oris_runtime::agent_contract::A2aHandshakeResponse>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskLifecycleState>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskLifecycleEvent>();
+    assert_type::<oris_runtime::agent_contract::A2aErrorCode>();
+    assert_type::<oris_runtime::agent_contract::A2aErrorEnvelope>();
     assert_type::<oris_runtime::agent_contract::AgentRole>();
     assert_type::<oris_runtime::agent_contract::CoordinationPrimitive>();
     assert_type::<oris_runtime::agent_contract::CoordinationTask>();
@@ -58,5 +66,31 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::evolution_network::FetchQuery>();
     assert_type::<oris_runtime::governor::GovernorConfig>();
     assert_type::<oris_runtime::spec_contract::SpecDocument>();
+    assert_eq!(oris_runtime::agent_contract::A2A_PROTOCOL_NAME, "oris.a2a");
+    assert_eq!(
+        oris_runtime::agent_contract::A2A_PROTOCOL_VERSION,
+        "0.1.0-experimental"
+    );
+    let handshake_req = oris_runtime::agent_contract::A2aHandshakeRequest {
+        agent_id: "agent-a".to_string(),
+        role: oris_runtime::agent_contract::AgentRole::Planner,
+        capability_level: oris_runtime::agent_contract::AgentCapabilityLevel::A1,
+        supported_protocols: vec![oris_runtime::agent_contract::A2aProtocol::current()],
+        advertised_capabilities: vec![
+            oris_runtime::agent_contract::A2aCapability::Coordination,
+            oris_runtime::agent_contract::A2aCapability::ReplayFeedback,
+        ],
+    };
+    assert!(handshake_req.supports_current_protocol());
+    let accepted = oris_runtime::agent_contract::A2aHandshakeResponse::accept(vec![
+        oris_runtime::agent_contract::A2aCapability::Coordination,
+    ]);
+    assert!(accepted.accepted);
+    let rejected = oris_runtime::agent_contract::A2aHandshakeResponse::reject(
+        oris_runtime::agent_contract::A2aErrorCode::UnsupportedCapability,
+        "none",
+        None,
+    );
+    assert!(!rejected.accepted);
     assert!(envelope.verify_content_hash());
 }

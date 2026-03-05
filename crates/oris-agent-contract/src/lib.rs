@@ -2,7 +2,125 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+pub const A2A_PROTOCOL_NAME: &str = "oris.a2a";
+pub const A2A_PROTOCOL_VERSION: &str = "0.1.0-experimental";
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aProtocol {
+    pub name: String,
+    pub version: String,
+}
+
+impl A2aProtocol {
+    pub fn current() -> Self {
+        Self {
+            name: A2A_PROTOCOL_NAME.to_string(),
+            version: A2A_PROTOCOL_VERSION.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum A2aCapability {
+    Coordination,
+    MutationProposal,
+    ReplayFeedback,
+    SupervisedDevloop,
+    EvolutionPublish,
+    EvolutionFetch,
+    EvolutionRevoke,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aHandshakeRequest {
+    pub agent_id: String,
+    pub role: AgentRole,
+    pub capability_level: AgentCapabilityLevel,
+    pub supported_protocols: Vec<A2aProtocol>,
+    pub advertised_capabilities: Vec<A2aCapability>,
+}
+
+impl A2aHandshakeRequest {
+    pub fn supports_current_protocol(&self) -> bool {
+        self.supported_protocols.iter().any(|protocol| {
+            protocol.name == A2A_PROTOCOL_NAME && protocol.version == A2A_PROTOCOL_VERSION
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aHandshakeResponse {
+    pub accepted: bool,
+    pub negotiated_protocol: Option<A2aProtocol>,
+    pub enabled_capabilities: Vec<A2aCapability>,
+    pub message: Option<String>,
+    pub error: Option<A2aErrorEnvelope>,
+}
+
+impl A2aHandshakeResponse {
+    pub fn accept(enabled_capabilities: Vec<A2aCapability>) -> Self {
+        Self {
+            accepted: true,
+            negotiated_protocol: Some(A2aProtocol::current()),
+            enabled_capabilities,
+            message: Some("handshake accepted".to_string()),
+            error: None,
+        }
+    }
+
+    pub fn reject(code: A2aErrorCode, message: impl Into<String>, details: Option<String>) -> Self {
+        Self {
+            accepted: false,
+            negotiated_protocol: None,
+            enabled_capabilities: Vec::new(),
+            message: Some("handshake rejected".to_string()),
+            error: Some(A2aErrorEnvelope {
+                code,
+                message: message.into(),
+                retriable: true,
+                details,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum A2aTaskLifecycleState {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskLifecycleEvent {
+    pub task_id: String,
+    pub state: A2aTaskLifecycleState,
+    pub summary: String,
+    pub updated_at_ms: u64,
+    pub error: Option<A2aErrorEnvelope>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum A2aErrorCode {
+    UnsupportedProtocol,
+    UnsupportedCapability,
+    ValidationFailed,
+    AuthorizationDenied,
+    Timeout,
+    Internal,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aErrorEnvelope {
+    pub code: A2aErrorCode,
+    pub message: String,
+    pub retriable: bool,
+    pub details: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AgentCapabilityLevel {
     A0,
     A1,

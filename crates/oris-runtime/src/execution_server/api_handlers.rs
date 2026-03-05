@@ -22,6 +22,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+use crate::agent_contract::{
+    A2aCapability, A2aErrorCode, A2aHandshakeRequest, A2aHandshakeResponse,
+};
 #[cfg(feature = "evolution-network-experimental")]
 use crate::evolution::{
     default_store_root, EvoEvolutionStore, EvolutionNetworkNode, ImportOutcome, JsonlEvolutionStore,
@@ -739,10 +746,13 @@ pub fn build_router(state: ExecutionApiState) -> Router {
 
 #[cfg(feature = "evolution-network-experimental")]
 fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
-    router
+    let router = router
         .route("/v1/evolution/publish", post(evolution_publish))
         .route("/v1/evolution/fetch", post(evolution_fetch))
-        .route("/v1/evolution/revoke", post(evolution_revoke))
+        .route("/v1/evolution/revoke", post(evolution_revoke));
+    #[cfg(feature = "agent-contract-experimental")]
+    let router = router.route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake));
+    router
 }
 
 #[cfg(not(feature = "evolution-network-experimental"))]
@@ -1472,6 +1482,72 @@ pub async fn evolution_revoke(
         .revoke_assets(&req)
         .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
 
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn runtime_a2a_capabilities() -> Vec<A2aCapability> {
+    vec![
+        A2aCapability::Coordination,
+        A2aCapability::MutationProposal,
+        A2aCapability::ReplayFeedback,
+        A2aCapability::SupervisedDevloop,
+        A2aCapability::EvolutionPublish,
+        A2aCapability::EvolutionFetch,
+        A2aCapability::EvolutionRevoke,
+    ]
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn negotiate_a2a_handshake(req: &A2aHandshakeRequest) -> A2aHandshakeResponse {
+    if !req.supports_current_protocol() {
+        return A2aHandshakeResponse::reject(
+            A2aErrorCode::UnsupportedProtocol,
+            "unsupported protocol",
+            Some(format!(
+                "expected {}@{}",
+                crate::agent_contract::A2A_PROTOCOL_NAME,
+                crate::agent_contract::A2A_PROTOCOL_VERSION
+            )),
+        );
+    }
+
+    let enabled_capabilities = runtime_a2a_capabilities()
+        .into_iter()
+        .filter(|capability| req.advertised_capabilities.contains(capability))
+        .collect::<Vec<_>>();
+    if enabled_capabilities.is_empty() {
+        return A2aHandshakeResponse::reject(
+            A2aErrorCode::UnsupportedCapability,
+            "no overlapping capabilities",
+            Some("agent advertised capabilities do not intersect runtime capabilities".into()),
+        );
+    }
+
+    A2aHandshakeResponse::accept(enabled_capabilities)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_handshake(
+    headers: HeaderMap,
+    Json(req): Json<A2aHandshakeRequest>,
+) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_sender_id(&req.agent_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    let response = negotiate_a2a_handshake(&req);
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -3428,6 +3504,91 @@ mod tests {
             Some(0)
         );
         let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_handshake_route_accepts_compatible_agent() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/handshake")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "agent-a",
+                    "role": "Planner",
+                    "capability_level": "A1",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "ReplayFeedback"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("handshake body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("handshake json");
+        assert_eq!(json["data"]["accepted"], true);
+        assert_eq!(
+            json["data"]["negotiated_protocol"]["name"],
+            crate::agent_contract::A2A_PROTOCOL_NAME
+        );
+        assert_eq!(
+            json["data"]["enabled_capabilities"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_handshake_route_rejects_incompatible_protocol() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/handshake")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "agent-a",
+                    "role": "Planner",
+                    "capability_level": "A1",
+                    "supported_protocols": [
+                        { "name": "legacy.a2a", "version": "1.0.0" }
+                    ],
+                    "advertised_capabilities": ["Coordination"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("handshake body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("handshake json");
+        assert_eq!(json["data"]["accepted"], false);
+        assert_eq!(
+            json["data"]["error"]["code"],
+            serde_json::json!("UnsupportedProtocol")
+        );
     }
 
     #[tokio::test]

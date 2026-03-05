@@ -4,21 +4,25 @@
 > **Implementation Status: In Progress** 🔄
 Source: https://www.notion.so/317e8a70eec580569ef0ea1713b7e5f6
 
-Last synced: March 3, 2026
+Last synced: March 5, 2026
 
-## Current Implementation Snapshot (March 3, 2026)
+## Current Implementation Snapshot (March 5, 2026)
 
-The current `crates/oris-evolution-network` crate provides protocol contracts only:
+The current `crates/oris-evolution-network` crate provides protocol contracts:
 
 - `EvolutionEnvelope` with content-hash generation and verification
 - `Publish`, `Fetch`, `Report`, and `Revoke` message types
 - `Gene`, `Capsule`, and `EvolutionEvent` network asset variants
 - request and response structs for publish, fetch, and revoke flows
 - experimental re-export through `oris-runtime::evolution_network` behind `evolution-network-experimental`
+- runtime `execution-server` exposes experimental HTTP routes:
+  - `POST /v1/evolution/publish`
+  - `POST /v1/evolution/fetch`
+  - `POST /v1/evolution/revoke`
+  - `POST /v1/evolution/a2a/handshake` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
 
 Not yet implemented in the checked-in crate:
 
-- HTTP or peer-to-peer transport endpoints
 - peer discovery or gossip propagation
 - automatic publish gating based on promoted asset state
 - remote trust execution or validation pipelines
