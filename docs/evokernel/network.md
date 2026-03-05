@@ -117,6 +117,219 @@ content-type: application/json
 }
 ```
 
+## End-to-End Compatibility Operation Runbook (distribute -> claim -> report)
+
+### Preconditions
+
+- Start `execution_server` with compatibility routes available:
+
+```bash
+cargo run -p oris-runtime --example execution_server --features "full-evolution-experimental execution-server sqlite-persistence"
+```
+
+- Install `curl` and `jq`.
+- Ensure the same owner identity is used across distribute, claim, and report (the current implementation enforces lease ownership by sender).
+
+### Dual-mode auth template (local or bearer token)
+
+```bash
+export BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
+export AUTH_TOKEN="${AUTH_TOKEN:-}"
+export REQUEST_ID_PREFIX="${REQUEST_ID_PREFIX:-compat-e2e}"
+export SENDER_ID="${SENDER_ID:-compat-e2e-agent-1}"
+export TASK_ID="${TASK_ID:-compat-e2e-task-1}"
+export PROTO="${PROTO:-1.0.0}"
+
+AUTH_HEADERS=(-H "content-type: application/json")
+if [ -n "${AUTH_TOKEN}" ]; then
+  AUTH_HEADERS+=(-H "authorization: Bearer ${AUTH_TOKEN}")
+fi
+```
+
+### Step 1: hello (handshake)
+
+```bash
+hello_resp="$(curl -sS -X POST "${BASE_URL}/evolution/a2a/hello" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-hello" \
+  -d "{
+    \"agent_id\":\"${SENDER_ID}\",
+    \"role\":\"Planner\",
+    \"capability_level\":\"A2\",
+    \"supported_protocols\":[{\"name\":\"oris.a2a\",\"version\":\"${PROTO}\"}],
+    \"advertised_capabilities\":[\"Coordination\",\"SupervisedDevloop\",\"ReplayFeedback\",\"EvolutionFetch\"]
+  }")"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${hello_resp}" | jq -e '.data.accepted == true'
+echo "${hello_resp}" | jq -e '.data.negotiated_protocol.version == env.PROTO'
+```
+
+### Step 2: distribute (alias fields: node_id + task_description)
+
+```bash
+distribute_resp="$(curl -sS -X POST "${BASE_URL}/evolution/a2a/tasks/distribute" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-distribute" \
+  -d "{
+    \"node_id\":\"${SENDER_ID}\",
+    \"protocol_version\":\"${PROTO}\",
+    \"task_id\":\"${TASK_ID}\",
+    \"task_description\":\"Compat E2E execution task\",
+    \"dispatch_id\":\"dispatch-${TASK_ID}\",
+    \"summary\":\"queued by compat runbook\"
+  }")"
+SESSION_ID="$(echo "${distribute_resp}" | jq -r '.data.session_id')"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${distribute_resp}" | jq -e '.data.state == "Dispatched"'
+echo "${distribute_resp}" | jq -e '.data.task_id == env.TASK_ID'
+test -n "${SESSION_ID}" && [ "${SESSION_ID}" != "null" ]
+```
+
+### Step 3: claim
+
+```bash
+claim_resp="$(curl -sS -X POST "${BASE_URL}/evolution/a2a/tasks/claim" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-claim" \
+  -d "{
+    \"node_id\":\"${SENDER_ID}\",
+    \"protocol_version\":\"${PROTO}\"
+  }")"
+CLAIMED_SESSION_ID="$(echo "${claim_resp}" | jq -r '.data.task.session_id // empty')"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${claim_resp}" | jq -e '.data.claimed == true'
+echo "${claim_resp}" | jq -e '.data.task.task_id == env.TASK_ID'
+test "${CLAIMED_SESSION_ID}" = "${SESSION_ID}"
+```
+
+### Step 4: report running (status alias: in_progress)
+
+```bash
+report_running_resp="$(curl -sS -X POST "${BASE_URL}/evolution/a2a/tasks/report" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-report-running" \
+  -d "{
+    \"node_id\":\"${SENDER_ID}\",
+    \"protocol_version\":\"${PROTO}\",
+    \"task_id\":\"${TASK_ID}\",
+    \"status\":\"in_progress\",
+    \"summary\":\"compat task in progress\",
+    \"progress_pct\":55,
+    \"retryable\":false
+  }")"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${report_running_resp}" | jq -e '.data.state == "InProgress"'
+```
+
+### Step 5: report completed (status alias: completed)
+
+```bash
+report_complete_resp="$(curl -sS -X POST "${BASE_URL}/evolution/a2a/tasks/report" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-report-complete" \
+  -d "{
+    \"node_id\":\"${SENDER_ID}\",
+    \"protocol_version\":\"${PROTO}\",
+    \"task_id\":\"${TASK_ID}\",
+    \"status\":\"completed\",
+    \"summary\":\"compat task completed\",
+    \"retryable\":false,
+    \"used_capsule\":true,
+    \"capsule_id\":\"capsule-${TASK_ID}\",
+    \"reasoning_steps_avoided\":2,
+    \"task_class_id\":\"compat.e2e\",
+    \"task_label\":\"Compat E2E task\"
+  }")"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${report_complete_resp}" | jq -e '.data.state == "Completed"'
+echo "${report_complete_resp}" | jq -e '.data.terminal_state == "Succeeded"'
+```
+
+### Step 6: snapshot query
+
+```bash
+snapshot_resp="$(curl -sS "${BASE_URL}/v1/evolution/a2a/sessions/${SESSION_ID}?sender_id=${SENDER_ID}&protocol_version=${PROTO}" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-snapshot")"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${snapshot_resp}" | jq -e '.data.state == "Completed"'
+echo "${snapshot_resp}" | jq -e '.data.result.terminal_state == "Succeeded"'
+```
+
+### Step 7: lifecycle query
+
+```bash
+lifecycle_resp="$(curl -sS "${BASE_URL}/v1/evolution/a2a/tasks/${TASK_ID}/lifecycle?sender_id=${SENDER_ID}&protocol_version=${PROTO}" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-lifecycle")"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${lifecycle_resp}" | jq -e '.data.events[-1].state == "Succeeded"'
+```
+
+### Step 8 (optional): claim again after completion
+
+```bash
+final_claim_resp="$(curl -sS -X POST "${BASE_URL}/evolution/a2a/tasks/claim" \
+  "${AUTH_HEADERS[@]}" \
+  -H "x-request-id: ${REQUEST_ID_PREFIX}-claim-final" \
+  -d "{
+    \"node_id\":\"${SENDER_ID}\",
+    \"protocol_version\":\"${PROTO}\"
+  }")"
+```
+
+Expected response key fields (`jq`):
+
+```bash
+echo "${final_claim_resp}" | jq -e '.data.claimed == false'
+```
+
+### Canonical-field equivalents
+
+- `node_id` is accepted as alias for `sender_id`.
+- `task_description` is accepted as alias for `task_summary`.
+- `status: in_progress` maps to canonical `running`.
+- `status: completed` maps to canonical `succeeded`.
+
+### Common failures and triage
+
+- No handshake before distribute/claim/report:
+  response is `403 forbidden` with message `a2a handshake required before calling evolution routes`.
+- Missing sender (`sender_id` and `node_id` both empty/missing):
+  response is `400` with details field `a2a_error_code: ValidationFailed`.
+- Incompatible protocol version:
+  response is `400` with message `incompatible a2a task session protocol version`.
+- Lease owner mismatch during report:
+  response is `403` with message `compat task lease is owned by another claimer`.
+
 ## Related Documents
 
 - [evolution.md](evolution.md)

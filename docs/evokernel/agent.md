@@ -53,7 +53,8 @@ Remote task session state machine:
 
 Protocol compatibility:
 
-- runtime requires `protocol_version == 0.1.0-experimental`
+- runtime accepts `protocol_version` in `{1.0.0, 0.1.0-experimental}`
+- compatibility A2A alias routes default to `1.0.0` when `protocol_version` is omitted
 - incompatible versions fail with deterministic `400` error message: `incompatible a2a task session protocol version`
 
 A2A execution privilege model (experimental):

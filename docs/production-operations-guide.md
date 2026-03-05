@@ -93,8 +93,10 @@ Compatibility A2A smoke checks (if compatibility traffic is enabled):
 ```bash
 curl -s -X POST http://127.0.0.1:8080/evolution/a2a/hello \
   -H 'content-type: application/json' \
-  -d '{"agent_id":"ops-compat-smoke","role":"planner","capability_level":"a2","supported_protocols":[{"name":"oris.a2a","version":"1.0.0"}],"advertised_capabilities":["coordination"]}'
+  -d '{"agent_id":"ops-compat-smoke","role":"Planner","capability_level":"A2","supported_protocols":[{"name":"oris.a2a","version":"1.0.0"}],"advertised_capabilities":["Coordination"]}'
 ```
+
+For the complete compatibility closure (`hello -> distribute -> claim -> report -> snapshot -> lifecycle`), use the runbook section in [evokernel/network.md](evokernel/network.md): `End-to-End Compatibility Operation Runbook (distribute -> claim -> report)`.
 
 Success criteria:
 

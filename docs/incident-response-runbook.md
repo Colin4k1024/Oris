@@ -212,6 +212,7 @@ Before declaring the incident mitigated:
    - `/evolution/a2a/tasks/distribute`
    - `/evolution/a2a/tasks/claim`
    - `/evolution/a2a/tasks/report`
+   - command template reference: `docs/evokernel/network.md` -> `End-to-End Compatibility Operation Runbook (distribute -> claim -> report)`
 
 ## 7. Post-Incident Checklist
 
