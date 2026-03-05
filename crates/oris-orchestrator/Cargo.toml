@@ -1,0 +1,12 @@
+[package]
+name = "oris-orchestrator"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+description = "Oris orchestration contracts and control flow primitives."
+
+[dependencies]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
