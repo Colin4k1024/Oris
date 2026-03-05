@@ -116,8 +116,9 @@ The following are still outside the present acceptance envelope:
 - no autonomous mutation proposal generation
 - no autonomous planner loop
 - no autonomous issue-to-release closed loop
-- no broader semantic equivalence layer beyond the currently implemented signal normalization and matching behavior
 - no shadow-mode confidence lifecycle that continuously revalidates assets in the background
+
+The following has been addressed: deterministic task-class replay now includes richer signal extraction (intent key phrases, Rust error codes from validation logs) and a regression test proves multiple semantically adjacent signal variants replay the same learned capsule.
 
 ## 7. Overall Evolution Direction
 
@@ -142,7 +143,7 @@ Definition of done:
 
 - replay is reliable enough to be trusted as a real optimization path
 
-### Stage 2. Expand Task-Class Generalization (Next)
+### Stage 2. Expand Task-Class Generalization (Shipped)
 
 Goal:
 
@@ -159,10 +160,11 @@ Current deterministic boundary:
 
 - reordered or superset multi-token signal phrases can match when at least two normalized tokens align
 - isolated single-token overlap does not qualify as task-class replay on its own
+- signal extraction includes intent key phrases and Rust error codes from validation logs
 
 Definition of done:
 
-- one learned fix can help multiple semantically equivalent task variants, not just near-identical ones
+- one learned fix can help multiple semantically equivalent task variants, not just near-identical ones (regression: `multiple_semantically_adjacent_signal_variants_replay_same_capsule`)
 
 ### Stage 3. Introduce Continuous Confidence Control
 

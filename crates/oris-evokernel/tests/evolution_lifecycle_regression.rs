@@ -839,6 +839,33 @@ async fn adjacent_task_class_signal_variants_can_replay_learned_capsule() {
 }
 
 #[tokio::test]
+async fn multiple_semantically_adjacent_signal_variants_replay_same_capsule() {
+    let (workspace, _store, evo) = test_evo("self-evolve-multi-variant");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-multi-variant".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-multi-variant"),
+        )
+        .await
+        .unwrap();
+
+    let variants = ["missing readme", "README file missing", "add readme"];
+    for signal in variants {
+        let decision = evo
+            .replay_or_fallback(replay_input(signal, &workspace))
+            .await
+            .unwrap();
+        assert!(
+            decision.used_capsule,
+            "variant \"{}\" should replay learned capsule",
+            signal
+        );
+        assert_eq!(decision.capsule_id, Some(captured.id.clone()));
+    }
+}
+
+#[tokio::test]
 async fn unrelated_task_class_signal_variants_do_not_replay() {
     let (workspace, _store, evo) = test_evo("self-evolve-negative-task-class");
 

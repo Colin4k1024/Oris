@@ -174,6 +174,24 @@ impl ValidationReport {
     }
 }
 
+/// Extracts Rust compiler error codes (e.g. E0425) from validation logs for task-class replay.
+fn extract_rust_error_codes_from_logs(logs: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for segment in logs.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if is_rust_error_code(segment) {
+            let normalized = segment
+                .chars()
+                .enumerate()
+                .map(|(i, c)| if i == 0 { c.to_ascii_uppercase() } else { c })
+                .collect::<String>();
+            if !out.contains(&normalized) {
+                out.push(normalized);
+            }
+        }
+    }
+    out
+}
+
 pub fn extract_deterministic_signals(input: &SignalExtractionInput) -> SignalExtractionOutput {
     let mut signals = BTreeSet::new();
 
@@ -182,6 +200,10 @@ pub fn extract_deterministic_signals(input: &SignalExtractionInput) -> SignalExt
             signals.insert(phrase);
         }
         extend_signal_tokens(&mut signals, declared);
+    }
+
+    for code in extract_rust_error_codes_from_logs(&input.validation_logs) {
+        signals.insert(code);
     }
 
     for text in [
@@ -201,6 +223,10 @@ pub fn extract_deterministic_signals(input: &SignalExtractionInput) -> SignalExt
         extend_signal_tokens(&mut signals, stage_output);
     }
 
+    if let Some(intent_phrase) = intent_key_phrase(&input.intent) {
+        signals.insert(intent_phrase);
+    }
+
     signals.insert(if input.validation_success {
         "validation passed".into()
     } else {
@@ -211,6 +237,21 @@ pub fn extract_deterministic_signals(input: &SignalExtractionInput) -> SignalExt
     let hash =
         stable_hash_json(&values).unwrap_or_else(|_| compute_artifact_hash(&values.join("\n")));
     SignalExtractionOutput { values, hash }
+}
+
+/// First normalized phrase from intent (up to 6 tokens) for task-class matching.
+fn intent_key_phrase(intent: &str) -> Option<String> {
+    let tokens: Vec<String> = intent
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| s.len() >= 2)
+        .take(6)
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" "))
+    }
 }
 
 #[derive(Debug, Error)]

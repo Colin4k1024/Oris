@@ -1366,11 +1366,12 @@ mod tests {
             },
             state: AssetState::Promoted,
         };
+        let fresh_ts = Utc::now().to_rfc3339();
         let store = std::sync::Arc::new(InconsistentSnapshotStore {
             scanned_events: vec![
                 StoredEvolutionEvent {
                     seq: 1,
-                    timestamp: "2026-03-04T00:00:00Z".into(),
+                    timestamp: fresh_ts.clone(),
                     prev_hash: String::new(),
                     record_hash: "hash-1".into(),
                     event: EvolutionEvent::GeneProjected {
@@ -1379,7 +1380,7 @@ mod tests {
                 },
                 StoredEvolutionEvent {
                     seq: 2,
-                    timestamp: "2026-03-04T00:00:01Z".into(),
+                    timestamp: fresh_ts,
                     prev_hash: "hash-1".into(),
                     record_hash: "hash-2".into(),
                     event: EvolutionEvent::CapsuleCommitted {
