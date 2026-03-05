@@ -844,7 +844,6 @@ fn seconds_since_timestamp(timestamp: &str, now: DateTime<Utc>) -> Option<u64> {
         u64::try_from(elapsed.num_seconds()).ok()
     }
 }
-
 fn environment_match_factor(input: &EnvFingerprint, candidate: &EnvFingerprint) -> f64 {
     let fields = [
         input
