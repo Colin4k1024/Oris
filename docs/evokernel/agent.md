@@ -22,11 +22,13 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
 - `examples/evo_oris_repo` exercises the proposal path through `oris-runtime` with `full-evolution-experimental`
 - the checked-in replay example uses `EvoKernel::replay_or_fallback_for_run(...)` so reuse events stay attributable to the current replay execution
 - execution-server exposes experimental `POST /v1/evolution/a2a/handshake` for protocol and capability negotiation when both `agent-contract-experimental` and `evolution-network-experimental` are enabled
-- execution-server enforces negotiated A2A capabilities for `/v1/evolution/publish`, `/v1/evolution/fetch`, and `/v1/evolution/revoke` when `agent-contract-experimental` is enabled (per-process in-memory session keyed by `sender_id`)
+- execution-server enforces negotiated A2A capabilities for `/v1/evolution/publish`, `/v1/evolution/fetch`, and `/v1/evolution/revoke` when `agent-contract-experimental` is enabled
+- when `sqlite-persistence` is enabled, negotiated A2A sessions are persisted in runtime repository storage and survive process restart
+- negotiated sessions are bound to authenticated caller identity (`actor_type`, `actor_id`, `actor_role`) when auth is enabled
 
 Not yet implemented in the checked-in code:
 
-- durable or cross-node negotiated session propagation
+- cross-node negotiated session propagation
 - an end-to-end remote agent task session protocol (beyond handshake + gated evo publish/fetch/revoke routes)
 - agent-managed execution privileges
 

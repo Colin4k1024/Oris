@@ -11,7 +11,7 @@ use oris_kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
-const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 9;
+const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 10;
 
 #[derive(Clone)]
 pub struct SqliteRuntimeRepository {
@@ -205,6 +205,10 @@ impl SqliteRuntimeRepository {
         if current < 9 {
             apply_sqlite_runtime_migration_v9(&conn)?;
             record_sqlite_migration(&conn, 9, "replay_effect_guard")?;
+        }
+        if current < 10 {
+            apply_sqlite_runtime_migration_v10(&conn)?;
+            record_sqlite_migration(&conn, 10, "runtime_a2a_sessions")?;
         }
         Ok(())
     }
@@ -1602,6 +1606,99 @@ impl SqliteRuntimeRepository {
         Ok(count > 0)
     }
 
+    pub fn upsert_a2a_session(&self, session: &A2aSessionRow) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_a2a_sessions
+             (sender_id, protocol, protocol_version, enabled_capabilities_json, actor_type, actor_id, actor_role, negotiated_at_ms, expires_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(sender_id)
+             DO UPDATE SET
+               protocol = excluded.protocol,
+               protocol_version = excluded.protocol_version,
+               enabled_capabilities_json = excluded.enabled_capabilities_json,
+               actor_type = excluded.actor_type,
+               actor_id = excluded.actor_id,
+               actor_role = excluded.actor_role,
+               negotiated_at_ms = excluded.negotiated_at_ms,
+               expires_at_ms = excluded.expires_at_ms,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                &session.sender_id,
+                &session.protocol,
+                &session.protocol_version,
+                &session.enabled_capabilities_json,
+                session.actor_type.as_deref(),
+                session.actor_id.as_deref(),
+                session.actor_role.as_deref(),
+                dt_to_ms(session.negotiated_at),
+                dt_to_ms(session.expires_at),
+                dt_to_ms(session.updated_at),
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("upsert a2a session: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn get_active_a2a_session(
+        &self,
+        sender_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<A2aSessionRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT sender_id, protocol, protocol_version, enabled_capabilities_json,
+                        actor_type, actor_id, actor_role, negotiated_at_ms, expires_at_ms, updated_at_ms
+                 FROM runtime_a2a_sessions
+                 WHERE sender_id = ?1
+                   AND expires_at_ms > ?2",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare get active a2a session: {}", e)))?;
+        let mut rows = stmt
+            .query(params![sender_id, dt_to_ms(now)])
+            .map_err(|e| KernelError::Driver(format!("query get active a2a session: {}", e)))?;
+        if let Some(row) = rows
+            .next()
+            .map_err(|e| KernelError::Driver(format!("scan get active a2a session: {}", e)))?
+        {
+            Ok(Some(A2aSessionRow {
+                sender_id: row.get(0).map_err(map_rusqlite_err)?,
+                protocol: row.get(1).map_err(map_rusqlite_err)?,
+                protocol_version: row.get(2).map_err(map_rusqlite_err)?,
+                enabled_capabilities_json: row.get(3).map_err(map_rusqlite_err)?,
+                actor_type: row.get(4).map_err(map_rusqlite_err)?,
+                actor_id: row.get(5).map_err(map_rusqlite_err)?,
+                actor_role: row.get(6).map_err(map_rusqlite_err)?,
+                negotiated_at: ms_to_dt(row.get::<_, i64>(7).map_err(map_rusqlite_err)?),
+                expires_at: ms_to_dt(row.get::<_, i64>(8).map_err(map_rusqlite_err)?),
+                updated_at: ms_to_dt(row.get::<_, i64>(9).map_err(map_rusqlite_err)?),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn purge_expired_a2a_sessions(&self, now: DateTime<Utc>) -> Result<u64, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM runtime_a2a_sessions WHERE expires_at_ms <= ?1",
+                params![dt_to_ms(now)],
+            )
+            .map_err(|e| KernelError::Driver(format!("purge expired a2a sessions: {}", e)))?;
+        Ok(deleted as u64)
+    }
+
     pub fn append_audit_log(&self, entry: &AuditLogEntry) -> Result<(), KernelError> {
         let now = dt_to_ms(Utc::now());
         let conn = self
@@ -1746,6 +1843,20 @@ pub struct ApiKeyRow {
     pub role: String,
     pub active: bool,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct A2aSessionRow {
+    pub sender_id: String,
+    pub protocol: String,
+    pub protocol_version: String,
+    pub enabled_capabilities_json: String,
+    pub actor_type: Option<String>,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub negotiated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -2378,6 +2489,29 @@ fn apply_sqlite_runtime_migration_v9(conn: &Connection) -> Result<(), KernelErro
     Ok(())
 }
 
+fn apply_sqlite_runtime_migration_v10(conn: &Connection) -> Result<(), KernelError> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS runtime_a2a_sessions (
+          sender_id TEXT PRIMARY KEY,
+          protocol TEXT NOT NULL,
+          protocol_version TEXT NOT NULL,
+          enabled_capabilities_json TEXT NOT NULL,
+          actor_type TEXT NULL,
+          actor_id TEXT NULL,
+          actor_role TEXT NULL,
+          negotiated_at_ms INTEGER NOT NULL,
+          expires_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_a2a_sessions_expires
+          ON runtime_a2a_sessions(expires_at_ms);
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v10: {}", e)))?;
+    Ok(())
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -2413,8 +2547,8 @@ mod tests {
 
     use super::{
         apply_sqlite_runtime_migration_v1, ensure_sqlite_migration_table, record_sqlite_migration,
-        ReplayEffectClaim, RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository,
-        TimeoutPolicyConfig, SQLITE_RUNTIME_SCHEMA_VERSION,
+        A2aSessionRow, ReplayEffectClaim, RetryPolicyConfig, RetryStrategy,
+        SqliteRuntimeRepository, TimeoutPolicyConfig, SQLITE_RUNTIME_SCHEMA_VERSION,
     };
     use crate::models::AttemptExecutionStatus;
     use crate::repository::RuntimeRepository;
@@ -2512,6 +2646,7 @@ mod tests {
         assert!(table_exists(&conn, "runtime_attempt_retry_history"));
         assert!(table_exists(&conn, "runtime_dead_letters"));
         assert!(table_exists(&conn, "runtime_replay_effects"));
+        assert!(table_exists(&conn, "runtime_a2a_sessions"));
 
         let _ = fs::remove_file(path);
     }
@@ -2588,6 +2723,7 @@ mod tests {
         assert!(table_exists(&conn, "runtime_attempt_retry_history"));
         assert!(table_exists(&conn, "runtime_dead_letters"));
         assert!(table_exists(&conn, "runtime_replay_effects"));
+        assert!(table_exists(&conn, "runtime_a2a_sessions"));
 
         let migration_v2: Option<String> = conn
             .query_row(
@@ -2673,8 +2809,72 @@ mod tests {
             .optional()
             .expect("query migration v9");
         assert_eq!(migration_v9.as_deref(), Some("replay_effect_guard"));
+        let migration_v10: Option<String> = conn
+            .query_row(
+                "SELECT name FROM runtime_schema_migrations WHERE version = 10",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query migration v10");
+        assert_eq!(migration_v10.as_deref(), Some("runtime_a2a_sessions"));
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a2a_session_upsert_roundtrip_and_expiry_filtering() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite runtime repo");
+        let now = Utc::now();
+
+        repo.upsert_a2a_session(&A2aSessionRow {
+            sender_id: "node-a".to_string(),
+            protocol: "oris.a2a".to_string(),
+            protocol_version: "0.1.0-experimental".to_string(),
+            enabled_capabilities_json: "[\"EvolutionPublish\"]".to_string(),
+            actor_type: Some("api_key".to_string()),
+            actor_id: Some("key-a".to_string()),
+            actor_role: Some("admin".to_string()),
+            negotiated_at: now,
+            expires_at: now + Duration::hours(1),
+            updated_at: now,
+        })
+        .expect("upsert active a2a session");
+
+        let active = repo
+            .get_active_a2a_session("node-a", now)
+            .expect("read active a2a session")
+            .expect("active session exists");
+        assert_eq!(active.sender_id, "node-a");
+        assert_eq!(active.protocol, "oris.a2a");
+        assert_eq!(active.protocol_version, "0.1.0-experimental");
+        assert_eq!(active.enabled_capabilities_json, "[\"EvolutionPublish\"]");
+        assert_eq!(active.actor_type.as_deref(), Some("api_key"));
+        assert_eq!(active.actor_id.as_deref(), Some("key-a"));
+        assert_eq!(active.actor_role.as_deref(), Some("admin"));
+
+        repo.upsert_a2a_session(&A2aSessionRow {
+            sender_id: "node-expired".to_string(),
+            protocol: "oris.a2a".to_string(),
+            protocol_version: "0.1.0-experimental".to_string(),
+            enabled_capabilities_json: "[\"EvolutionFetch\"]".to_string(),
+            actor_type: None,
+            actor_id: None,
+            actor_role: None,
+            negotiated_at: now - Duration::hours(2),
+            expires_at: now - Duration::minutes(1),
+            updated_at: now - Duration::hours(2),
+        })
+        .expect("upsert expired a2a session");
+
+        assert!(repo
+            .get_active_a2a_session("node-expired", now)
+            .expect("read expired a2a session")
+            .is_none());
+        let purged = repo
+            .purge_expired_a2a_sessions(now)
+            .expect("purge expired sessions");
+        assert_eq!(purged, 1);
     }
 
     #[test]

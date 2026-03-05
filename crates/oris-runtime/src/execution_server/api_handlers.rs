@@ -54,6 +54,12 @@ use crate::execution_runtime::api_models::{
 use crate::execution_runtime::lease::{LeaseConfig, LeaseManager, RepositoryLeaseManager};
 use crate::execution_runtime::models::AttemptExecutionStatus;
 use crate::execution_runtime::repository::RuntimeRepository;
+#[cfg(all(
+    feature = "sqlite-persistence",
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+use crate::execution_runtime::sqlite_runtime_repository::A2aSessionRow;
 #[cfg(feature = "sqlite-persistence")]
 use crate::execution_runtime::sqlite_runtime_repository::{
     AttemptTraceContextRow, AuditLogEntry, DeadLetterRow, ReplayEffectClaim, RetryPolicyConfig,
@@ -180,11 +186,30 @@ pub struct StaticApiKeyConfig {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct A2aSessionPrincipal {
+    actor_type: String,
+    actor_id: Option<String>,
+    actor_role: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 #[derive(Clone, Debug)]
 struct A2aSession {
     negotiated_protocol: A2aProtocol,
     enabled_capabilities: Vec<A2aCapability>,
+    principal: Option<A2aSessionPrincipal>,
+    expires_at: chrono::DateTime<Utc>,
 }
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const A2A_SESSION_TTL_HOURS: i64 = 24;
 
 const METRIC_BUCKETS_MS: [f64; 9] = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
 
@@ -1185,6 +1210,21 @@ fn resolve_auth_context(headers: &HeaderMap, state: &ExecutionApiState) -> Optio
     authenticate_static(headers, &state.auth).or_else(|| authenticate_runtime_repo(headers, state))
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn resolve_a2a_principal(
+    headers: &HeaderMap,
+    state: &ExecutionApiState,
+) -> Option<A2aSessionPrincipal> {
+    resolve_auth_context(headers, state).map(|auth| A2aSessionPrincipal {
+        actor_type: auth.actor_type,
+        actor_id: auth.actor_id,
+        actor_role: auth.role.as_str().to_string(),
+    })
+}
+
 #[derive(Clone, Debug)]
 struct AuditTarget {
     action: &'static str,
@@ -1459,10 +1499,13 @@ pub async fn evolution_publish(
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
     #[cfg(feature = "agent-contract-experimental")]
+    let principal = resolve_a2a_principal(&headers, &state);
+    #[cfg(feature = "agent-contract-experimental")]
     ensure_a2a_capability(
         &state,
         &req.sender_id,
         A2aCapability::EvolutionPublish,
+        principal.as_ref(),
         &rid,
     )
     .await?;
@@ -1486,7 +1529,16 @@ pub async fn evolution_fetch(
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
     #[cfg(feature = "agent-contract-experimental")]
-    ensure_a2a_capability(&state, &req.sender_id, A2aCapability::EvolutionFetch, &rid).await?;
+    let principal = resolve_a2a_principal(&headers, &state);
+    #[cfg(feature = "agent-contract-experimental")]
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::EvolutionFetch,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
     let response = state
         .evolution_node
         .fetch_assets("execution-api", &req)
@@ -1508,7 +1560,16 @@ pub async fn evolution_revoke(
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
     #[cfg(feature = "agent-contract-experimental")]
-    ensure_a2a_capability(&state, &req.sender_id, A2aCapability::EvolutionRevoke, &rid).await?;
+    let principal = resolve_a2a_principal(&headers, &state);
+    #[cfg(feature = "agent-contract-experimental")]
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::EvolutionRevoke,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
     let response = state
         .evolution_node
         .revoke_assets(&req)
@@ -1577,10 +1638,61 @@ async fn ensure_a2a_capability(
     state: &ExecutionApiState,
     sender_id: &str,
     capability: A2aCapability,
+    principal: Option<&A2aSessionPrincipal>,
     rid: &str,
 ) -> Result<(), ApiError> {
-    let sessions = state.a2a_sessions.read().await;
-    let Some(session) = sessions.get(sender_id) else {
+    let now = Utc::now();
+    #[cfg(feature = "sqlite-persistence")]
+    let mut session = state.a2a_sessions.read().await.get(sender_id).cloned();
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let session = state.a2a_sessions.read().await.get(sender_id).cloned();
+
+    #[cfg(feature = "sqlite-persistence")]
+    if session.is_none() {
+        if let Some(repo) = state.runtime_repo.as_ref() {
+            if let Some(stored) = repo
+                .get_active_a2a_session(sender_id, now)
+                .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?
+            {
+                let enabled_capabilities: Vec<A2aCapability> =
+                    serde_json::from_str(&stored.enabled_capabilities_json).map_err(|e| {
+                        ApiError::internal(format!("invalid persisted a2a capabilities: {}", e))
+                            .with_request_id(rid.to_string())
+                    })?;
+                let principal_from_store = match (stored.actor_type, stored.actor_role) {
+                    (Some(actor_type), Some(actor_role)) => Some(A2aSessionPrincipal {
+                        actor_type,
+                        actor_id: stored.actor_id,
+                        actor_role,
+                    }),
+                    (None, None) => None,
+                    _ => {
+                        return Err(ApiError::internal(
+                            "invalid persisted a2a principal binding shape",
+                        )
+                        .with_request_id(rid.to_string()))
+                    }
+                };
+                let hydrated = A2aSession {
+                    negotiated_protocol: A2aProtocol {
+                        name: stored.protocol,
+                        version: stored.protocol_version,
+                    },
+                    enabled_capabilities,
+                    principal: principal_from_store,
+                    expires_at: stored.expires_at,
+                };
+                state
+                    .a2a_sessions
+                    .write()
+                    .await
+                    .insert(sender_id.to_string(), hydrated.clone());
+                session = Some(hydrated);
+            }
+        }
+    }
+
+    let Some(session) = session else {
         return Err(
             ApiError::forbidden("a2a handshake required before calling evolution routes")
                 .with_request_id(rid.to_string())
@@ -1591,6 +1703,40 @@ async fn ensure_a2a_capability(
                 })),
         );
     };
+    if session.expires_at <= now {
+        state.a2a_sessions.write().await.remove(sender_id);
+        #[cfg(feature = "sqlite-persistence")]
+        if let Some(repo) = state.runtime_repo.as_ref() {
+            let _ = repo.purge_expired_a2a_sessions(now);
+        }
+        return Err(
+            ApiError::forbidden("a2a session expired; handshake required")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "sender_id": sender_id,
+                    "handshake_endpoint": "/v1/evolution/a2a/handshake",
+                })),
+        );
+    }
+    if session.principal.as_ref() != principal {
+        return Err(
+            ApiError::forbidden("negotiated a2a session principal does not match caller")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "sender_id": sender_id,
+                    "expected_principal": session.principal.as_ref().map(|p| serde_json::json!({
+                        "actor_type": p.actor_type.clone(),
+                        "actor_id": p.actor_id.clone(),
+                        "actor_role": p.actor_role.clone(),
+                    })),
+                    "actual_principal": principal.map(|p| serde_json::json!({
+                        "actor_type": p.actor_type.clone(),
+                        "actor_id": p.actor_id.clone(),
+                        "actor_role": p.actor_role.clone(),
+                    })),
+                })),
+        );
+    }
     if !session.enabled_capabilities.contains(&capability) {
         return Err(ApiError::forbidden(
             "negotiated capabilities do not allow this evolution action",
@@ -1625,16 +1771,46 @@ pub async fn evolution_a2a_handshake(
 ) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.agent_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    let principal = resolve_a2a_principal(&headers, &state);
+    let now = Utc::now();
     let response = negotiate_a2a_handshake(&req);
     if response.accepted {
         if let Some(protocol) = response.negotiated_protocol.clone() {
-            state.a2a_sessions.write().await.insert(
-                req.agent_id.clone(),
-                A2aSession {
-                    negotiated_protocol: protocol,
-                    enabled_capabilities: response.enabled_capabilities.clone(),
-                },
-            );
+            let expires_at = now + Duration::hours(A2A_SESSION_TTL_HOURS);
+            let session = A2aSession {
+                negotiated_protocol: protocol.clone(),
+                enabled_capabilities: response.enabled_capabilities.clone(),
+                principal: principal.clone(),
+                expires_at,
+            };
+            state
+                .a2a_sessions
+                .write()
+                .await
+                .insert(req.agent_id.clone(), session.clone());
+            #[cfg(feature = "sqlite-persistence")]
+            if let Some(repo) = state.runtime_repo.as_ref() {
+                repo.upsert_a2a_session(&A2aSessionRow {
+                    sender_id: req.agent_id.clone(),
+                    protocol: protocol.name,
+                    protocol_version: protocol.version,
+                    enabled_capabilities_json: serde_json::to_string(&session.enabled_capabilities)
+                        .map_err(|e| {
+                            ApiError::internal(format!(
+                                "serialize negotiated a2a capabilities: {}",
+                                e
+                            ))
+                            .with_request_id(rid.clone())
+                        })?,
+                    actor_type: session.principal.as_ref().map(|p| p.actor_type.clone()),
+                    actor_id: session.principal.as_ref().and_then(|p| p.actor_id.clone()),
+                    actor_role: session.principal.as_ref().map(|p| p.actor_role.clone()),
+                    negotiated_at: now,
+                    expires_at: session.expires_at,
+                    updated_at: now,
+                })
+                .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+            }
         }
     }
     Ok(Json(ApiEnvelope {
@@ -3712,6 +3888,136 @@ mod tests {
         assert_eq!(
             publish_json["error"]["message"],
             "negotiated capabilities do not allow this evolution action"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_session_survives_restart_with_sqlite_persistence() {
+        let db_path =
+            std::env::temp_dir().join(format!("oris-a2a-session-{}.sqlite", uuid::Uuid::new_v4()));
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let store_root =
+            std::env::temp_dir().join(format!("oris-evolution-a2a-store-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&store_root);
+
+        let router = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, &db_path_str)
+                .with_evolution_store(Arc::new(crate::evolution::JsonlEvolutionStore::new(
+                    &store_root,
+                ))),
+        );
+        let handshake_json = handshake_agent_with_caps(
+            &router,
+            "node-a",
+            &["EvolutionPublish", "EvolutionFetch", "EvolutionRevoke"],
+        )
+        .await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
+        drop(router);
+
+        let restarted_router = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, &db_path_str)
+                .with_evolution_store(Arc::new(crate::evolution::JsonlEvolutionStore::new(
+                    &store_root,
+                ))),
+        );
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-a",
+                    "assets": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let publish_resp = restarted_router.oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::OK);
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_session_rejects_principal_mismatch() {
+        let router = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_persisted_api_key_record_with_role(
+                    "agent-a",
+                    "secret-a",
+                    true,
+                    ApiRole::Admin,
+                )
+                .with_persisted_api_key_record_with_role(
+                    "agent-b",
+                    "secret-b",
+                    true,
+                    ApiRole::Admin,
+                ),
+        );
+
+        let handshake_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/handshake")
+            .header("x-api-key-id", "agent-a")
+            .header("x-api-key", "secret-a")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "node-a",
+                    "role": "Planner",
+                    "capability_level": "A1",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION
+                        }
+                    ],
+                    "advertised_capabilities": ["EvolutionPublish"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let handshake_resp = router.clone().oneshot(handshake_req).await.unwrap();
+        assert_eq!(handshake_resp.status(), StatusCode::OK);
+
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("x-api-key-id", "agent-b")
+            .header("x-api-key", "secret-b")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-a",
+                    "assets": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let publish_resp = router.oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::FORBIDDEN);
+        let publish_body = axum::body::to_bytes(publish_resp.into_body(), usize::MAX)
+            .await
+            .expect("publish body");
+        let publish_json: serde_json::Value =
+            serde_json::from_slice(&publish_body).expect("publish json");
+        assert_eq!(
+            publish_json["error"]["message"],
+            "negotiated a2a session principal does not match caller"
         );
     }
 
