@@ -25,6 +25,9 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
 - execution-server enforces negotiated A2A capabilities for `/v1/evolution/publish`, `/v1/evolution/fetch`, and `/v1/evolution/revoke` when `agent-contract-experimental` is enabled
 - when `sqlite-persistence` is enabled, negotiated A2A sessions are persisted in runtime repository storage and survive process restart
 - negotiated sessions are bound to authenticated caller identity (`actor_type`, `actor_id`, `actor_role`) when auth is enabled
+- execution-server records A2A task lifecycle events (`Queued`, `Running`, `Succeeded`, `Failed`, `Cancelled`) for runtime task execution stages
+- lifecycle events are retrievable by `task_id` through `GET /v1/evolution/a2a/tasks/:task_id/lifecycle`
+- replay failures and worker supervised acknowledgements are mapped into lifecycle terminal transitions
 
 Not yet implemented in the checked-in code:
 

@@ -20,8 +20,10 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
   - `POST /v1/evolution/fetch`
   - `POST /v1/evolution/revoke`
   - `POST /v1/evolution/a2a/handshake` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
+  - `GET /v1/evolution/a2a/tasks/:task_id/lifecycle` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
 - when `agent-contract-experimental` is enabled, publish/fetch/revoke calls require a prior successful handshake for the same `sender_id` and a negotiated matching capability
 - when both `agent-contract-experimental` and `sqlite-persistence` are enabled, negotiated handshake sessions are persisted in runtime storage and can be reused after process restart
+- runtime task execution, replay outcomes, and worker supervised acknowledgements now emit A2A lifecycle transitions that can be queried by task id
 
 Not yet implemented in the checked-in crate:
 

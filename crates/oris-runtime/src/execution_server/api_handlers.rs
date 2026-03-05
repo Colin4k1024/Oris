@@ -27,7 +27,8 @@ use tokio::sync::RwLock;
     feature = "evolution-network-experimental"
 ))]
 use crate::agent_contract::{
-    A2aCapability, A2aErrorCode, A2aHandshakeRequest, A2aHandshakeResponse, A2aProtocol,
+    A2aCapability, A2aErrorCode, A2aErrorEnvelope, A2aHandshakeRequest, A2aHandshakeResponse,
+    A2aProtocol, A2aTaskLifecycleEvent, A2aTaskLifecycleState,
 };
 #[cfg(feature = "evolution-network-experimental")]
 use crate::evolution::{
@@ -210,6 +211,22 @@ struct A2aSession {
     feature = "evolution-network-experimental"
 ))]
 const A2A_SESSION_TTL_HOURS: i64 = 24;
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const A2A_TASK_EVENT_HISTORY_LIMIT: usize = 256;
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aTaskLifecycleResponse {
+    task_id: String,
+    events: Vec<A2aTaskLifecycleEvent>,
+}
 
 const METRIC_BUCKETS_MS: [f64; 9] = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
 
@@ -563,6 +580,11 @@ pub struct ExecutionApiState {
         feature = "evolution-network-experimental"
     ))]
     a2a_sessions: Arc<RwLock<HashMap<String, A2aSession>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    a2a_task_lifecycle_events: Arc<RwLock<HashMap<String, Vec<A2aTaskLifecycleEvent>>>>,
     pub auth: ExecutionApiAuthConfig,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
@@ -593,6 +615,11 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             a2a_sessions: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            a2a_task_lifecycle_events: Arc::new(RwLock::new(HashMap::new())),
             auth: ExecutionApiAuthConfig::default(),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
@@ -796,7 +823,12 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
         .route("/v1/evolution/fetch", post(evolution_fetch))
         .route("/v1/evolution/revoke", post(evolution_revoke));
     #[cfg(feature = "agent-contract-experimental")]
-    let router = router.route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake));
+    let router = router
+        .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
+        .route(
+            "/v1/evolution/a2a/tasks/:task_id/lifecycle",
+            get(evolution_a2a_task_lifecycle),
+        );
     router
 }
 
@@ -1490,6 +1522,171 @@ async fn ensure_not_cancelled(state: &ExecutionApiState, thread_id: &str) -> Res
     Ok(())
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn lifecycle_timestamp_ms(now: chrono::DateTime<Utc>) -> u64 {
+    now.timestamp_millis().max(0) as u64
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn append_a2a_task_lifecycle_event(
+    state: &ExecutionApiState,
+    task_id: &str,
+    lifecycle_state: A2aTaskLifecycleState,
+    summary: &str,
+    error: Option<A2aErrorEnvelope>,
+) {
+    let event = A2aTaskLifecycleEvent {
+        task_id: task_id.to_string(),
+        state: lifecycle_state,
+        summary: summary.to_string(),
+        updated_at_ms: lifecycle_timestamp_ms(Utc::now()),
+        error,
+    };
+    let mut events = state.a2a_task_lifecycle_events.write().await;
+    let task_events = events.entry(task_id.to_string()).or_default();
+    task_events.push(event);
+    if task_events.len() > A2A_TASK_EVENT_HISTORY_LIMIT {
+        let overflow = task_events.len() - A2A_TASK_EVENT_HISTORY_LIMIT;
+        task_events.drain(..overflow);
+    }
+}
+
+async fn record_task_queued(state: &ExecutionApiState, task_id: &str, summary: &str) {
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    {
+        append_a2a_task_lifecycle_event(
+            state,
+            task_id,
+            A2aTaskLifecycleState::Queued,
+            summary,
+            None,
+        )
+        .await;
+        return;
+    }
+
+    #[cfg(not(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    )))]
+    let _ = (state, task_id, summary);
+}
+
+async fn record_task_running(state: &ExecutionApiState, task_id: &str, summary: &str) {
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    {
+        append_a2a_task_lifecycle_event(
+            state,
+            task_id,
+            A2aTaskLifecycleState::Running,
+            summary,
+            None,
+        )
+        .await;
+        return;
+    }
+
+    #[cfg(not(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    )))]
+    let _ = (state, task_id, summary);
+}
+
+async fn record_task_succeeded(state: &ExecutionApiState, task_id: &str, summary: &str) {
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    {
+        append_a2a_task_lifecycle_event(
+            state,
+            task_id,
+            A2aTaskLifecycleState::Succeeded,
+            summary,
+            None,
+        )
+        .await;
+        return;
+    }
+
+    #[cfg(not(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    )))]
+    let _ = (state, task_id, summary);
+}
+
+async fn record_task_failed(
+    state: &ExecutionApiState,
+    task_id: &str,
+    summary: &str,
+    details: Option<String>,
+) {
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    {
+        append_a2a_task_lifecycle_event(
+            state,
+            task_id,
+            A2aTaskLifecycleState::Failed,
+            summary,
+            Some(A2aErrorEnvelope {
+                code: A2aErrorCode::Internal,
+                message: summary.to_string(),
+                retriable: false,
+                details,
+            }),
+        )
+        .await;
+        return;
+    }
+
+    #[cfg(not(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    )))]
+    let _ = (state, task_id, summary, details);
+}
+
+async fn record_task_cancelled(state: &ExecutionApiState, task_id: &str, summary: &str) {
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    {
+        append_a2a_task_lifecycle_event(
+            state,
+            task_id,
+            A2aTaskLifecycleState::Cancelled,
+            summary,
+            None,
+        )
+        .await;
+        return;
+    }
+
+    #[cfg(not(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    )))]
+    let _ = (state, task_id, summary);
+}
+
 #[cfg(feature = "evolution-network-experimental")]
 pub async fn evolution_publish(
     State(state): State<ExecutionApiState>,
@@ -1820,6 +2017,36 @@ pub async fn evolution_a2a_handshake(
     }))
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_task_lifecycle(
+    State(state): State<ExecutionApiState>,
+    Path(task_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<A2aTaskLifecycleResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_thread_id(&task_id).map_err(|e| e.with_request_id(rid.clone()))?;
+
+    let events = state
+        .a2a_task_lifecycle_events
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::not_found(format!("No A2A lifecycle found for task: {task_id}"))
+                .with_request_id(rid.clone())
+        })?;
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: A2aTaskLifecycleResponse { task_id, events },
+    }))
+}
+
 #[cfg(feature = "sqlite-persistence")]
 fn runtime_repo<'a>(
     state: &'a ExecutionApiState,
@@ -2016,6 +2243,14 @@ pub async fn run_job(
         }
     }
 
+    record_task_queued(
+        &state,
+        &req.thread_id,
+        "task accepted into runtime execution queue",
+    )
+    .await;
+    record_task_running(&state, &req.thread_id, "task execution started").await;
+
     let run_trace = TraceContextState::new_from_headers(&headers, &rid)?;
     let run_span = lifecycle_span(
         "job.run",
@@ -2026,14 +2261,26 @@ pub async fn run_job(
         Some(&run_trace),
     );
 
-    let result = state
+    let result = match state
         .graph_bridge
         .run(&req.thread_id, &input)
         .instrument(run_span)
         .await
-        .map_err(|e| {
-            ApiError::internal(format!("run failed: {}", e)).with_request_id(rid.clone())
-        })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            let error_message = e.to_string();
+            record_task_failed(
+                &state,
+                &req.thread_id,
+                "task execution failed",
+                Some(error_message.clone()),
+            )
+            .await;
+            return Err(ApiError::internal(format!("run failed: {}", error_message))
+                .with_request_id(rid.clone()));
+        }
+    };
 
     let interrupts = result.interrupts;
     let status = if interrupts.is_empty() {
@@ -2041,6 +2288,16 @@ pub async fn run_job(
     } else {
         "interrupted".to_string()
     };
+    if interrupts.is_empty() {
+        record_task_succeeded(&state, &req.thread_id, "task completed successfully").await;
+    } else {
+        record_task_running(
+            &state,
+            &req.thread_id,
+            "task interrupted and waiting for resume",
+        )
+        .await;
+    }
 
     let response = RunJobResponse {
         thread_id: req.thread_id.clone(),
@@ -2309,13 +2566,29 @@ pub async fn resume_job(
             .unwrap_or_else(|| "none".to_string())
     );
 
-    let result = state
+    record_task_running(&state, &thread_id, "task resume execution started").await;
+
+    let result = match state
         .graph_bridge
         .resume(&thread_id, req.checkpoint_id.as_deref(), req.value)
         .await
-        .map_err(|e| {
-            ApiError::internal(format!("resume failed: {}", e)).with_request_id(rid.clone())
-        })?;
+    {
+        Ok(result) => result,
+        Err(e) => {
+            let error_message = e.to_string();
+            record_task_failed(
+                &state,
+                &thread_id,
+                "task resume execution failed",
+                Some(error_message.clone()),
+            )
+            .await;
+            return Err(
+                ApiError::internal(format!("resume failed: {}", error_message))
+                    .with_request_id(rid.clone()),
+            );
+        }
+    };
 
     let interrupts: Vec<Value> = result.interrupts;
     let status = if interrupts.is_empty() {
@@ -2323,6 +2596,16 @@ pub async fn resume_job(
     } else {
         "interrupted".to_string()
     };
+    if interrupts.is_empty() {
+        record_task_succeeded(&state, &thread_id, "task resume completed successfully").await;
+    } else {
+        record_task_running(
+            &state,
+            &thread_id,
+            "task interrupted again and waiting for resume",
+        )
+        .await;
+    }
 
     #[cfg(feature = "sqlite-persistence")]
     if let Some(repo) = state.runtime_repo.as_ref() {
@@ -2430,6 +2713,8 @@ pub async fn replay_job(
             .unwrap_or_else(|| "none".to_string())
     );
 
+    record_task_running(&state, &thread_id, "task replay execution started").await;
+
     match state
         .graph_bridge
         .replay(&thread_id, req.checkpoint_id.as_deref())
@@ -2437,17 +2722,28 @@ pub async fn replay_job(
     {
         Ok(()) => {}
         Err(e) => {
+            let error_message = e.to_string();
             #[cfg(feature = "sqlite-persistence")]
             if let (Some(repo), Some(fingerprint)) =
                 (state.runtime_repo.as_ref(), replay_guard.as_deref())
             {
                 let _ = repo.abandon_replay_effect(fingerprint);
             }
+            record_task_failed(
+                &state,
+                &thread_id,
+                "task replay execution failed",
+                Some(error_message.clone()),
+            )
+            .await;
             return Err(
-                ApiError::internal(format!("replay failed: {}", e)).with_request_id(rid.clone())
+                ApiError::internal(format!("replay failed: {}", error_message))
+                    .with_request_id(rid.clone()),
             );
         }
     }
+
+    record_task_succeeded(&state, &thread_id, "task replay completed successfully").await;
 
     let response = RunJobResponse {
         thread_id: thread_id.clone(),
@@ -2497,13 +2793,18 @@ pub async fn cancel_job(
         .write()
         .await
         .insert(thread_id.clone());
+    let reason = req.reason.clone();
+    let cancel_summary = reason
+        .clone()
+        .unwrap_or_else(|| "task cancelled via API request".to_string());
+    record_task_cancelled(&state, &thread_id, cancel_summary.as_str()).await;
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
         data: CancelJobResponse {
             thread_id,
             status: "cancelled".to_string(),
-            reason: req.reason,
+            reason,
         },
     }))
 }
@@ -3461,6 +3762,11 @@ pub async fn worker_report_step(
         ("reported".to_string(), None)
     };
 
+    let report_summary = format!(
+        "worker step report accepted: action={} status={}",
+        req.action_id, req.status
+    );
+    record_task_running(&state, &req.attempt_id, report_summary.as_str()).await;
     let _span = lifecycle_span(
         "attempt.step_report",
         &rid,
@@ -3519,15 +3825,6 @@ pub async fn worker_ack(
             .advance_attempt_trace(&req.attempt_id, &generate_span_id())
             .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
             .map(TraceContextState::from_row);
-        let _span = lifecycle_span(
-            "attempt.ack",
-            &rid,
-            None,
-            Some(&req.attempt_id),
-            Some(&worker_id),
-            trace.as_ref(),
-        )
-        .entered();
         let response_status = match outcome.status {
             AttemptExecutionStatus::RetryBackoff => "retry_scheduled".to_string(),
             AttemptExecutionStatus::Completed => "completed".to_string(),
@@ -3537,6 +3834,39 @@ pub async fn worker_ack(
             AttemptExecutionStatus::Leased => "leased".to_string(),
             AttemptExecutionStatus::Running => "running".to_string(),
         };
+        let lifecycle_summary = format!("worker ack outcome: {}", response_status);
+        match outcome.status {
+            AttemptExecutionStatus::Completed => {
+                record_task_succeeded(&state, &req.attempt_id, lifecycle_summary.as_str()).await;
+            }
+            AttemptExecutionStatus::Failed => {
+                record_task_failed(
+                    &state,
+                    &req.attempt_id,
+                    "worker reported terminal failure",
+                    Some(lifecycle_summary.clone()),
+                )
+                .await;
+            }
+            AttemptExecutionStatus::Cancelled => {
+                record_task_cancelled(&state, &req.attempt_id, lifecycle_summary.as_str()).await;
+            }
+            AttemptExecutionStatus::RetryBackoff
+            | AttemptExecutionStatus::Queued
+            | AttemptExecutionStatus::Leased
+            | AttemptExecutionStatus::Running => {
+                record_task_running(&state, &req.attempt_id, lifecycle_summary.as_str()).await;
+            }
+        }
+        let _span = lifecycle_span(
+            "attempt.ack",
+            &rid,
+            None,
+            Some(&req.attempt_id),
+            Some(&worker_id),
+            trace.as_ref(),
+        )
+        .entered();
         return Ok(Json(ApiEnvelope {
             meta: ApiMeta::ok(),
             request_id: rid,
@@ -3686,6 +4016,24 @@ mod tests {
             .await
             .expect("handshake body");
         serde_json::from_slice(&handshake_body).expect("handshake json")
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    async fn fetch_lifecycle_events(router: &axum::Router, task_id: &str) -> serde_json::Value {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/evolution/a2a/tasks/{task_id}/lifecycle"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("lifecycle body");
+        serde_json::from_slice(&body).expect("lifecycle json")
     }
 
     #[cfg(feature = "evolution-network-experimental")]
@@ -4080,6 +4428,140 @@ mod tests {
             json["data"]["error"]["code"],
             serde_json::json!("UnsupportedProtocol")
         );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_lifecycle_events_track_run_flow_and_query_by_task_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "a2a-lifecycle-run-1",
+                    "input": "run lifecycle"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+
+        let lifecycle_json = fetch_lifecycle_events(&router, "a2a-lifecycle-run-1").await;
+        let events = lifecycle_json["data"]["events"]
+            .as_array()
+            .expect("lifecycle events array");
+        assert_eq!(events.len(), 3);
+        let states: Vec<&str> = events
+            .iter()
+            .map(|event| {
+                event["state"]
+                    .as_str()
+                    .expect("lifecycle state should be a string")
+            })
+            .collect();
+        assert_eq!(states, vec!["Queued", "Running", "Succeeded"]);
+
+        let updated_at_ms: Vec<u64> = events
+            .iter()
+            .map(|event| event["updated_at_ms"].as_u64().expect("updated_at_ms"))
+            .collect();
+        assert!(
+            updated_at_ms.windows(2).all(|pair| pair[0] <= pair[1]),
+            "lifecycle timestamps should be non-decreasing"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_lifecycle_events_capture_replay_failure_terminal_state() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let replay_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/a2a-replay-missing/replay")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({}).to_string()))
+            .unwrap();
+        let replay_resp = router.clone().oneshot(replay_req).await.unwrap();
+        assert_eq!(replay_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let lifecycle_json = fetch_lifecycle_events(&router, "a2a-replay-missing").await;
+        let events = lifecycle_json["data"]["events"]
+            .as_array()
+            .expect("lifecycle events array");
+        let states: Vec<&str> = events
+            .iter()
+            .map(|event| event["state"].as_str().expect("lifecycle state"))
+            .collect();
+        assert_eq!(states, vec!["Running", "Failed"]);
+        assert_eq!(events[1]["error"]["code"], serde_json::json!("Internal"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_lifecycle_events_capture_worker_supervised_flow() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        repo.enqueue_attempt("attempt-a2a-supervised-1", "run-a2a-supervised-1")
+            .expect("enqueue supervised attempt");
+        let router = build_router(state);
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/worker-a2a/report-step")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "attempt_id": "attempt-a2a-supervised-1",
+                    "action_id": "step-1",
+                    "status": "running",
+                    "dedupe_token": "dedupe-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+
+        let ack_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/workers/worker-a2a/ack")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "attempt_id": "attempt-a2a-supervised-1",
+                    "terminal_status": "completed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let ack_resp = router.clone().oneshot(ack_req).await.unwrap();
+        assert_eq!(ack_resp.status(), StatusCode::OK);
+
+        let lifecycle_json = fetch_lifecycle_events(&router, "attempt-a2a-supervised-1").await;
+        let events = lifecycle_json["data"]["events"]
+            .as_array()
+            .expect("lifecycle events array");
+        let states: Vec<&str> = events
+            .iter()
+            .map(|event| event["state"].as_str().expect("lifecycle state"))
+            .collect();
+        assert_eq!(states, vec!["Running", "Succeeded"]);
     }
 
     #[tokio::test]
