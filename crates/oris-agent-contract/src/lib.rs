@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 pub const A2A_PROTOCOL_NAME: &str = "oris.a2a";
 pub const A2A_PROTOCOL_VERSION: &str = "0.1.0-experimental";
+pub const A2A_PROTOCOL_VERSION_V1: &str = "1.0.0";
+pub const A2A_SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] =
+    [A2A_PROTOCOL_VERSION_V1, A2A_PROTOCOL_VERSION];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct A2aProtocol {
@@ -41,10 +44,26 @@ pub struct A2aHandshakeRequest {
 }
 
 impl A2aHandshakeRequest {
+    pub fn supports_protocol_version(&self, version: &str) -> bool {
+        self.supported_protocols
+            .iter()
+            .any(|protocol| protocol.name == A2A_PROTOCOL_NAME && protocol.version == version)
+    }
+
     pub fn supports_current_protocol(&self) -> bool {
-        self.supported_protocols.iter().any(|protocol| {
-            protocol.name == A2A_PROTOCOL_NAME && protocol.version == A2A_PROTOCOL_VERSION
-        })
+        self.supports_protocol_version(A2A_PROTOCOL_VERSION)
+    }
+
+    pub fn negotiate_supported_protocol(&self) -> Option<A2aProtocol> {
+        for version in A2A_SUPPORTED_PROTOCOL_VERSIONS {
+            if self.supports_protocol_version(version) {
+                return Some(A2aProtocol {
+                    name: A2A_PROTOCOL_NAME.to_string(),
+                    version: version.to_string(),
+                });
+            }
+        }
+        None
     }
 }
 
@@ -361,4 +380,50 @@ pub struct SupervisedDevloopOutcome {
     pub status: SupervisedDevloopStatus,
     pub execution_feedback: Option<ExecutionFeedback>,
     pub summary: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handshake_request_with_versions(versions: &[&str]) -> A2aHandshakeRequest {
+        A2aHandshakeRequest {
+            agent_id: "agent-test".into(),
+            role: AgentRole::Planner,
+            capability_level: AgentCapabilityLevel::A2,
+            supported_protocols: versions
+                .iter()
+                .map(|version| A2aProtocol {
+                    name: A2A_PROTOCOL_NAME.into(),
+                    version: (*version).into(),
+                })
+                .collect(),
+            advertised_capabilities: vec![A2aCapability::Coordination],
+        }
+    }
+
+    #[test]
+    fn negotiate_supported_protocol_prefers_v1_when_available() {
+        let req = handshake_request_with_versions(&[A2A_PROTOCOL_VERSION, A2A_PROTOCOL_VERSION_V1]);
+        let negotiated = req
+            .negotiate_supported_protocol()
+            .expect("expected protocol negotiation success");
+        assert_eq!(negotiated.name, A2A_PROTOCOL_NAME);
+        assert_eq!(negotiated.version, A2A_PROTOCOL_VERSION_V1);
+    }
+
+    #[test]
+    fn negotiate_supported_protocol_falls_back_to_experimental() {
+        let req = handshake_request_with_versions(&[A2A_PROTOCOL_VERSION]);
+        let negotiated = req
+            .negotiate_supported_protocol()
+            .expect("expected protocol negotiation success");
+        assert_eq!(negotiated.version, A2A_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn negotiate_supported_protocol_returns_none_without_overlap() {
+        let req = handshake_request_with_versions(&["0.0.1"]);
+        assert!(req.negotiate_supported_protocol().is_none());
+    }
 }

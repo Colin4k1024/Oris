@@ -1,6 +1,9 @@
 # HELP oris_runtime_queue_depth Number of dispatchable attempts currently queued.
 # TYPE oris_runtime_queue_depth gauge
 oris_runtime_queue_depth 1
+# HELP oris_a2a_task_queue_depth Number of compatibility A2A tasks currently queued.
+# TYPE oris_a2a_task_queue_depth gauge
+oris_a2a_task_queue_depth 0
 # HELP oris_runtime_lease_operations_total Total lease-sensitive operations observed.
 # TYPE oris_runtime_lease_operations_total counter
 oris_runtime_lease_operations_total 3
@@ -50,3 +53,34 @@ oris_runtime_recovery_latency_ms_bucket{le="1000"} 1
 oris_runtime_recovery_latency_ms_bucket{le="+Inf"} 1
 oris_runtime_recovery_latency_ms_sum 0.270000
 oris_runtime_recovery_latency_ms_count 1
+# HELP oris_a2a_task_lease_expired_total Number of compat A2A task leases reclaimed after expiry.
+# TYPE oris_a2a_task_lease_expired_total counter
+oris_a2a_task_lease_expired_total 1
+# HELP oris_a2a_task_claim_latency_ms Compatibility A2A task claim latency in milliseconds.
+# TYPE oris_a2a_task_claim_latency_ms histogram
+oris_a2a_task_claim_latency_ms_bucket{le="1"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="5"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="10"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="25"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="50"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="100"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="250"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="500"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="1000"} 2
+oris_a2a_task_claim_latency_ms_bucket{le="+Inf"} 2
+oris_a2a_task_claim_latency_ms_sum 0.610000
+oris_a2a_task_claim_latency_ms_count 2
+# HELP oris_a2a_report_to_capture_latency_ms Compatibility A2A terminal report to capture latency in milliseconds.
+# TYPE oris_a2a_report_to_capture_latency_ms histogram
+oris_a2a_report_to_capture_latency_ms_bucket{le="1"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="5"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="10"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="25"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="50"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="100"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="250"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="500"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="1000"} 1
+oris_a2a_report_to_capture_latency_ms_bucket{le="+Inf"} 1
+oris_a2a_report_to_capture_latency_ms_sum 0.420000
+oris_a2a_report_to_capture_latency_ms_count 1

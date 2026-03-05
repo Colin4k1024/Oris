@@ -11,7 +11,7 @@ use oris_kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
-const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 10;
+const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 11;
 
 #[derive(Clone)]
 pub struct SqliteRuntimeRepository {
@@ -209,6 +209,10 @@ impl SqliteRuntimeRepository {
         if current < 10 {
             apply_sqlite_runtime_migration_v10(&conn)?;
             record_sqlite_migration(&conn, 10, "runtime_a2a_sessions")?;
+        }
+        if current < 11 {
+            apply_sqlite_runtime_migration_v11(&conn)?;
+            record_sqlite_migration(&conn, 11, "runtime_a2a_compat_tasks")?;
         }
         Ok(())
     }
@@ -622,6 +626,19 @@ impl SqliteRuntimeRepository {
                 |r| r.get(0),
             )
             .map_err(|e| KernelError::Driver(format!("queue depth: {}", e)))?;
+        Ok(count as usize)
+    }
+
+    pub fn a2a_compat_queue_depth(&self) -> Result<usize, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_a2a_compat_tasks", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| KernelError::Driver(format!("a2a compat queue depth: {}", e)))?;
         Ok(count as usize)
     }
 
@@ -1699,6 +1716,213 @@ impl SqliteRuntimeRepository {
         Ok(deleted as u64)
     }
 
+    pub fn upsert_a2a_compat_task(&self, task: &A2aCompatTaskRow) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_a2a_compat_tasks
+             (session_id, sender_id, protocol_version, task_id, task_summary, dispatch_id, claimed_by_sender_id, lease_expires_at_ms, enqueued_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(session_id)
+             DO UPDATE SET
+               sender_id = excluded.sender_id,
+               protocol_version = excluded.protocol_version,
+               task_id = excluded.task_id,
+               task_summary = excluded.task_summary,
+               dispatch_id = excluded.dispatch_id,
+               updated_at_ms = excluded.updated_at_ms",
+            params![
+                &task.session_id,
+                &task.sender_id,
+                &task.protocol_version,
+                &task.task_id,
+                &task.task_summary,
+                &task.dispatch_id,
+                task.claimed_by_sender_id.as_deref(),
+                task.lease_expires_at.map(dt_to_ms),
+                dt_to_ms(task.enqueued_at),
+                dt_to_ms(task.updated_at),
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("upsert a2a compat task: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn claim_a2a_compat_task(
+        &self,
+        sender_id: &str,
+        protocol_version: &str,
+        now: DateTime<Utc>,
+        lease_duration_ms: u64,
+    ) -> Result<A2aCompatClaimOutcome, KernelError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| KernelError::Driver(format!("begin claim a2a compat task tx: {}", e)))?;
+        let now_ms = dt_to_ms(now);
+        let candidate = tx
+            .query_row(
+                "SELECT session_id, sender_id, protocol_version, task_id, task_summary, dispatch_id,
+                        claimed_by_sender_id, lease_expires_at_ms, enqueued_at_ms, updated_at_ms
+                 FROM runtime_a2a_compat_tasks
+                 WHERE sender_id = ?1
+                   AND protocol_version = ?2
+                   AND (
+                     claimed_by_sender_id IS NULL
+                     OR lease_expires_at_ms IS NULL
+                     OR lease_expires_at_ms <= ?3
+                   )
+                 ORDER BY enqueued_at_ms ASC
+                 LIMIT 1",
+                params![sender_id, protocol_version, now_ms],
+                map_row_to_a2a_compat_task,
+            )
+            .optional()
+            .map_err(|e| KernelError::Driver(format!("query claim a2a compat task: {}", e)))?;
+
+        if let Some(mut task) = candidate {
+            let reclaimed_expired_lease = task.claimed_by_sender_id.is_some()
+                && task
+                    .lease_expires_at
+                    .map(|expires_at| expires_at <= now)
+                    .unwrap_or(true);
+            let lease_ms_i64 = i64::try_from(lease_duration_ms).unwrap_or(i64::MAX / 4);
+            let lease_expires_at_ms = now_ms.saturating_add(lease_ms_i64.max(1));
+            let updated = tx
+                .execute(
+                    "UPDATE runtime_a2a_compat_tasks
+                     SET claimed_by_sender_id = ?2,
+                         lease_expires_at_ms = ?3,
+                         updated_at_ms = ?4
+                     WHERE session_id = ?1
+                       AND sender_id = ?5
+                       AND protocol_version = ?6
+                       AND (
+                         claimed_by_sender_id IS NULL
+                         OR lease_expires_at_ms IS NULL
+                         OR lease_expires_at_ms <= ?4
+                       )",
+                    params![
+                        &task.session_id,
+                        sender_id,
+                        lease_expires_at_ms,
+                        now_ms,
+                        sender_id,
+                        protocol_version
+                    ],
+                )
+                .map_err(|e| KernelError::Driver(format!("update claim a2a compat task: {}", e)))?;
+            if updated > 0 {
+                tx.commit().map_err(|e| {
+                    KernelError::Driver(format!("commit claim a2a compat task: {}", e))
+                })?;
+                task.claimed_by_sender_id = Some(sender_id.to_string());
+                task.lease_expires_at = Some(ms_to_dt(lease_expires_at_ms));
+                task.updated_at = now;
+                return Ok(A2aCompatClaimOutcome {
+                    task: Some(task),
+                    retry_after_ms: None,
+                    reclaimed_expired_lease,
+                });
+            }
+        }
+
+        let retry_after_ms = tx
+            .query_row(
+                "SELECT MIN(lease_expires_at_ms - ?3)
+                 FROM runtime_a2a_compat_tasks
+                 WHERE sender_id = ?1
+                   AND protocol_version = ?2
+                   AND claimed_by_sender_id IS NOT NULL
+                   AND lease_expires_at_ms > ?3",
+                params![sender_id, protocol_version, now_ms],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(|e| KernelError::Driver(format!("query claim retry_after a2a compat: {}", e)))?
+            .and_then(|ms| if ms > 0 { u64::try_from(ms).ok() } else { None });
+
+        tx.commit().map_err(|e| {
+            KernelError::Driver(format!("commit claim miss a2a compat task: {}", e))
+        })?;
+        Ok(A2aCompatClaimOutcome {
+            task: None,
+            retry_after_ms,
+            reclaimed_expired_lease: false,
+        })
+    }
+
+    pub fn get_a2a_compat_task(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<A2aCompatTaskRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.query_row(
+            "SELECT session_id, sender_id, protocol_version, task_id, task_summary, dispatch_id,
+                    claimed_by_sender_id, lease_expires_at_ms, enqueued_at_ms, updated_at_ms
+             FROM runtime_a2a_compat_tasks
+             WHERE session_id = ?1",
+            params![session_id],
+            map_row_to_a2a_compat_task,
+        )
+        .optional()
+        .map_err(|e| KernelError::Driver(format!("get a2a compat task: {}", e)))
+    }
+
+    pub fn touch_a2a_compat_task_lease(
+        &self,
+        session_id: &str,
+        sender_id: &str,
+        now: DateTime<Utc>,
+        lease_duration_ms: u64,
+    ) -> Result<bool, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let now_ms = dt_to_ms(now);
+        let lease_ms_i64 = i64::try_from(lease_duration_ms).unwrap_or(i64::MAX / 4);
+        let lease_expires_at_ms = now_ms.saturating_add(lease_ms_i64.max(1));
+        let updated = conn
+            .execute(
+                "UPDATE runtime_a2a_compat_tasks
+                 SET claimed_by_sender_id = ?2,
+                     lease_expires_at_ms = ?3,
+                     updated_at_ms = ?4
+                 WHERE session_id = ?1
+                   AND (
+                     claimed_by_sender_id IS NULL
+                     OR claimed_by_sender_id = ?2
+                     OR lease_expires_at_ms IS NULL
+                     OR lease_expires_at_ms <= ?4
+                   )",
+                params![session_id, sender_id, lease_expires_at_ms, now_ms],
+            )
+            .map_err(|e| KernelError::Driver(format!("touch a2a compat task lease: {}", e)))?;
+        Ok(updated > 0)
+    }
+
+    pub fn remove_a2a_compat_task(&self, session_id: &str) -> Result<u64, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let removed = conn
+            .execute(
+                "DELETE FROM runtime_a2a_compat_tasks WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|e| KernelError::Driver(format!("remove a2a compat task: {}", e)))?;
+        Ok(removed as u64)
+    }
+
     pub fn append_audit_log(&self, entry: &AuditLogEntry) -> Result<(), KernelError> {
         let now = dt_to_ms(Utc::now());
         let conn = self
@@ -1823,6 +2047,21 @@ fn map_row_to_replay_effect_log(row: &rusqlite::Row) -> rusqlite::Result<ReplayE
     })
 }
 
+fn map_row_to_a2a_compat_task(row: &rusqlite::Row) -> rusqlite::Result<A2aCompatTaskRow> {
+    Ok(A2aCompatTaskRow {
+        session_id: row.get(0)?,
+        sender_id: row.get(1)?,
+        protocol_version: row.get(2)?,
+        task_id: row.get(3)?,
+        task_summary: row.get(4)?,
+        dispatch_id: row.get(5)?,
+        claimed_by_sender_id: row.get(6)?,
+        lease_expires_at: row.get::<_, Option<i64>>(7)?.map(ms_to_dt),
+        enqueued_at: ms_to_dt(row.get::<_, i64>(8)?),
+        updated_at: ms_to_dt(row.get::<_, i64>(9)?),
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct InterruptRow {
     pub interrupt_id: String,
@@ -1858,6 +2097,27 @@ pub struct A2aSessionRow {
     pub negotiated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct A2aCompatTaskRow {
+    pub session_id: String,
+    pub sender_id: String,
+    pub protocol_version: String,
+    pub task_id: String,
+    pub task_summary: String,
+    pub dispatch_id: String,
+    pub claimed_by_sender_id: Option<String>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub enqueued_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct A2aCompatClaimOutcome {
+    pub task: Option<A2aCompatTaskRow>,
+    pub retry_after_ms: Option<u64>,
+    pub reclaimed_expired_lease: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2512,6 +2772,31 @@ fn apply_sqlite_runtime_migration_v10(conn: &Connection) -> Result<(), KernelErr
     Ok(())
 }
 
+fn apply_sqlite_runtime_migration_v11(conn: &Connection) -> Result<(), KernelError> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS runtime_a2a_compat_tasks (
+          session_id TEXT PRIMARY KEY,
+          sender_id TEXT NOT NULL,
+          protocol_version TEXT NOT NULL,
+          task_id TEXT NOT NULL,
+          task_summary TEXT NOT NULL,
+          dispatch_id TEXT NOT NULL,
+          claimed_by_sender_id TEXT NULL,
+          lease_expires_at_ms INTEGER NULL,
+          enqueued_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_a2a_compat_tasks_sender_protocol
+          ON runtime_a2a_compat_tasks(sender_id, protocol_version, enqueued_at_ms);
+        CREATE INDEX IF NOT EXISTS idx_runtime_a2a_compat_tasks_lease
+          ON runtime_a2a_compat_tasks(lease_expires_at_ms);
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v11: {}", e)))?;
+    Ok(())
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table: &str,
@@ -2547,7 +2832,7 @@ mod tests {
 
     use super::{
         apply_sqlite_runtime_migration_v1, ensure_sqlite_migration_table, record_sqlite_migration,
-        A2aSessionRow, ReplayEffectClaim, RetryPolicyConfig, RetryStrategy,
+        A2aCompatTaskRow, A2aSessionRow, ReplayEffectClaim, RetryPolicyConfig, RetryStrategy,
         SqliteRuntimeRepository, TimeoutPolicyConfig, SQLITE_RUNTIME_SCHEMA_VERSION,
     };
     use crate::models::AttemptExecutionStatus;
@@ -2647,6 +2932,7 @@ mod tests {
         assert!(table_exists(&conn, "runtime_dead_letters"));
         assert!(table_exists(&conn, "runtime_replay_effects"));
         assert!(table_exists(&conn, "runtime_a2a_sessions"));
+        assert!(table_exists(&conn, "runtime_a2a_compat_tasks"));
 
         let _ = fs::remove_file(path);
     }
@@ -2724,6 +3010,7 @@ mod tests {
         assert!(table_exists(&conn, "runtime_dead_letters"));
         assert!(table_exists(&conn, "runtime_replay_effects"));
         assert!(table_exists(&conn, "runtime_a2a_sessions"));
+        assert!(table_exists(&conn, "runtime_a2a_compat_tasks"));
 
         let migration_v2: Option<String> = conn
             .query_row(
@@ -2818,6 +3105,15 @@ mod tests {
             .optional()
             .expect("query migration v10");
         assert_eq!(migration_v10.as_deref(), Some("runtime_a2a_sessions"));
+        let migration_v11: Option<String> = conn
+            .query_row(
+                "SELECT name FROM runtime_schema_migrations WHERE version = 11",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query migration v11");
+        assert_eq!(migration_v11.as_deref(), Some("runtime_a2a_compat_tasks"));
 
         let _ = fs::remove_file(path);
     }
@@ -2875,6 +3171,102 @@ mod tests {
             .purge_expired_a2a_sessions(now)
             .expect("purge expired sessions");
         assert_eq!(purged, 1);
+    }
+
+    #[test]
+    fn a2a_compat_task_claim_roundtrip_and_lease_reclaim() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite runtime repo");
+        let now = Utc::now();
+
+        assert_eq!(
+            repo.a2a_compat_queue_depth()
+                .expect("initial a2a compat queue depth"),
+            0
+        );
+
+        repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+            session_id: "session-1".to_string(),
+            sender_id: "sender-a".to_string(),
+            protocol_version: "1.0.0".to_string(),
+            task_id: "task-1".to_string(),
+            task_summary: "compat task".to_string(),
+            dispatch_id: "dispatch-1".to_string(),
+            claimed_by_sender_id: None,
+            lease_expires_at: None,
+            enqueued_at: now,
+            updated_at: now,
+        })
+        .expect("upsert compat task");
+        assert_eq!(
+            repo.a2a_compat_queue_depth()
+                .expect("a2a compat queue depth after enqueue"),
+            1
+        );
+
+        let first = repo
+            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000)
+            .expect("first claim");
+        assert!(first.task.is_some());
+        assert_eq!(
+            first.task.as_ref().map(|task| task.task_id.as_str()),
+            Some("task-1")
+        );
+        assert_eq!(first.retry_after_ms, None);
+
+        let second = repo
+            .claim_a2a_compat_task(
+                "sender-a",
+                "1.0.0",
+                now + Duration::milliseconds(100),
+                1_000,
+            )
+            .expect("second claim");
+        assert!(second.task.is_none());
+        assert!(second.retry_after_ms.unwrap_or(0) > 0);
+
+        let reclaimed = repo
+            .claim_a2a_compat_task(
+                "sender-a",
+                "1.0.0",
+                now + Duration::milliseconds(1_200),
+                1_000,
+            )
+            .expect("reclaimed claim");
+        assert!(reclaimed.task.is_some());
+        assert_eq!(
+            reclaimed.task.as_ref().map(|task| task.session_id.as_str()),
+            Some("session-1")
+        );
+
+        let touched = repo
+            .touch_a2a_compat_task_lease(
+                "session-1",
+                "sender-a",
+                now + Duration::milliseconds(1_250),
+                2_000,
+            )
+            .expect("touch claim lease");
+        assert!(touched);
+
+        let removed = repo
+            .remove_a2a_compat_task("session-1")
+            .expect("remove compat task");
+        assert_eq!(removed, 1);
+        assert_eq!(
+            repo.a2a_compat_queue_depth()
+                .expect("a2a compat queue depth after remove"),
+            0
+        );
+
+        let after_remove = repo
+            .claim_a2a_compat_task(
+                "sender-a",
+                "1.0.0",
+                now + Duration::milliseconds(1_300),
+                1_000,
+            )
+            .expect("claim after remove");
+        assert!(after_remove.task.is_none());
     }
 
     #[test]

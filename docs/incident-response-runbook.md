@@ -38,6 +38,8 @@ Treat these as immediate operator attention:
 - worker poll path stops dispatching while queue depth is non-zero
 - recovery latency exceeds alert threshold for more than 10 minutes
 - terminal error rate spikes above the expected baseline
+- compatibility A2A queue depth grows while no compatible claims succeed
+- compatibility A2A lease expiry reclaim rate spikes above expected baseline
 - persistence startup health check fails after deploy
 - duplicate replay behavior is suspected
 
@@ -65,6 +67,10 @@ Key signals:
 - `oris_runtime_recovery_latency_ms`
 - `oris_runtime_backpressure_total`
 - `oris_runtime_terminal_error_rate`
+- `oris_a2a_task_queue_depth`
+- `oris_a2a_task_claim_latency_ms`
+- `oris_a2a_task_lease_expired_total`
+- `oris_a2a_report_to_capture_latency_ms`
 
 ## 4. Incident Playbooks
 
@@ -126,6 +132,23 @@ Actions:
 3. Pause operator-triggered replays until the cause is clear.
 4. If a release caused the regression, roll back the release.
 
+### Compatibility A2A queue stalled or lease churn spike
+
+Symptoms:
+
+- `OrisA2aCompatQueueStalled` alert fires
+- `oris_a2a_task_queue_depth` remains elevated while claim throughput is near zero
+- `oris_a2a_task_lease_expired_total` increases sharply
+
+Actions:
+
+1. Confirm compatibility workers are actively calling `/evolution/a2a/tasks/claim`.
+2. Check audit logs for repeated `a2a.compat.claim` or `a2a.compat.report` failures.
+3. Compare queue depth with `oris_a2a_task_claim_latency_ms` p95 to distinguish worker starvation from API slowness.
+4. Verify worker clocks and lease duration assumptions; skewed clocks can trigger artificial lease reclaim churn.
+5. Restart only unhealthy compatibility workers first; avoid broad manual lease resets unless queue safety is validated.
+6. If `oris_a2a_report_to_capture_latency_ms` is high due to capture/replay failures, route critical flows to native `/v1/evolution/a2a/sessions/*` until mitigation is in place.
+
 ### Failed deploy after schema change
 
 Symptoms:
@@ -184,6 +207,11 @@ Before declaring the incident mitigated:
    - `inspect`
    - worker `poll`
    - worker `ack`
+6. If compatibility A2A traffic is enabled, run one compatibility smoke flow:
+   - `/evolution/a2a/hello`
+   - `/evolution/a2a/tasks/distribute`
+   - `/evolution/a2a/tasks/claim`
+   - `/evolution/a2a/tasks/report`
 
 ## 7. Post-Incident Checklist
 

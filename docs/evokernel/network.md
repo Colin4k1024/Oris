@@ -20,6 +20,10 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
   - `POST /v1/evolution/fetch`
   - `POST /v1/evolution/revoke`
   - `POST /v1/evolution/a2a/handshake` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
+  - `POST /evolution/a2a/hello` (EvoMap-compatible handshake alias)
+  - `POST /evolution/a2a/tasks/distribute` (EvoMap-compatible queue/distribute alias)
+  - `POST /evolution/a2a/tasks/claim` (EvoMap-compatible claim alias)
+  - `POST /evolution/a2a/tasks/report` (EvoMap-compatible progress/complete alias)
   - `POST /v1/evolution/a2a/sessions/start`
   - `POST /v1/evolution/a2a/sessions/:session_id/dispatch`
   - `POST /v1/evolution/a2a/sessions/:session_id/progress`
@@ -34,14 +38,84 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
 - remote A2A task session transitions follow `Started -> Dispatched -> InProgress* -> Completed|Failed|Cancelled`
 - session completion payloads are normalized into `ReplayFeedback` (`SkipPlanner` or `PlanFallback`) so remote results can feed replay-aware evolution decisions
 - remote task session protocol versions are strictly checked; incompatible versions return deterministic `400` errors
+- compatibility A2A routes accept `sender_id` or `node_id`; when `protocol_version` is omitted they default to `oris.a2a@1.0.0`
 - runtime now enforces agent-managed privilege profiles (`observer`/`operator`/`governor`) across evolution and A2A session endpoints, with audit logs capturing principal, capability, and allow/deny reasons
 - negotiated A2A sessions can be explicitly replicated across nodes via export/import APIs, enabling cross-node reuse after handshake on the source node
+- runtime metrics now expose compatibility queue/claim/report telemetry:
+  - `oris_a2a_task_queue_depth`
+  - `oris_a2a_task_claim_latency_ms`
+  - `oris_a2a_task_lease_expired_total`
+  - `oris_a2a_report_to_capture_latency_ms`
 
 Not yet implemented in the checked-in crate:
 
 - peer discovery or gossip propagation
 - automatic publish gating based on promoted asset state
 - remote trust execution or validation pipelines
+
+## Compatibility Endpoint Examples (Current Experimental Shape)
+
+Compatibility handshake:
+
+```http
+POST /evolution/a2a/hello
+content-type: application/json
+
+{
+  "agent_id": "agent-compat-1",
+  "role": "Planner",
+  "capability_level": "A4",
+  "supported_protocols": [
+    { "name": "oris.a2a", "version": "1.0.0" }
+  ],
+  "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback"]
+}
+```
+
+Compatibility distribute using alias fields (`node_id`, `task_description`) and implicit protocol default:
+
+```http
+POST /evolution/a2a/tasks/distribute
+content-type: application/json
+
+{
+  "node_id": "agent-compat-1",
+  "task_id": "task-compat-1",
+  "task_description": "Fix failing CI job",
+  "dispatch_id": "dispatch-task-compat-1",
+  "summary": "queued for compat execution"
+}
+```
+
+Compatibility claim (protocol defaults to `1.0.0` when omitted):
+
+```http
+POST /evolution/a2a/tasks/claim
+content-type: application/json
+
+{
+  "node_id": "agent-compat-1"
+}
+```
+
+Compatibility report accepts both canonical and alias statuses (`running`/`in_progress`, `succeeded`/`completed`):
+
+```http
+POST /evolution/a2a/tasks/report
+content-type: application/json
+
+{
+  "node_id": "agent-compat-1",
+  "task_id": "task-compat-1",
+  "status": "completed",
+  "summary": "task finished",
+  "used_capsule": true,
+  "capsule_id": "capsule-compat-1",
+  "reasoning_steps_avoided": 3,
+  "task_class_id": "ci.fix",
+  "task_label": "Fix CI"
+}
+```
 
 ## Related Documents
 

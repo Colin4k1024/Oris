@@ -90,6 +90,47 @@
           "legendFormat": "lease conflict rate"
         }
       ]
+    },
+    {
+      "id": 5,
+      "title": "A2A Compat Queue And Lease Expiry",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "oris_a2a_task_queue_depth",
+          "legendFormat": "compat queue depth"
+        },
+        {
+          "refId": "B",
+          "expr": "increase(oris_a2a_task_lease_expired_total[5m])",
+          "legendFormat": "lease expired reclaimed (5m)"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "A2A Compat Claim And Report Latency P95",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(oris_a2a_task_claim_latency_ms_bucket[5m])))",
+          "legendFormat": "claim latency p95"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(oris_a2a_report_to_capture_latency_ms_bucket[5m])))",
+          "legendFormat": "report->capture latency p95"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
     }
   ]
 }

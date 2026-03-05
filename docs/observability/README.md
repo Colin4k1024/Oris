@@ -4,8 +4,8 @@ This folder contains the default observability assets for the runtime metrics ex
 
 ## Included files
 
-- `runtime-dashboard.json`: Grafana dashboard covering queue depth, backpressure, dispatch latency, recovery latency, terminal error rate, and lease conflict rate.
-- `prometheus-alert-rules.yml`: Prometheus alert thresholds for elevated terminal error rate, high recovery latency, and sustained backpressure.
+- `runtime-dashboard.json`: Grafana dashboard covering runtime queue/backpressure/latency plus compatibility A2A queue, claim latency, lease expiry reclaim, and report-to-capture latency.
+- `prometheus-alert-rules.yml`: Prometheus alert thresholds for elevated terminal error rate, high recovery latency, sustained backpressure, compatibility A2A queue stalling, and compatibility lease churn.
 - `sample-runtime-workload.prom`: A sample scrape from the regression workload used to validate that the dashboard and alert rules reference real exported metrics.
 
 ## Validation

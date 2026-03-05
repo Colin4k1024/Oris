@@ -31,3 +31,23 @@ groups:
         annotations:
           summary: Oris runtime is under sustained backpressure
           description: Backpressure decisions kept increasing while the queue remained non-empty for 10 minutes.
+
+      - alert: OrisA2aCompatQueueStalled
+        expr: max_over_time(oris_a2a_task_queue_depth[10m]) > 0 and increase(oris_a2a_task_claim_latency_ms_count[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: oris-runtime
+        annotations:
+          summary: Compatibility A2A queue has stalled
+          description: Compatibility tasks remained queued for 10 minutes without any claim activity.
+
+      - alert: OrisA2aCompatLeaseChurn
+        expr: increase(oris_a2a_task_lease_expired_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+          service: oris-runtime
+        annotations:
+          summary: Compatibility A2A lease expiry churn is elevated
+          description: Compatibility task leases are expiring and being reclaimed frequently.

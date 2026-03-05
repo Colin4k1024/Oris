@@ -23,7 +23,9 @@ Existing detailed references:
 
 Recommended production topology:
 
-1. One execution API process exposing `/v1/jobs*`, `/v1/interrupts*`, `/v1/workers*`, `/metrics`.
+1. One execution API process exposing `/v1/jobs*`, `/v1/interrupts*`, `/v1/workers*`, `/metrics`, and (when enabled) both native and compatibility A2A routes:
+   - native `/v1/evolution/a2a/sessions/*`
+   - compatibility `/evolution/a2a/*` (`hello`, `tasks/distribute`, `tasks/claim`, `tasks/report`)
 2. One or more worker processes polling the execution API.
 3. Durable persistence enabled from day one:
    - SQLite for single-node or low-scale private deployments.
@@ -84,6 +86,14 @@ curl -s -X POST http://127.0.0.1:8080/v1/jobs/run \
   -H 'content-type: application/json' \
   -d '{"thread_id":"ops-smoke-1","input":"hello","idempotency_key":"ops-smoke-key-1"}'
 curl -s http://127.0.0.1:8080/v1/jobs/ops-smoke-1
+```
+
+Compatibility A2A smoke checks (if compatibility traffic is enabled):
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/evolution/a2a/hello \
+  -H 'content-type: application/json' \
+  -d '{"agent_id":"ops-compat-smoke","role":"planner","capability_level":"a2","supported_protocols":[{"name":"oris.a2a","version":"1.0.0"}],"advertised_capabilities":["coordination"]}'
 ```
 
 Success criteria:
@@ -164,6 +174,7 @@ Do not mark an environment production-ready until all of these are true:
    - Prometheus scrapes `/metrics`
    - alerts are loaded from `docs/observability/prometheus-alert-rules.yml`
    - Grafana dashboard is provisioned from `docs/observability/runtime-dashboard.json`
+   - compatibility A2A panels and alerts are reviewed (`queue_depth`, claim latency, lease expiry churn, report-to-capture latency)
 5. Security:
    - operator credentials are rotated and stored outside source control
    - audit logs are retained in persistence
@@ -179,6 +190,8 @@ Suggested baseline:
 - API availability: 99.9% monthly for `/v1/jobs*` and `/v1/workers*`
 - successful dispatch latency: p95 under 250 ms in steady state
 - recovery latency after forced lease expiry: p95 under 1000 ms
+- compatibility A2A claim latency: p95 under 500 ms in steady state
+- compatibility A2A report-to-capture latency: p95 under 1500 ms
 - sustained backpressure: no more than 10 continuous minutes without operator action
 - replay safety: zero duplicate side-effect executions for the same replay target
 
@@ -188,6 +201,8 @@ Suggested alert thresholds:
 - p95 recovery latency above 1000 ms
 - sustained backpressure over 10 minutes with non-zero queue depth
 - repeated lease conflict growth beyond normal baseline
+- compatibility A2A queue depth remains above 20 for 10 minutes
+- compatibility A2A lease expiry reclaim total increases by more than 30 over 10 minutes
 
 Use the shipped observability assets as the default implementation:
 
@@ -201,7 +216,7 @@ Daily:
 
 1. Check alert status.
 2. Confirm `/metrics` scrape freshness.
-3. Review queue depth, recovery latency, and error rate.
+3. Review queue depth, recovery latency, terminal error rate, and compatibility A2A queue/latency trends.
 4. Review audit logs for sensitive control-plane actions.
 
 Weekly:

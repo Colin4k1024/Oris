@@ -1,6 +1,6 @@
 //! Axum handlers for Phase 2 execution server.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -65,7 +65,7 @@ use crate::execution_runtime::repository::RuntimeRepository;
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
-use crate::execution_runtime::sqlite_runtime_repository::A2aSessionRow;
+use crate::execution_runtime::sqlite_runtime_repository::{A2aCompatTaskRow, A2aSessionRow};
 #[cfg(feature = "sqlite-persistence")]
 use crate::execution_runtime::sqlite_runtime_repository::{
     AttemptTraceContextRow, AuditLogEntry, DeadLetterRow, ReplayEffectClaim, RetryPolicyConfig,
@@ -313,6 +313,12 @@ const A2A_TASK_EVENT_HISTORY_LIMIT: usize = 256;
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+const A2A_COMPAT_CLAIM_LEASE_MS: u64 = 60_000;
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aTaskLifecycleResponse {
     task_id: String,
@@ -376,6 +382,145 @@ pub struct A2aSessionReplicationResponse {
     expires_at_ms: u64,
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatDistributeRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    task_id: String,
+    #[serde(alias = "task_description")]
+    task_summary: String,
+    dispatch_id: Option<String>,
+    summary: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatDistributeResponse {
+    session_id: String,
+    task_id: String,
+    state: A2aTaskSessionState,
+    summary: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum A2aCompatReportStatus {
+    #[serde(alias = "in_progress")]
+    Running,
+    #[serde(alias = "completed", alias = "success")]
+    Succeeded,
+    #[serde(alias = "error")]
+    Failed,
+    #[serde(alias = "canceled")]
+    Cancelled,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatReportRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    task_id: String,
+    status: A2aCompatReportStatus,
+    summary: String,
+    progress_pct: Option<u8>,
+    retryable: Option<bool>,
+    retry_after_ms: Option<u64>,
+    failure_code: Option<A2aErrorCode>,
+    failure_details: Option<String>,
+    used_capsule: Option<bool>,
+    capsule_id: Option<String>,
+    reasoning_steps_avoided: Option<u64>,
+    fallback_reason: Option<String>,
+    task_class_id: Option<String>,
+    task_label: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatReportResponse {
+    session_id: String,
+    task_id: String,
+    state: A2aTaskSessionState,
+    terminal_state: Option<A2aTaskLifecycleState>,
+    summary: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatClaimRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatClaimTask {
+    session_id: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatClaimResponse {
+    claimed: bool,
+    task: Option<A2aCompatClaimTask>,
+    retry_after_ms: Option<u64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug)]
+struct A2aCompatQueueEntry {
+    session_id: String,
+    owner_sender_id: String,
+    protocol_version: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+    claimed_by: Option<String>,
+    lease_expires_at_ms: Option<u64>,
+}
+
 const METRIC_BUCKETS_MS: [f64; 9] = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
 
 #[derive(Clone, Debug)]
@@ -398,6 +543,13 @@ struct RuntimeMetricsInner {
     recovery_latency_ms_sum: f64,
     recovery_latency_ms_count: u64,
     recovery_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_task_lease_expired_total: u64,
+    a2a_task_claim_latency_ms_sum: f64,
+    a2a_task_claim_latency_ms_count: u64,
+    a2a_task_claim_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_report_to_capture_latency_ms_sum: f64,
+    a2a_report_to_capture_latency_ms_count: u64,
+    a2a_report_to_capture_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
 }
 
 #[derive(Clone, Debug)]
@@ -415,6 +567,13 @@ struct RuntimeMetricsSnapshot {
     recovery_latency_ms_sum: f64,
     recovery_latency_ms_count: u64,
     recovery_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_task_lease_expired_total: u64,
+    a2a_task_claim_latency_ms_sum: f64,
+    a2a_task_claim_latency_ms_count: u64,
+    a2a_task_claim_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_report_to_capture_latency_ms_sum: f64,
+    a2a_report_to_capture_latency_ms_count: u64,
+    a2a_report_to_capture_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
 }
 
 impl Default for RuntimeMetrics {
@@ -434,6 +593,13 @@ impl Default for RuntimeMetrics {
                 recovery_latency_ms_sum: 0.0,
                 recovery_latency_ms_count: 0,
                 recovery_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_task_lease_expired_total: 0,
+                a2a_task_claim_latency_ms_sum: 0.0,
+                a2a_task_claim_latency_ms_count: 0,
+                a2a_task_claim_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_report_to_capture_latency_ms_sum: 0.0,
+                a2a_report_to_capture_latency_ms_count: 0,
+                a2a_report_to_capture_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
             })),
         }
     }
@@ -489,6 +655,31 @@ impl RuntimeMetrics {
         }
     }
 
+    fn record_a2a_task_lease_expired(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_task_lease_expired_total += 1;
+        }
+    }
+
+    fn record_a2a_task_claim_latency_ms(&self, latency_ms: f64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_task_claim_latency_ms_sum += latency_ms;
+            inner.a2a_task_claim_latency_ms_count += 1;
+            record_histogram_bucket(&mut inner.a2a_task_claim_latency_ms_buckets, latency_ms);
+        }
+    }
+
+    fn record_a2a_report_to_capture_latency_ms(&self, latency_ms: f64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_report_to_capture_latency_ms_sum += latency_ms;
+            inner.a2a_report_to_capture_latency_ms_count += 1;
+            record_histogram_bucket(
+                &mut inner.a2a_report_to_capture_latency_ms_buckets,
+                latency_ms,
+            );
+        }
+    }
+
     fn snapshot(&self) -> RuntimeMetricsSnapshot {
         if let Ok(inner) = self.inner.lock() {
             RuntimeMetricsSnapshot {
@@ -505,6 +696,15 @@ impl RuntimeMetrics {
                 recovery_latency_ms_sum: inner.recovery_latency_ms_sum,
                 recovery_latency_ms_count: inner.recovery_latency_ms_count,
                 recovery_latency_ms_buckets: inner.recovery_latency_ms_buckets,
+                a2a_task_lease_expired_total: inner.a2a_task_lease_expired_total,
+                a2a_task_claim_latency_ms_sum: inner.a2a_task_claim_latency_ms_sum,
+                a2a_task_claim_latency_ms_count: inner.a2a_task_claim_latency_ms_count,
+                a2a_task_claim_latency_ms_buckets: inner.a2a_task_claim_latency_ms_buckets,
+                a2a_report_to_capture_latency_ms_sum: inner.a2a_report_to_capture_latency_ms_sum,
+                a2a_report_to_capture_latency_ms_count: inner
+                    .a2a_report_to_capture_latency_ms_count,
+                a2a_report_to_capture_latency_ms_buckets: inner
+                    .a2a_report_to_capture_latency_ms_buckets,
             }
         } else {
             RuntimeMetricsSnapshot {
@@ -521,11 +721,18 @@ impl RuntimeMetrics {
                 recovery_latency_ms_sum: 0.0,
                 recovery_latency_ms_count: 0,
                 recovery_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_task_lease_expired_total: 0,
+                a2a_task_claim_latency_ms_sum: 0.0,
+                a2a_task_claim_latency_ms_count: 0,
+                a2a_task_claim_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_report_to_capture_latency_ms_sum: 0.0,
+                a2a_report_to_capture_latency_ms_count: 0,
+                a2a_report_to_capture_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
             }
         }
     }
 
-    fn render_prometheus(&self, queue_depth: usize) -> String {
+    fn render_prometheus(&self, queue_depth: usize, a2a_task_queue_depth: usize) -> String {
         let snapshot = self.snapshot();
         let conflict_rate = if snapshot.lease_operations_total == 0 {
             0.0
@@ -548,6 +755,12 @@ impl RuntimeMetrics {
         );
         out.push_str("# TYPE oris_runtime_queue_depth gauge\n");
         out.push_str(&format!("oris_runtime_queue_depth {}\n", queue_depth));
+        out.push_str("# HELP oris_a2a_task_queue_depth Number of compatibility A2A tasks currently queued.\n");
+        out.push_str("# TYPE oris_a2a_task_queue_depth gauge\n");
+        out.push_str(&format!(
+            "oris_a2a_task_queue_depth {}\n",
+            a2a_task_queue_depth
+        ));
         out.push_str("# HELP oris_runtime_lease_operations_total Total lease-sensitive operations observed.\n");
         out.push_str("# TYPE oris_runtime_lease_operations_total counter\n");
         out.push_str(&format!(
@@ -611,6 +824,28 @@ impl RuntimeMetrics {
             &snapshot.recovery_latency_ms_buckets,
             snapshot.recovery_latency_ms_count,
             snapshot.recovery_latency_ms_sum,
+        );
+        out.push_str("# HELP oris_a2a_task_lease_expired_total Number of compat A2A task leases reclaimed after expiry.\n");
+        out.push_str("# TYPE oris_a2a_task_lease_expired_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_task_lease_expired_total {}\n",
+            snapshot.a2a_task_lease_expired_total
+        ));
+        render_histogram(
+            &mut out,
+            "oris_a2a_task_claim_latency_ms",
+            "Compatibility A2A task claim latency in milliseconds.",
+            &snapshot.a2a_task_claim_latency_ms_buckets,
+            snapshot.a2a_task_claim_latency_ms_count,
+            snapshot.a2a_task_claim_latency_ms_sum,
+        );
+        render_histogram(
+            &mut out,
+            "oris_a2a_report_to_capture_latency_ms",
+            "Compatibility A2A terminal report to capture latency in milliseconds.",
+            &snapshot.a2a_report_to_capture_latency_ms_buckets,
+            snapshot.a2a_report_to_capture_latency_ms_count,
+            snapshot.a2a_report_to_capture_latency_ms_sum,
         );
         out
     }
@@ -738,6 +973,11 @@ pub struct ExecutionApiState {
         feature = "evolution-network-experimental"
     ))]
     a2a_task_sessions: Arc<RwLock<HashMap<String, A2aTaskSessionSnapshot>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    a2a_compat_task_queue: Arc<RwLock<VecDeque<A2aCompatQueueEntry>>>,
     pub auth: ExecutionApiAuthConfig,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
@@ -778,6 +1018,11 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             a2a_task_sessions: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            a2a_compat_task_queue: Arc::new(RwLock::new(VecDeque::new())),
             auth: ExecutionApiAuthConfig::default(),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
@@ -983,6 +1228,19 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     #[cfg(feature = "agent-contract-experimental")]
     let router = router
         .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
+        .route("/evolution/a2a/hello", post(evolution_a2a_hello))
+        .route(
+            "/evolution/a2a/tasks/distribute",
+            post(evolution_a2a_tasks_distribute),
+        )
+        .route(
+            "/evolution/a2a/tasks/claim",
+            post(evolution_a2a_tasks_claim),
+        )
+        .route(
+            "/evolution/a2a/tasks/report",
+            post(evolution_a2a_tasks_report),
+        )
         .route(
             "/v1/evolution/a2a/sessions/start",
             post(evolution_a2a_session_start),
@@ -1055,7 +1313,36 @@ async fn metrics_endpoint(
     #[cfg(not(feature = "sqlite-persistence"))]
     let queue_depth = 0usize;
 
-    let body = state.runtime_metrics.render_prometheus(queue_depth);
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    let a2a_task_queue_depth = {
+        #[cfg(feature = "sqlite-persistence")]
+        {
+            if let Some(repo) = state.runtime_repo.as_ref() {
+                match repo.a2a_compat_queue_depth() {
+                    Ok(depth) => depth,
+                    Err(_) => state.a2a_compat_task_queue.read().await.len(),
+                }
+            } else {
+                state.a2a_compat_task_queue.read().await.len()
+            }
+        }
+        #[cfg(not(feature = "sqlite-persistence"))]
+        {
+            state.a2a_compat_task_queue.read().await.len()
+        }
+    };
+    #[cfg(not(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    )))]
+    let a2a_task_queue_depth = 0usize;
+
+    let body = state
+        .runtime_metrics
+        .render_prometheus(queue_depth, a2a_task_queue_depth);
     #[cfg(feature = "evolution-network-experimental")]
     let mut body = body;
     #[cfg(feature = "evolution-network-experimental")]
@@ -1458,6 +1745,34 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
         .split('/')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
+    if seg.is_empty() {
+        return None;
+    }
+    if seg[0] == "evolution" {
+        return match seg.as_slice() {
+            ["evolution", "a2a", "hello"] => Some(AuditTarget {
+                action: "a2a.compat.hello",
+                resource_type: "sender",
+                resource_id: None,
+            }),
+            ["evolution", "a2a", "tasks", "distribute"] => Some(AuditTarget {
+                action: "a2a.compat.distribute",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["evolution", "a2a", "tasks", "claim"] => Some(AuditTarget {
+                action: "a2a.compat.claim",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["evolution", "a2a", "tasks", "report"] => Some(AuditTarget {
+                action: "a2a.compat.report",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            _ => None,
+        };
+    }
     if seg.len() < 2 || seg[0] != "v1" {
         return None;
     }
@@ -1744,6 +2059,53 @@ fn validate_sender_id(sender_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn resolve_compat_sender_id(
+    sender_id: Option<String>,
+    node_id: Option<String>,
+    rid: &str,
+) -> Result<String, ApiError> {
+    let sender_id = sender_id
+        .or(node_id)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("sender_id (or node_id) must not be empty")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "a2a_error_code": A2aErrorCode::ValidationFailed,
+                    "required_one_of": ["sender_id", "node_id"]
+                }))
+        })?;
+    validate_sender_id(&sender_id).map_err(|e| {
+        e.with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "a2a_error_code": A2aErrorCode::ValidationFailed,
+                "field": "sender_id"
+            }))
+    })?;
+    Ok(sender_id)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn resolve_compat_protocol_version(
+    protocol_version: Option<String>,
+    rid: &str,
+) -> Result<String, ApiError> {
+    let protocol_version = protocol_version
+        .map(|version| version.trim().to_string())
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| crate::agent_contract::A2A_PROTOCOL_VERSION_V1.to_string());
+    ensure_task_session_protocol_version(&protocol_version, rid)?;
+    Ok(protocol_version)
+}
+
 async fn ensure_not_cancelled(state: &ExecutionApiState, thread_id: &str) -> Result<(), ApiError> {
     if state.cancelled_threads.read().await.contains(thread_id) {
         return Err(ApiError::conflict(format!(
@@ -1942,14 +2304,22 @@ async fn record_task_cancelled(state: &ExecutionApiState, task_id: &str, summary
     feature = "evolution-network-experimental"
 ))]
 fn ensure_task_session_protocol_version(version: &str, rid: &str) -> Result<(), ApiError> {
-    if version == A2A_TASK_SESSION_PROTOCOL_VERSION {
+    let supported_versions = [
+        crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+        A2A_TASK_SESSION_PROTOCOL_VERSION,
+    ];
+    if supported_versions
+        .iter()
+        .any(|supported| version == *supported)
+    {
         return Ok(());
     }
     Err(
         ApiError::bad_request("incompatible a2a task session protocol version")
             .with_request_id(rid.to_string())
             .with_details(serde_json::json!({
-                "expected": A2A_TASK_SESSION_PROTOCOL_VERSION,
+                "a2a_error_code": A2aErrorCode::UnsupportedProtocol,
+                "expected": supported_versions,
                 "actual": version
             })),
     )
@@ -2126,17 +2496,17 @@ fn runtime_a2a_capabilities() -> Vec<A2aCapability> {
     feature = "evolution-network-experimental"
 ))]
 fn negotiate_a2a_handshake(req: &A2aHandshakeRequest) -> A2aHandshakeResponse {
-    if !req.supports_current_protocol() {
+    let Some(negotiated_protocol) = req.negotiate_supported_protocol() else {
         return A2aHandshakeResponse::reject(
             A2aErrorCode::UnsupportedProtocol,
             "unsupported protocol",
             Some(format!(
-                "expected {}@{}",
+                "expected {} in {:?}",
                 crate::agent_contract::A2A_PROTOCOL_NAME,
-                crate::agent_contract::A2A_PROTOCOL_VERSION
+                crate::agent_contract::A2A_SUPPORTED_PROTOCOL_VERSIONS
             )),
         );
-    }
+    };
 
     let enabled_capabilities = runtime_a2a_capabilities()
         .into_iter()
@@ -2150,7 +2520,13 @@ fn negotiate_a2a_handshake(req: &A2aHandshakeRequest) -> A2aHandshakeResponse {
         );
     }
 
-    A2aHandshakeResponse::accept(enabled_capabilities)
+    A2aHandshakeResponse {
+        accepted: true,
+        negotiated_protocol: Some(negotiated_protocol),
+        enabled_capabilities,
+        message: Some("handshake accepted".to_string()),
+        error: None,
+    }
 }
 
 #[cfg(all(
@@ -2522,6 +2898,580 @@ pub async fn evolution_a2a_handshake(
         request_id: rid,
         data: response,
     }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_hello(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    req: Json<A2aHandshakeRequest>,
+) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
+    evolution_a2a_handshake(state, headers, req).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn find_a2a_session_id_for_task(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    task_id: &str,
+) -> Option<String> {
+    state
+        .a2a_task_sessions
+        .read()
+        .await
+        .iter()
+        .find_map(|(session_id, session)| {
+            if session.sender_id == sender_id && session.task_id == task_id {
+                Some(session_id.clone())
+            } else {
+                None
+            }
+        })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_distribute(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatDistributeRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatDistributeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let owner_sender_id =
+        resolve_compat_sender_id(req.sender_id.clone(), req.node_id.clone(), &rid)?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+    validate_thread_id(&req.task_id).map_err(|e| {
+        e.with_request_id(rid.clone())
+            .with_details(serde_json::json!({
+                "a2a_error_code": A2aErrorCode::ValidationFailed,
+                "field": "task_id"
+            }))
+    })?;
+    let task_id = req.task_id.clone();
+    let task_summary = req.task_summary.clone();
+    let dispatch_id = req
+        .dispatch_id
+        .clone()
+        .unwrap_or_else(|| format!("dispatch-{}", req.task_id));
+    let dispatch_summary = req
+        .summary
+        .clone()
+        .unwrap_or_else(|| req.task_summary.clone());
+
+    let start = evolution_a2a_session_start(
+        State(state.clone()),
+        headers.clone(),
+        Json(A2aTaskSessionStartRequest {
+            sender_id: owner_sender_id.clone(),
+            protocol_version: protocol_version.clone(),
+            task_id: req.task_id.clone(),
+            task_summary: req.task_summary.clone(),
+        }),
+    )
+    .await?;
+    let session_id = start.0.data.session_id.clone();
+
+    let dispatch = evolution_a2a_session_dispatch(
+        State(state.clone()),
+        Path(session_id.clone()),
+        headers,
+        Json(A2aTaskSessionDispatchRequest {
+            sender_id: owner_sender_id.clone(),
+            protocol_version: protocol_version.clone(),
+            dispatch_id: dispatch_id.clone(),
+            summary: dispatch_summary,
+        }),
+    )
+    .await?;
+    let envelope = dispatch.0;
+    let data = envelope.data;
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        let now = Utc::now();
+        repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+            session_id: session_id.clone(),
+            sender_id: owner_sender_id.clone(),
+            protocol_version: protocol_version.clone(),
+            task_id: task_id.clone(),
+            task_summary: task_summary.clone(),
+            dispatch_id: dispatch_id.clone(),
+            claimed_by_sender_id: None,
+            lease_expires_at: None,
+            enqueued_at: now,
+            updated_at: now,
+        })
+        .map_err(|e| {
+            ApiError::internal(e.to_string()).with_request_id(envelope.request_id.clone())
+        })?;
+    } else {
+        let mut queue = state.a2a_compat_task_queue.write().await;
+        if !queue.iter().any(|entry| entry.session_id == session_id) {
+            queue.push_back(A2aCompatQueueEntry {
+                session_id: session_id.clone(),
+                owner_sender_id,
+                protocol_version,
+                task_id: task_id.clone(),
+                task_summary,
+                dispatch_id,
+                claimed_by: None,
+                lease_expires_at_ms: None,
+            });
+        }
+    }
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let mut queue = state.a2a_compat_task_queue.write().await;
+        if !queue.iter().any(|entry| entry.session_id == session_id) {
+            queue.push_back(A2aCompatQueueEntry {
+                session_id: session_id.clone(),
+                owner_sender_id,
+                protocol_version,
+                task_id: task_id.clone(),
+                task_summary,
+                dispatch_id,
+                claimed_by: None,
+                lease_expires_at_ms: None,
+            });
+        }
+    }
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: envelope.request_id,
+        data: A2aCompatDistributeResponse {
+            session_id,
+            task_id: data.task_id,
+            state: data.state,
+            summary: data.summary,
+        },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_claim(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatClaimRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatClaimResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = resolve_compat_sender_id(req.sender_id.clone(), req.node_id.clone(), &rid)?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_authorized_action(
+        &state,
+        &sender_id,
+        A2aCapability::Coordination,
+        A2aPrivilegeAction::TaskSessionStart,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+    let claim_started_at = Instant::now();
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        let claim = repo
+            .claim_a2a_compat_task(
+                &sender_id,
+                &protocol_version,
+                Utc::now(),
+                A2A_COMPAT_CLAIM_LEASE_MS,
+            )
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+        if claim.reclaimed_expired_lease {
+            state.runtime_metrics.record_a2a_task_lease_expired();
+        }
+        state
+            .runtime_metrics
+            .record_a2a_task_claim_latency_ms(claim_started_at.elapsed().as_secs_f64() * 1000.0);
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: A2aCompatClaimResponse {
+                claimed: claim.task.is_some(),
+                task: claim.task.map(|task| A2aCompatClaimTask {
+                    session_id: task.session_id,
+                    task_id: task.task_id,
+                    task_summary: task.task_summary,
+                    dispatch_id: task.dispatch_id,
+                }),
+                retry_after_ms: claim.retry_after_ms,
+            },
+        }));
+    }
+
+    let now_ms = lifecycle_timestamp_ms(Utc::now());
+    let mut queue = state.a2a_compat_task_queue.write().await;
+    let mut retry_after_ms: Option<u64> = None;
+
+    for entry in queue.iter_mut() {
+        if entry.owner_sender_id != sender_id {
+            continue;
+        }
+        if entry.protocol_version != protocol_version {
+            continue;
+        }
+        if let Some(expires_at_ms) = entry.lease_expires_at_ms {
+            if expires_at_ms > now_ms {
+                let remaining = expires_at_ms.saturating_sub(now_ms);
+                retry_after_ms = Some(match retry_after_ms {
+                    Some(current_min) => current_min.min(remaining),
+                    None => remaining,
+                });
+                continue;
+            }
+        }
+
+        let reclaimed_expired_lease = entry.claimed_by.is_some()
+            && entry
+                .lease_expires_at_ms
+                .map(|expires_at_ms| expires_at_ms <= now_ms)
+                .unwrap_or(true);
+        entry.claimed_by = Some(sender_id.clone());
+        entry.lease_expires_at_ms = Some(now_ms + A2A_COMPAT_CLAIM_LEASE_MS);
+        if reclaimed_expired_lease {
+            state.runtime_metrics.record_a2a_task_lease_expired();
+        }
+        state
+            .runtime_metrics
+            .record_a2a_task_claim_latency_ms(claim_started_at.elapsed().as_secs_f64() * 1000.0);
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: A2aCompatClaimResponse {
+                claimed: true,
+                task: Some(A2aCompatClaimTask {
+                    session_id: entry.session_id.clone(),
+                    task_id: entry.task_id.clone(),
+                    task_summary: entry.task_summary.clone(),
+                    dispatch_id: entry.dispatch_id.clone(),
+                }),
+                retry_after_ms: None,
+            },
+        }));
+    }
+
+    state
+        .runtime_metrics
+        .record_a2a_task_claim_latency_ms(claim_started_at.elapsed().as_secs_f64() * 1000.0);
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: A2aCompatClaimResponse {
+            claimed: false,
+            task: None,
+            retry_after_ms,
+        },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_report(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatReportRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = resolve_compat_sender_id(req.sender_id.clone(), req.node_id.clone(), &rid)?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+    let task_id = req.task_id.clone();
+    validate_thread_id(&task_id).map_err(|e| {
+        e.with_request_id(rid.clone())
+            .with_details(serde_json::json!({
+                "a2a_error_code": A2aErrorCode::ValidationFailed,
+                "field": "task_id"
+            }))
+    })?;
+
+    let session_id = find_a2a_session_id_for_task(&state, &sender_id, &task_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "a2a task session not found for sender '{}' and task '{}'",
+                sender_id, task_id
+            ))
+            .with_request_id(rid.clone())
+        })?;
+    let report_started_at = Instant::now();
+
+    match req.status {
+        A2aCompatReportStatus::Running => {
+            #[cfg(feature = "sqlite-persistence")]
+            if let Some(repo) = state.runtime_repo.as_ref() {
+                if let Some(task) = repo
+                    .get_a2a_compat_task(&session_id)
+                    .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
+                {
+                    if let (Some(claimed_by), Some(lease_expires_at)) =
+                        (task.claimed_by_sender_id.as_deref(), task.lease_expires_at)
+                    {
+                        if claimed_by != sender_id && lease_expires_at > Utc::now() {
+                            return Err(ApiError::forbidden(
+                                "compat task lease is owned by another claimer",
+                            )
+                            .with_request_id(rid.clone())
+                            .with_details(serde_json::json!({
+                                "session_id": session_id.clone(),
+                                "task_id": task_id.clone(),
+                                "claimed_by": claimed_by,
+                                "reporter": sender_id.clone()
+                            })));
+                        }
+                    }
+                }
+                let touched = repo
+                    .touch_a2a_compat_task_lease(
+                        &session_id,
+                        &sender_id,
+                        Utc::now(),
+                        A2A_COMPAT_CLAIM_LEASE_MS,
+                    )
+                    .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+                if !touched {
+                    return Err(ApiError::not_found(format!(
+                        "a2a compat task lease not found for session '{}'",
+                        session_id
+                    ))
+                    .with_request_id(rid.clone()));
+                }
+            } else {
+                let now_ms = lifecycle_timestamp_ms(Utc::now());
+                let mut queue = state.a2a_compat_task_queue.write().await;
+                if let Some(entry) = queue
+                    .iter_mut()
+                    .find(|entry| entry.session_id == session_id)
+                {
+                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
+                        if claimed_by != sender_id {
+                            return Err(ApiError::forbidden(
+                                "compat task lease is owned by another claimer",
+                            )
+                            .with_request_id(rid.clone())
+                            .with_details(serde_json::json!({
+                                "session_id": session_id.clone(),
+                                "task_id": task_id.clone(),
+                                "claimed_by": claimed_by,
+                                "reporter": sender_id.clone()
+                            })));
+                        }
+                    }
+                    entry.claimed_by = Some(sender_id.clone());
+                    entry.lease_expires_at_ms = Some(now_ms + A2A_COMPAT_CLAIM_LEASE_MS);
+                }
+            }
+            #[cfg(not(feature = "sqlite-persistence"))]
+            {
+                let now_ms = lifecycle_timestamp_ms(Utc::now());
+                let mut queue = state.a2a_compat_task_queue.write().await;
+                if let Some(entry) = queue
+                    .iter_mut()
+                    .find(|entry| entry.session_id == session_id)
+                {
+                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
+                        if claimed_by != sender_id {
+                            return Err(ApiError::forbidden(
+                                "compat task lease is owned by another claimer",
+                            )
+                            .with_request_id(rid.clone())
+                            .with_details(serde_json::json!({
+                                "session_id": session_id.clone(),
+                                "task_id": task_id.clone(),
+                                "claimed_by": claimed_by,
+                                "reporter": sender_id.clone()
+                            })));
+                        }
+                    }
+                    entry.claimed_by = Some(sender_id.clone());
+                    entry.lease_expires_at_ms = Some(now_ms + A2A_COMPAT_CLAIM_LEASE_MS);
+                }
+            }
+
+            let progress = evolution_a2a_session_progress(
+                State(state.clone()),
+                Path(session_id.clone()),
+                headers,
+                Json(A2aTaskSessionProgressRequest {
+                    sender_id: sender_id.clone(),
+                    protocol_version: protocol_version.clone(),
+                    progress_pct: req.progress_pct.unwrap_or(0),
+                    summary: req.summary.clone(),
+                    retryable: req.retryable.unwrap_or(false),
+                    retry_after_ms: req.retry_after_ms,
+                }),
+            )
+            .await?;
+            let envelope = progress.0;
+            let ack = envelope.data;
+            Ok(Json(ApiEnvelope {
+                meta: ApiMeta::ok(),
+                request_id: envelope.request_id,
+                data: A2aCompatReportResponse {
+                    session_id,
+                    task_id: ack.task_id,
+                    state: ack.state,
+                    terminal_state: None,
+                    summary: ack.summary,
+                },
+            }))
+        }
+        A2aCompatReportStatus::Succeeded
+        | A2aCompatReportStatus::Failed
+        | A2aCompatReportStatus::Cancelled => {
+            let terminal_state = match req.status {
+                A2aCompatReportStatus::Succeeded => A2aTaskLifecycleState::Succeeded,
+                A2aCompatReportStatus::Failed => A2aTaskLifecycleState::Failed,
+                A2aCompatReportStatus::Cancelled => A2aTaskLifecycleState::Cancelled,
+                A2aCompatReportStatus::Running => unreachable!("running handled above"),
+            };
+
+            #[cfg(feature = "sqlite-persistence")]
+            if let Some(repo) = state.runtime_repo.as_ref() {
+                if let Some(task) = repo
+                    .get_a2a_compat_task(&session_id)
+                    .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
+                {
+                    if let (Some(claimed_by), Some(lease_expires_at)) =
+                        (task.claimed_by_sender_id.as_deref(), task.lease_expires_at)
+                    {
+                        if claimed_by != sender_id && lease_expires_at > Utc::now() {
+                            return Err(ApiError::forbidden(
+                                "compat task lease is owned by another claimer",
+                            )
+                            .with_request_id(rid.clone())
+                            .with_details(serde_json::json!({
+                                "session_id": session_id.clone(),
+                                "task_id": task_id.clone(),
+                                "claimed_by": claimed_by,
+                                "reporter": sender_id.clone()
+                            })));
+                        }
+                    }
+                }
+            } else {
+                let queue = state.a2a_compat_task_queue.read().await;
+                if let Some(entry) = queue.iter().find(|entry| entry.session_id == session_id) {
+                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
+                        if claimed_by != sender_id {
+                            return Err(ApiError::forbidden(
+                                "compat task lease is owned by another claimer",
+                            )
+                            .with_request_id(rid.clone())
+                            .with_details(serde_json::json!({
+                                "session_id": session_id.clone(),
+                                "task_id": task_id.clone(),
+                                "claimed_by": claimed_by,
+                                "reporter": sender_id.clone()
+                            })));
+                        }
+                    }
+                }
+            }
+            #[cfg(not(feature = "sqlite-persistence"))]
+            {
+                let queue = state.a2a_compat_task_queue.read().await;
+                if let Some(entry) = queue.iter().find(|entry| entry.session_id == session_id) {
+                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
+                        if claimed_by != sender_id {
+                            return Err(ApiError::forbidden(
+                                "compat task lease is owned by another claimer",
+                            )
+                            .with_request_id(rid.clone())
+                            .with_details(serde_json::json!({
+                                "session_id": session_id.clone(),
+                                "task_id": task_id.clone(),
+                                "claimed_by": claimed_by,
+                                "reporter": sender_id.clone()
+                            })));
+                        }
+                    }
+                }
+            }
+
+            let completion = evolution_a2a_session_complete(
+                State(state.clone()),
+                Path(session_id.clone()),
+                headers,
+                Json(A2aTaskSessionCompletionRequest {
+                    sender_id: sender_id.clone(),
+                    protocol_version: protocol_version.clone(),
+                    terminal_state: terminal_state.clone(),
+                    summary: req.summary,
+                    retryable: req.retryable.unwrap_or(false),
+                    retry_after_ms: req.retry_after_ms,
+                    failure_code: req.failure_code,
+                    failure_details: req.failure_details,
+                    used_capsule: req.used_capsule.unwrap_or(false),
+                    capsule_id: req.capsule_id,
+                    reasoning_steps_avoided: req.reasoning_steps_avoided.unwrap_or(0),
+                    fallback_reason: req.fallback_reason,
+                    task_class_id: req.task_class_id.unwrap_or_else(|| "unknown".into()),
+                    task_label: req.task_label.unwrap_or_else(|| task_id.clone()),
+                }),
+            )
+            .await?;
+            let envelope = completion.0;
+            let result = envelope.data.result;
+            let ack = envelope.data.ack;
+
+            #[cfg(feature = "sqlite-persistence")]
+            if let Some(repo) = state.runtime_repo.as_ref() {
+                let _ = repo
+                    .remove_a2a_compat_task(&session_id)
+                    .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+            } else {
+                let mut queue = state.a2a_compat_task_queue.write().await;
+                if let Some(index) = queue
+                    .iter()
+                    .position(|entry| entry.session_id == session_id)
+                {
+                    queue.remove(index);
+                }
+            }
+            #[cfg(not(feature = "sqlite-persistence"))]
+            {
+                let mut queue = state.a2a_compat_task_queue.write().await;
+                if let Some(index) = queue
+                    .iter()
+                    .position(|entry| entry.session_id == session_id)
+                {
+                    queue.remove(index);
+                }
+            }
+            state
+                .runtime_metrics
+                .record_a2a_report_to_capture_latency_ms(
+                    report_started_at.elapsed().as_secs_f64() * 1000.0,
+                );
+
+            Ok(Json(ApiEnvelope {
+                meta: ApiMeta::ok(),
+                request_id: envelope.request_id,
+                data: A2aCompatReportResponse {
+                    session_id,
+                    task_id: ack.task_id,
+                    state: ack.state,
+                    terminal_state: Some(result.terminal_state),
+                    summary: result.summary,
+                },
+            }))
+        }
+    }
 }
 
 #[cfg(all(
@@ -2978,14 +3928,16 @@ pub async fn evolution_a2a_import_session(
         return Err(ApiError::bad_request("source_node_id must not be empty").with_request_id(rid));
     }
     if req.session.protocol.name != crate::agent_contract::A2A_PROTOCOL_NAME
-        || req.session.protocol.version != crate::agent_contract::A2A_PROTOCOL_VERSION
+        || !crate::agent_contract::A2A_SUPPORTED_PROTOCOL_VERSIONS
+            .iter()
+            .any(|supported| req.session.protocol.version == *supported)
     {
         return Err(
             ApiError::bad_request("session protocol payload is incompatible")
                 .with_request_id(rid)
                 .with_details(serde_json::json!({
                     "expected_name": crate::agent_contract::A2A_PROTOCOL_NAME,
-                    "expected_version": crate::agent_contract::A2A_PROTOCOL_VERSION,
+                    "expected_versions": crate::agent_contract::A2A_SUPPORTED_PROTOCOL_VERSIONS,
                     "actual_name": req.session.protocol.name,
                     "actual_version": req.session.protocol.version,
                 })),
@@ -5108,6 +6060,50 @@ mod tests {
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
     ))]
+    async fn handshake_agent_with_caps_and_protocols(
+        router: &axum::Router,
+        endpoint: &str,
+        agent_id: &str,
+        capability_level: &str,
+        capabilities: &[&str],
+        supported_protocols: &[&str],
+    ) -> serde_json::Value {
+        let protocols = supported_protocols
+            .iter()
+            .map(|version| {
+                serde_json::json!({
+                    "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                    "version": version
+                })
+            })
+            .collect::<Vec<_>>();
+        let handshake_req = Request::builder()
+            .method(Method::POST)
+            .uri(endpoint)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "role": "Planner",
+                    "capability_level": capability_level,
+                    "supported_protocols": protocols,
+                    "advertised_capabilities": capabilities
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let handshake_resp = router.clone().oneshot(handshake_req).await.unwrap();
+        assert_eq!(handshake_resp.status(), StatusCode::OK);
+        let handshake_body = axum::body::to_bytes(handshake_resp.into_body(), usize::MAX)
+            .await
+            .expect("handshake body");
+        serde_json::from_slice(&handshake_body).expect("handshake json")
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
     async fn fetch_lifecycle_events(
         router: &axum::Router,
         task_id: &str,
@@ -5639,6 +6635,663 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_handshake_accepts_v1_protocol_only_client() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let json = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/evolution/a2a/hello",
+            "agent-v1-only",
+            "A3",
+            &["Coordination", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(json["data"]["accepted"], true);
+        assert_eq!(
+            json["data"]["negotiated_protocol"]["version"],
+            crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_compat_distribute_and_report_map_to_session_flow() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/evolution/a2a/hello",
+            "compat-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-task-1",
+                    "task_summary": "compat task",
+                    "dispatch_id": "dispatch-compat-1",
+                    "summary": "compat dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        assert_eq!(distribute_json["data"]["state"], "Dispatched");
+        let session_id = distribute_json["data"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let progress_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-task-1",
+                    "status": "running",
+                    "summary": "compat task in progress",
+                    "progress_pct": 42,
+                    "retryable": false,
+                    "retry_after_ms": null
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let progress_resp = router.clone().oneshot(progress_req).await.unwrap();
+        assert_eq!(progress_resp.status(), StatusCode::OK);
+        let progress_body = axum::body::to_bytes(progress_resp.into_body(), usize::MAX)
+            .await
+            .expect("progress body");
+        let progress_json: serde_json::Value =
+            serde_json::from_slice(&progress_body).expect("progress json");
+        assert_eq!(progress_json["data"]["state"], "InProgress");
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-task-1",
+                    "status": "succeeded",
+                    "summary": "compat task completed",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "used_capsule": true,
+                    "capsule_id": "compat-capsule-1",
+                    "reasoning_steps_avoided": 3,
+                    "fallback_reason": null,
+                    "task_class_id": "compat.class",
+                    "task_label": "Compat task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+
+        let snapshot_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v1/evolution/a2a/sessions/{session_id}?sender_id=compat-agent&protocol_version={}",
+                crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let snapshot_resp = router.clone().oneshot(snapshot_req).await.unwrap();
+        assert_eq!(snapshot_resp.status(), StatusCode::OK);
+        let snapshot_body = axum::body::to_bytes(snapshot_resp.into_body(), usize::MAX)
+            .await
+            .expect("snapshot body");
+        let snapshot_json: serde_json::Value =
+            serde_json::from_slice(&snapshot_body).expect("snapshot json");
+        assert_eq!(snapshot_json["data"]["state"], "Completed");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_compat_claim_returns_distributed_task_and_respects_active_lease() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/evolution/a2a/hello",
+            "compat-claim-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-claim-task-1",
+                    "task_summary": "compat claim task",
+                    "dispatch_id": "dispatch-claim-1",
+                    "summary": "dispatch for claim test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(claim_json["data"]["task"]["task_id"], "compat-claim-task-1");
+
+        let second_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_claim_resp = router.clone().oneshot(second_claim_req).await.unwrap();
+        assert_eq!(second_claim_resp.status(), StatusCode::OK);
+        let second_claim_body = axum::body::to_bytes(second_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("second claim body");
+        let second_claim_json: serde_json::Value =
+            serde_json::from_slice(&second_claim_body).expect("second claim json");
+        assert_eq!(second_claim_json["data"]["claimed"], false);
+        assert!(
+            second_claim_json["data"]["retry_after_ms"]
+                .as_u64()
+                .expect("retry_after_ms should be present")
+                > 0
+        );
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-claim-task-1",
+                    "status": "succeeded",
+                    "summary": "compat claim task completed",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "used_capsule": true,
+                    "capsule_id": "compat-claim-capsule-1",
+                    "reasoning_steps_avoided": 1,
+                    "fallback_reason": null,
+                    "task_class_id": "compat.claim",
+                    "task_label": "Compat claim task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+
+        let final_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let final_claim_resp = router.clone().oneshot(final_claim_req).await.unwrap();
+        assert_eq!(final_claim_resp.status(), StatusCode::OK);
+        let final_claim_body = axum::body::to_bytes(final_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("final claim body");
+        let final_claim_json: serde_json::Value =
+            serde_json::from_slice(&final_claim_body).expect("final claim json");
+        assert_eq!(final_claim_json["data"]["claimed"], false);
+        assert!(final_claim_json["data"]["task"].is_null());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_compat_accepts_node_id_alias_and_defaults_protocol_v1() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/evolution/a2a/hello",
+            "compat-node-alias-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-node-alias-agent",
+                    "task_id": "compat-node-alias-task-1",
+                    "task_description": "compat alias task",
+                    "dispatch_id": "dispatch-node-alias-1",
+                    "summary": "dispatch via node_id alias"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-node-alias-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(
+            claim_json["data"]["task"]["task_id"],
+            "compat-node-alias-task-1"
+        );
+
+        let running_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-node-alias-agent",
+                    "task_id": "compat-node-alias-task-1",
+                    "status": "in_progress",
+                    "summary": "compat alias task in progress",
+                    "progress_pct": 50,
+                    "retryable": false
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let running_resp = router.clone().oneshot(running_req).await.unwrap();
+        assert_eq!(running_resp.status(), StatusCode::OK);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-node-alias-agent",
+                    "task_id": "compat-node-alias-task-1",
+                    "status": "completed",
+                    "summary": "compat alias task complete",
+                    "retryable": false,
+                    "used_capsule": true,
+                    "capsule_id": "compat-node-alias-capsule-1",
+                    "reasoning_steps_avoided": 4,
+                    "task_class_id": "compat.alias",
+                    "task_label": "Compat alias task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_compat_validation_errors_include_a2a_error_code_details() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::BAD_REQUEST);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(
+            claim_json["error"]["details"]["a2a_error_code"],
+            serde_json::json!("ValidationFailed")
+        );
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-validation-agent",
+                    "protocol_version": "0.0.1",
+                    "task_id": "compat-validation-task",
+                    "task_summary": "compat validation task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::BAD_REQUEST);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        assert_eq!(
+            distribute_json["error"]["details"]["a2a_error_code"],
+            serde_json::json!("UnsupportedProtocol")
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_compat_claim_and_complete_use_sqlite_persistence() {
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            ":memory:",
+        ));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/evolution/a2a/hello",
+            "compat-sqlite-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-sqlite-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-sqlite-task-1",
+                    "task_summary": "compat sqlite task",
+                    "dispatch_id": "dispatch-sqlite-1",
+                    "summary": "dispatch for sqlite claim test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-sqlite-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(
+            claim_json["data"]["task"]["task_id"],
+            "compat-sqlite-task-1"
+        );
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-sqlite-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-sqlite-task-1",
+                    "status": "succeeded",
+                    "summary": "compat sqlite task completed",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "used_capsule": true,
+                    "capsule_id": "compat-sqlite-capsule-1",
+                    "reasoning_steps_avoided": 2,
+                    "fallback_reason": null,
+                    "task_class_id": "compat.sqlite",
+                    "task_label": "Compat sqlite task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+
+        let final_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-sqlite-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let final_claim_resp = router.clone().oneshot(final_claim_req).await.unwrap();
+        assert_eq!(final_claim_resp.status(), StatusCode::OK);
+        let final_claim_body = axum::body::to_bytes(final_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("final claim body");
+        let final_claim_json: serde_json::Value =
+            serde_json::from_slice(&final_claim_body).expect("final claim json");
+        assert_eq!(final_claim_json["data"]["claimed"], false);
+        assert!(final_claim_json["data"]["task"].is_null());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_compat_queue_survives_restart_with_sqlite_persistence() {
+        let db_path = std::env::temp_dir().join(format!(
+            "oris-a2a-compat-queue-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&db_path);
+
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            &db_path_str,
+        ));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/evolution/a2a/hello",
+            "compat-restart-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-restart-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-restart-task-1",
+                    "task_summary": "compat restart task",
+                    "dispatch_id": "dispatch-restart-1",
+                    "summary": "dispatch before restart"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        drop(router);
+
+        let restarted_router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            &db_path_str,
+        ));
+        let restarted_handshake = handshake_agent_with_caps_and_protocols(
+            &restarted_router,
+            "/evolution/a2a/hello",
+            "compat-restart-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(restarted_handshake["data"]["accepted"], true);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-restart-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = restarted_router.oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(
+            claim_json["data"]["task"]["task_id"],
+            "compat-restart-task-1"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_lifecycle_events_track_run_flow_and_query_by_task_id() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let handshake_json =
@@ -6064,7 +7717,10 @@ mod tests {
         );
         assert_eq!(
             start_json["error"]["details"]["expected"],
-            crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
+            serde_json::json!([
+                crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
+            ])
         );
         assert_eq!(start_json["error"]["details"]["actual"], "0.0.1");
     }
@@ -6781,6 +8437,151 @@ mod tests {
         assert_eq!(forbidden.action, "job.run");
         assert_eq!(forbidden.result, "error");
         assert_eq!(forbidden.actor_role.as_deref(), Some("worker"));
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn audit_logs_capture_a2a_compat_endpoint_actions() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/hello")
+            .header("x-request-id", "req-a2a-compat-hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "a2a-compat-audit-agent",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("x-request-id", "req-a2a-compat-distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "a2a-compat-audit-task-1",
+                    "task_summary": "compat audit task",
+                    "dispatch_id": "dispatch-a2a-compat-audit-1",
+                    "summary": "compat dispatch"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("x-request-id", "req-a2a-compat-claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let report_running_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("x-request-id", "req-a2a-compat-report-running")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "a2a-compat-audit-task-1",
+                    "status": "running",
+                    "summary": "compat running",
+                    "progress_pct": 40
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_running_resp = router.clone().oneshot(report_running_req).await.unwrap();
+        assert_eq!(report_running_resp.status(), StatusCode::OK);
+
+        let report_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("x-request-id", "req-a2a-compat-report-complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "a2a-compat-audit-task-1",
+                    "status": "succeeded",
+                    "summary": "compat complete",
+                    "retryable": false,
+                    "used_capsule": true,
+                    "capsule_id": "a2a-compat-audit-capsule-1",
+                    "reasoning_steps_avoided": 1,
+                    "task_class_id": "compat.audit",
+                    "task_label": "Compat audit"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_complete_resp = router.clone().oneshot(report_complete_req).await.unwrap();
+        assert_eq!(report_complete_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(200).expect("list audit logs");
+        assert!(logs.iter().any(|log| {
+            log.action == "a2a.compat.hello"
+                && log.result == "success"
+                && log.request_id == "req-a2a-compat-hello"
+        }));
+        assert!(logs.iter().any(|log| {
+            log.action == "a2a.compat.distribute"
+                && log.result == "success"
+                && log.request_id == "req-a2a-compat-distribute"
+        }));
+        assert!(logs.iter().any(|log| {
+            log.action == "a2a.compat.claim"
+                && log.result == "success"
+                && log.request_id == "req-a2a-compat-claim"
+        }));
+        assert!(logs.iter().any(|log| {
+            log.action == "a2a.compat.report"
+                && log.result == "success"
+                && log.request_id == "req-a2a-compat-report-running"
+        }));
+        assert!(logs.iter().any(|log| {
+            log.action == "a2a.compat.report"
+                && log.result == "success"
+                && log.request_id == "req-a2a-compat-report-complete"
+        }));
     }
 
     #[cfg(feature = "sqlite-persistence")]
@@ -8007,6 +9808,149 @@ mod tests {
         assert!(health_json["evolution"].is_null());
     }
 
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn metrics_endpoint_exposes_a2a_compat_metrics() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/evolution/a2a/hello",
+            "metrics-compat-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "metrics-compat-task-1",
+                    "task_summary": "metrics compat task",
+                    "dispatch_id": "dispatch-metrics-compat-1",
+                    "summary": "metrics compat distribute"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        let session_id = distribute_json["data"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let first_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_claim_resp = router.clone().oneshot(first_claim_req).await.unwrap();
+        assert_eq!(first_claim_resp.status(), StatusCode::OK);
+        let first_claim_body = axum::body::to_bytes(first_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("first claim body");
+        let first_claim_json: serde_json::Value =
+            serde_json::from_slice(&first_claim_body).expect("first claim json");
+        assert_eq!(first_claim_json["data"]["claimed"], true);
+
+        repo.touch_a2a_compat_task_lease(
+            &session_id,
+            "metrics-compat-agent",
+            Utc::now() - Duration::minutes(2),
+            1,
+        )
+        .expect("backdate compat lease to expired");
+
+        let second_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_claim_resp = router.clone().oneshot(second_claim_req).await.unwrap();
+        assert_eq!(second_claim_resp.status(), StatusCode::OK);
+        let second_claim_body = axum::body::to_bytes(second_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("second claim body");
+        let second_claim_json: serde_json::Value =
+            serde_json::from_slice(&second_claim_body).expect("second claim json");
+        assert_eq!(second_claim_json["data"]["claimed"], true);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "metrics-compat-task-1",
+                    "status": "succeeded",
+                    "summary": "metrics compat complete",
+                    "retryable": false,
+                    "used_capsule": true,
+                    "capsule_id": "metrics-compat-capsule-1",
+                    "reasoning_steps_avoided": 1,
+                    "task_class_id": "compat.metrics",
+                    "task_label": "Compat metrics task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+
+        let metrics_req = Request::builder()
+            .method(Method::GET)
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let metrics_resp = router.oneshot(metrics_req).await.unwrap();
+        assert_eq!(metrics_resp.status(), StatusCode::OK);
+        let metrics_body = axum::body::to_bytes(metrics_resp.into_body(), usize::MAX)
+            .await
+            .expect("metrics body");
+        let metrics_text = String::from_utf8(metrics_body.to_vec()).expect("metrics utf8");
+
+        assert!(metrics_text.contains("# HELP oris_a2a_task_queue_depth"));
+        assert!(metrics_text.contains("oris_a2a_task_lease_expired_total 1"));
+        assert!(metrics_text.contains("oris_a2a_task_claim_latency_ms_count 2"));
+        assert!(metrics_text.contains("oris_a2a_report_to_capture_latency_ms_count 1"));
+    }
+
     #[cfg(feature = "evolution-network-experimental")]
     #[tokio::test]
     async fn evolution_metrics_and_health_are_exposed_from_runtime_routes() {
@@ -8071,6 +10015,10 @@ mod tests {
             "oris_runtime_recovery_latency_ms_bucket",
             "oris_runtime_terminal_error_rate",
             "oris_runtime_lease_conflict_rate",
+            "oris_a2a_task_queue_depth",
+            "oris_a2a_task_claim_latency_ms_bucket",
+            "oris_a2a_task_lease_expired_total",
+            "oris_a2a_report_to_capture_latency_ms_bucket",
         ];
 
         for metric in required_metrics {
@@ -8091,6 +10039,9 @@ mod tests {
             "oris_runtime_recovery_latency_ms_bucket",
             "oris_runtime_backpressure_total",
             "oris_runtime_queue_depth",
+            "oris_a2a_task_queue_depth",
+            "oris_a2a_task_claim_latency_ms_count",
+            "oris_a2a_task_lease_expired_total",
         ];
         for metric in alert_metrics {
             assert!(
