@@ -121,6 +121,10 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+      - name: Run orchestrator checks
+        shell: bash
+        run: |
+          bash scripts/run_orchestrator_checks.sh
       - name: Validate runtime API contract drift
         shell: bash
         run: |
