@@ -235,7 +235,6 @@ fn print_replay_feedback(run_id: &str, feedback: &ReplayFeedback) {
         feedback.summary
     );
 }
-
 fn print_devloop_outcome(outcome: &SupervisedDevloopOutcome) {
     println!(
         "supervised devloop: task_id={}, status={:?}, task_class={:?}, summary={}",

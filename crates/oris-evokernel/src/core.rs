@@ -1762,7 +1762,6 @@ impl<S: KernelState> EvoKernel<S> {
             summary,
         }
     }
-
     pub async fn run_supervised_devloop(
         &self,
         run_id: &RunId,
