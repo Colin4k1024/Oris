@@ -14,8 +14,9 @@ This directory contains standalone workspace example projects (separate from `cr
   - Concrete operator command-line client for `run/list/inspect/resume/replay/cancel`.
   - Good fit for SRE and incident-response workflows.
 - `evo_oris_repo`:
-  - Experimental EvoKernel example for the current repository-backed self-evolution slice.
-  - Exercises `AgentTask -> MutationProposal -> capture_from_proposal -> replay_or_fallback`.
+  - Experimental EvoKernel scenario suite for the current repository-backed self-evolution slice.
+  - Includes capture/replay, supervised devloop gate, bootstrap, spec, network, economics, coordination, and metrics examples.
+  - See `examples/evo_oris_repo/README.md` for the full command matrix.
 - `vector_store_surrealdb`:
   - Example integration with SurrealDB vector store.
 
@@ -62,5 +63,8 @@ cargo run -p oris_starter_axum
 cargo run -p oris_worker_tokio
 cargo run -p oris_operator_cli -- --help
 cargo run -p evo_oris_repo
+cargo run -p evo_oris_repo --bin supervised_devloop
+cargo run -p evo_oris_repo --bin metrics_health
+cargo run -p evo_oris_repo --bin evo_vs_non_evo_benchmark
 cargo run -p vector_store_surrealdb
 ```

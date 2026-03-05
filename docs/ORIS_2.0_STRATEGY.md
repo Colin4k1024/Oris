@@ -8,7 +8,7 @@ This document defines Oris’s architectural positioning, core axioms, and a two
 
 **Oris is the execution kernel for reasoning processes: durable, interruptible, and replayable by design.**
 
-Current repo status (March 2, 2026): the deterministic kernel is now extracted into
+Current repo status (March 5, 2026): the deterministic kernel is now extracted into
 `crates/oris-kernel`, while `crates/oris-runtime` keeps `oris_runtime::kernel` as a
 compatibility facade and hosts higher-level runtime APIs under
 `oris_runtime::execution_runtime` and `oris_runtime::execution_server`. The
@@ -308,3 +308,62 @@ Phase 2 (asset layer) may start only when all criteria below are met:
 3. Operator tooling supports run/resume/list/replay/inspect as documented.
 4. Trace and audit fields are stable enough for external integration.
 5. Public module boundary for kernel/graph/agent is explicitly documented and respected.
+
+---
+
+## 10. Evolution Execution Strategy (March 5, 2026 onward)
+
+This section adds the execution strategy for the Evolution track itself so roadmap decisions are tied to concrete delivery and measurable outcomes.
+
+### 10.1 Strategy statement
+
+- Keep “kernel reliability first” as a hard gate.
+- Run Evolution as a staged program with executable examples, policy gates, and release-readiness evidence.
+- Expand autonomy only after each lower-risk layer is proven with deterministic validation.
+
+### 10.2 2026 execution streams and milestones
+
+| Stream | Date window | Target | Must-have deliverables |
+| --- | --- | --- | --- |
+| Stream A: Example-first enablement | March 5, 2026 to April 30, 2026 | Make Evolution behavior inspectable end-to-end for contributors | scenario suite in `examples/evo_oris_repo`, scenario docs in `docs/evokernel/examples.md`, CI compile gate for the suite |
+| Stream B: Supervised semi-autonomous loop | April 1, 2026 to June 30, 2026 | Move from single-flow demo to bounded orchestrated workflow | supervised devloop expansion beyond single docs file, orchestrator/runtime integration tests, immutable evidence bundle schema |
+| Stream C: Federated + economics hardening | July 1, 2026 to September 30, 2026 | Make remote exchange and incentive control production-safe | remote publish/import/revoke reliability tests, reputation-aware selector behavior checks, revocation propagation SLO |
+| Stream D: Release-gated autonomy | October 1, 2026 to December 31, 2026 | Operate issue-to-merge automation with one explicit human release gate | issue-to-merge orchestrator path for scoped issue classes, release gate approval ledger, rollback-ready release runbooks |
+
+### 10.3 Quantitative success metrics
+
+Stream A metrics (enablement):
+
+1. `evo_oris_repo` scenario bins compile in CI with a >= 99% pass rate.
+2. Every merged Evolution API change updates at least one runnable scenario and one matching doc section.
+3. New contributor “first successful Evo run” median time is <= 30 minutes.
+
+Stream B metrics (supervised autonomy):
+
+1. >= 80% of bounded supervised tasks complete without manual patch edits after dispatch.
+2. Policy-gated rejection reasons are deterministic and categorized (approval, scope, validation, capability).
+3. Replay utilization in bounded task classes reaches >= 30% without increased rollback rate.
+
+Stream C metrics (federation and economics):
+
+1. Remote asset import/publish/revoke correctness is >= 99.5% across fault-injection regression runs.
+2. Reputation and EVU controls prevent zero-balance publish and surface auditable settlement records.
+3. Revoked assets are excluded from replay selection within one validation cycle.
+
+Stream D metrics (release-gated automation):
+
+1. At least 10 scoped issues complete the path `Issue -> PR -> Merge -> ReleasePendingApproval` per month.
+2. 100% of releases have explicit approval records and attached evidence bundle IDs.
+3. No release bypasses the approval gate.
+
+### 10.4 Progression gates between streams
+
+1. Stream B cannot expand task classes until Stream A scenario suite is stable in CI.
+2. Stream C cannot scale remote exchange until Stream B policy and evidence checks are deterministic.
+3. Stream D cannot increase autonomy scope until Stream C revocation and economics controls pass reliability targets.
+
+### 10.5 Governance and review cadence
+
+- Weekly: Evolution execution review (example breakages, policy rejects, replay drift).
+- Biweekly: roadmap checkpoint against stream metrics.
+- Monthly: strategy adjustment memo in `docs/plans/` with explicit go/no-go decision for the next stream.

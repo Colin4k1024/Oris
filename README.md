@@ -280,6 +280,7 @@ Common environment variables:
 - [Starter service project (Axum)](examples/oris_starter_axum/README.md) — standalone workspace example for integrating Oris into a Rust backend.
 - [Standalone worker (Tokio)](examples/oris_worker_tokio/README.md) — concrete `poll/heartbeat/ack` worker process when the execution server already exists.
 - [Operator CLI](examples/oris_operator_cli/README.md) — concrete terminal client for `run/list/inspect/resume/replay/cancel`.
+- [Evolution example suite](examples/evo_oris_repo/README.md) — scenario-based Evo programs (capture/replay, supervised devloop, bootstrap, network, economics, metrics).
 - [Template matrix (service/worker/operator)](examples/templates/README.md) — `cargo-generate`-ready skeletons for external users.
 
 Scaffold one of the starter archetypes directly:
@@ -306,10 +307,13 @@ AgentTask
 -> replay_or_fallback_for_run
 ```
 
-Run the canonical example and smoke test:
+Run the canonical example, scenario bins, and smoke test:
 
 ```bash
 cargo run -p evo_oris_repo
+cargo run -p evo_oris_repo --bin supervised_devloop
+cargo run -p evo_oris_repo --bin network_exchange
+OPENAI_COMPAT_API_KEY=... cargo run -p evo_oris_repo --bin evo_vs_non_evo_benchmark -- --planner openai-compatible --model qwen3-235b-a22b --planner-base-url https://mgallery.haier.net/v1 --iterations 10 --verbose
 cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
 ```
 
@@ -335,6 +339,7 @@ Use `replay_or_fallback_for_run` when you want an explicit replay audit id; it r
 What is still design-target only: always-on autonomous dev loops, issue intake, and automatic branch/release orchestration.
 
 - [EvoKernel docs index](docs/evokernel/README.md)
+- [Evo example programs](docs/evokernel/examples.md)
 - [EvoKernel overview](docs/evokernel-v0.1.md)
 - [DEVLOOP implementation snapshot](docs/evokernel/devloop.md)
 

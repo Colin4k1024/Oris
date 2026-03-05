@@ -3,8 +3,11 @@ name = "evo_oris_repo"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "evo_oris_repo"
 
 [dependencies]
-oris-runtime = { path = "../../crates/oris-runtime", features = ["full-evolution-experimental"] }
+oris-runtime = { path = "../../crates/oris-runtime", features = ["full-evolution-experimental", "ollama"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tiktoken-rs = "0.5.8"
 tokio = { version = "1", features = ["full"] }

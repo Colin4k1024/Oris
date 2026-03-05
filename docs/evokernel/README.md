@@ -3,7 +3,7 @@
 Local mirrors of the Notion design pages under:
 https://www.notion.so/317e8a70eec5809c85e1f52aa03870e4
 
-Last synced: March 3, 2026
+Last synced: March 5, 2026
 
 This directory is both:
 
@@ -12,11 +12,13 @@ This directory is both:
 
 ## Use the checked-in implementation first
 
-If you want to exercise the latest code that exists in this repository today, start with the checked-in example and smoke test:
+If you want to exercise the latest code that exists in this repository today, start with the checked-in example suite and smoke test:
 
 ```bash
 cargo add oris-runtime --features full-evolution-experimental
 cargo run -p evo_oris_repo
+cargo run -p evo_oris_repo --bin supervised_devloop
+cargo run -p evo_oris_repo --bin network_exchange
 cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
 ```
 
@@ -53,10 +55,12 @@ What is still design-target only:
 - full remote network/economics/spec coordination beyond the current scaffolds
 
 Read `../evokernel-v0.1.md` first for the architecture summary, then use the per-page mirrors below for deeper design details.
+For runnable scenario coverage and output guidance, use `examples.md`.
 
 Files:
 
 - `architecture.md`
+- `examples.md`
 - `evolution.md`
 - `governor.md`
 - `network.md`
