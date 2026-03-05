@@ -32,7 +32,8 @@ use crate::agent_contract::{
     A2aTaskSessionCompletionRequest, A2aTaskSessionCompletionResponse,
     A2aTaskSessionDispatchRequest, A2aTaskSessionProgressItem, A2aTaskSessionProgressRequest,
     A2aTaskSessionResult, A2aTaskSessionSnapshot, A2aTaskSessionStartRequest, A2aTaskSessionState,
-    ReplayFeedback, ReplayPlannerDirective, A2A_TASK_SESSION_PROTOCOL_VERSION,
+    AgentCapabilityLevel, ReplayFeedback, ReplayPlannerDirective,
+    A2A_TASK_SESSION_PROTOCOL_VERSION,
 };
 #[cfg(feature = "evolution-network-experimental")]
 use crate::evolution::{
@@ -203,9 +204,95 @@ struct A2aSessionPrincipal {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug)]
+enum A2aPrivilegeProfile {
+    Observer,
+    Operator,
+    Governor,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl A2aPrivilegeProfile {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Observer => "observer",
+            Self::Operator => "operator",
+            Self::Governor => "governor",
+        }
+    }
+
+    fn allows(&self, action: A2aPrivilegeAction) -> bool {
+        match self {
+            Self::Observer => matches!(
+                action,
+                A2aPrivilegeAction::EvolutionFetch
+                    | A2aPrivilegeAction::TaskSessionSnapshot
+                    | A2aPrivilegeAction::TaskLifecycleRead
+            ),
+            Self::Operator => matches!(
+                action,
+                A2aPrivilegeAction::EvolutionFetch
+                    | A2aPrivilegeAction::EvolutionPublish
+                    | A2aPrivilegeAction::TaskSessionStart
+                    | A2aPrivilegeAction::TaskSessionDispatch
+                    | A2aPrivilegeAction::TaskSessionProgress
+                    | A2aPrivilegeAction::TaskSessionComplete
+                    | A2aPrivilegeAction::TaskSessionSnapshot
+                    | A2aPrivilegeAction::TaskLifecycleRead
+            ),
+            Self::Governor => true,
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Copy, Debug)]
+enum A2aPrivilegeAction {
+    EvolutionPublish,
+    EvolutionFetch,
+    EvolutionRevoke,
+    TaskSessionStart,
+    TaskSessionDispatch,
+    TaskSessionProgress,
+    TaskSessionComplete,
+    TaskSessionSnapshot,
+    TaskLifecycleRead,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl A2aPrivilegeAction {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::EvolutionPublish => "evolution.publish",
+            Self::EvolutionFetch => "evolution.fetch",
+            Self::EvolutionRevoke => "evolution.revoke",
+            Self::TaskSessionStart => "a2a.task_session.start",
+            Self::TaskSessionDispatch => "a2a.task_session.dispatch",
+            Self::TaskSessionProgress => "a2a.task_session.progress",
+            Self::TaskSessionComplete => "a2a.task_session.complete",
+            Self::TaskSessionSnapshot => "a2a.task_session.snapshot",
+            Self::TaskLifecycleRead => "a2a.task_lifecycle.read",
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug)]
 struct A2aSession {
     negotiated_protocol: A2aProtocol,
     enabled_capabilities: Vec<A2aCapability>,
+    privilege_profile: A2aPrivilegeProfile,
     principal: Option<A2aSessionPrincipal>,
     expires_at: chrono::DateTime<Utc>,
 }
@@ -1360,6 +1447,47 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
             resource_type: "attempt",
             resource_id: Some((*attempt_id).to_string()),
         }),
+        ("evolution", ["v1", "evolution", "publish"]) => Some(AuditTarget {
+            action: "evolution.publish",
+            resource_type: "sender",
+            resource_id: None,
+        }),
+        ("evolution", ["v1", "evolution", "fetch"]) => Some(AuditTarget {
+            action: "evolution.fetch",
+            resource_type: "sender",
+            resource_id: None,
+        }),
+        ("evolution", ["v1", "evolution", "revoke"]) => Some(AuditTarget {
+            action: "evolution.revoke",
+            resource_type: "sender",
+            resource_id: None,
+        }),
+        ("evolution", ["v1", "evolution", "a2a", "sessions", "start"]) => Some(AuditTarget {
+            action: "a2a.task_session.start",
+            resource_type: "session",
+            resource_id: None,
+        }),
+        ("evolution", ["v1", "evolution", "a2a", "sessions", session_id, "dispatch"]) => {
+            Some(AuditTarget {
+                action: "a2a.task_session.dispatch",
+                resource_type: "session",
+                resource_id: Some((*session_id).to_string()),
+            })
+        }
+        ("evolution", ["v1", "evolution", "a2a", "sessions", session_id, "progress"]) => {
+            Some(AuditTarget {
+                action: "a2a.task_session.progress",
+                resource_type: "session",
+                resource_id: Some((*session_id).to_string()),
+            })
+        }
+        ("evolution", ["v1", "evolution", "a2a", "sessions", session_id, "complete"]) => {
+            Some(AuditTarget {
+                action: "a2a.task_session.complete",
+                resource_type: "session",
+                resource_id: Some((*session_id).to_string()),
+            })
+        }
         _ => None,
     }
 }
@@ -1815,10 +1943,11 @@ pub async fn evolution_publish(
     #[cfg(feature = "agent-contract-experimental")]
     let principal = resolve_a2a_principal(&headers, &state);
     #[cfg(feature = "agent-contract-experimental")]
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::EvolutionPublish,
+        A2aPrivilegeAction::EvolutionPublish,
         principal.as_ref(),
         &rid,
     )
@@ -1845,10 +1974,11 @@ pub async fn evolution_fetch(
     #[cfg(feature = "agent-contract-experimental")]
     let principal = resolve_a2a_principal(&headers, &state);
     #[cfg(feature = "agent-contract-experimental")]
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::EvolutionFetch,
+        A2aPrivilegeAction::EvolutionFetch,
         principal.as_ref(),
         &rid,
     )
@@ -1876,10 +2006,11 @@ pub async fn evolution_revoke(
     #[cfg(feature = "agent-contract-experimental")]
     let principal = resolve_a2a_principal(&headers, &state);
     #[cfg(feature = "agent-contract-experimental")]
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::EvolutionRevoke,
+        A2aPrivilegeAction::EvolutionRevoke,
         principal.as_ref(),
         &rid,
     )
@@ -1948,10 +2079,111 @@ fn negotiate_a2a_handshake(req: &A2aHandshakeRequest) -> A2aHandshakeResponse {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
-async fn ensure_a2a_capability(
+fn privilege_profile_from_handshake(
+    capability_level: &AgentCapabilityLevel,
+) -> A2aPrivilegeProfile {
+    match capability_level {
+        AgentCapabilityLevel::A0 | AgentCapabilityLevel::A1 => A2aPrivilegeProfile::Observer,
+        AgentCapabilityLevel::A2 | AgentCapabilityLevel::A3 => A2aPrivilegeProfile::Operator,
+        AgentCapabilityLevel::A4 => A2aPrivilegeProfile::Governor,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn privilege_profile_from_capabilities(
+    enabled_capabilities: &[A2aCapability],
+) -> A2aPrivilegeProfile {
+    if enabled_capabilities.contains(&A2aCapability::EvolutionRevoke)
+        || enabled_capabilities.contains(&A2aCapability::MutationProposal)
+    {
+        return A2aPrivilegeProfile::Governor;
+    }
+    if enabled_capabilities.contains(&A2aCapability::EvolutionPublish)
+        || enabled_capabilities.contains(&A2aCapability::SupervisedDevloop)
+        || enabled_capabilities.contains(&A2aCapability::Coordination)
+    {
+        return A2aPrivilegeProfile::Operator;
+    }
+    A2aPrivilegeProfile::Observer
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[cfg(feature = "sqlite-persistence")]
+fn append_a2a_privilege_audit_log(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    capability: &A2aCapability,
+    action: A2aPrivilegeAction,
+    principal: Option<&A2aSessionPrincipal>,
+    profile: Option<&A2aPrivilegeProfile>,
+    result: &str,
+    reason: &str,
+    request_id: &str,
+) {
+    let Some(repo) = state.runtime_repo.as_ref() else {
+        return;
+    };
+    let entry = AuditLogEntry {
+        actor_type: principal
+            .map(|p| p.actor_type.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        actor_id: principal.and_then(|p| p.actor_id.clone()),
+        actor_role: principal.map(|p| p.actor_role.clone()),
+        action: format!("a2a.privilege.{}", action.as_str()),
+        resource_type: "sender_id".to_string(),
+        resource_id: Some(sender_id.to_string()),
+        result: result.to_string(),
+        request_id: request_id.to_string(),
+        details_json: serde_json::to_string(&serde_json::json!({
+            "sender_id": sender_id,
+            "action": action.as_str(),
+            "required_capability": format!("{capability:?}"),
+            "privilege_profile": profile.map(|item| item.as_str()),
+            "reason": reason,
+            "principal": principal.map(|p| serde_json::json!({
+                "actor_type": p.actor_type.clone(),
+                "actor_id": p.actor_id.clone(),
+                "actor_role": p.actor_role.clone(),
+            })),
+        }))
+        .ok(),
+    };
+    let _ = repo.append_audit_log(&entry);
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[cfg(not(feature = "sqlite-persistence"))]
+fn append_a2a_privilege_audit_log(
+    _state: &ExecutionApiState,
+    _sender_id: &str,
+    _capability: &A2aCapability,
+    _action: A2aPrivilegeAction,
+    _principal: Option<&A2aSessionPrincipal>,
+    _profile: Option<&A2aPrivilegeProfile>,
+    _result: &str,
+    _reason: &str,
+    _request_id: &str,
+) {
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn ensure_a2a_authorized_action(
     state: &ExecutionApiState,
     sender_id: &str,
     capability: A2aCapability,
+    action: A2aPrivilegeAction,
     principal: Option<&A2aSessionPrincipal>,
     rid: &str,
 ) -> Result<(), ApiError> {
@@ -1992,6 +2224,7 @@ async fn ensure_a2a_capability(
                         name: stored.protocol,
                         version: stored.protocol_version,
                     },
+                    privilege_profile: privilege_profile_from_capabilities(&enabled_capabilities),
                     enabled_capabilities,
                     principal: principal_from_store,
                     expires_at: stored.expires_at,
@@ -2007,6 +2240,17 @@ async fn ensure_a2a_capability(
     }
 
     let Some(session) = session else {
+        append_a2a_privilege_audit_log(
+            state,
+            sender_id,
+            &capability,
+            action,
+            principal,
+            None,
+            "denied",
+            "missing_handshake",
+            rid,
+        );
         return Err(
             ApiError::forbidden("a2a handshake required before calling evolution routes")
                 .with_request_id(rid.to_string())
@@ -2023,6 +2267,17 @@ async fn ensure_a2a_capability(
         if let Some(repo) = state.runtime_repo.as_ref() {
             let _ = repo.purge_expired_a2a_sessions(now);
         }
+        append_a2a_privilege_audit_log(
+            state,
+            sender_id,
+            &capability,
+            action,
+            principal,
+            Some(&session.privilege_profile),
+            "denied",
+            "session_expired",
+            rid,
+        );
         return Err(
             ApiError::forbidden("a2a session expired; handshake required")
                 .with_request_id(rid.to_string())
@@ -2033,6 +2288,17 @@ async fn ensure_a2a_capability(
         );
     }
     if session.principal.as_ref() != principal {
+        append_a2a_privilege_audit_log(
+            state,
+            sender_id,
+            &capability,
+            action,
+            principal,
+            Some(&session.privilege_profile),
+            "denied",
+            "principal_mismatch",
+            rid,
+        );
         return Err(
             ApiError::forbidden("negotiated a2a session principal does not match caller")
                 .with_request_id(rid.to_string())
@@ -2052,6 +2318,17 @@ async fn ensure_a2a_capability(
         );
     }
     if !session.enabled_capabilities.contains(&capability) {
+        append_a2a_privilege_audit_log(
+            state,
+            sender_id,
+            &capability,
+            action,
+            principal,
+            Some(&session.privilege_profile),
+            "denied",
+            "missing_capability",
+            rid,
+        );
         return Err(ApiError::forbidden(
             "negotiated capabilities do not allow this evolution action",
         )
@@ -2071,6 +2348,40 @@ async fn ensure_a2a_capability(
                 .collect::<Vec<_>>(),
         })));
     }
+    if !session.privilege_profile.allows(action) {
+        append_a2a_privilege_audit_log(
+            state,
+            sender_id,
+            &capability,
+            action,
+            principal,
+            Some(&session.privilege_profile),
+            "denied",
+            "profile_denied",
+            rid,
+        );
+        return Err(
+            ApiError::forbidden("a2a privilege profile does not allow this action")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "sender_id": sender_id,
+                    "action": action.as_str(),
+                    "required_capability": format!("{capability:?}"),
+                    "privilege_profile": session.privilege_profile.as_str(),
+                })),
+        );
+    }
+    append_a2a_privilege_audit_log(
+        state,
+        sender_id,
+        &capability,
+        action,
+        principal,
+        Some(&session.privilege_profile),
+        "allowed",
+        "authorized",
+        rid,
+    );
     Ok(())
 }
 
@@ -2094,6 +2405,7 @@ pub async fn evolution_a2a_handshake(
             let session = A2aSession {
                 negotiated_protocol: protocol.clone(),
                 enabled_capabilities: response.enabled_capabilities.clone(),
+                privilege_profile: privilege_profile_from_handshake(&req.capability_level),
                 principal: principal.clone(),
                 expires_at,
             };
@@ -2141,10 +2453,24 @@ pub async fn evolution_a2a_handshake(
 pub async fn evolution_a2a_task_lifecycle(
     State(state): State<ExecutionApiState>,
     Path(task_id): Path<String>,
+    Query(q): Query<A2aTaskSessionLookupQuery>,
     headers: HeaderMap,
 ) -> Result<Json<ApiEnvelope<A2aTaskLifecycleResponse>>, ApiError> {
     let rid = request_id(&headers);
     validate_thread_id(&task_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_sender_id(&q.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    ensure_task_session_protocol_version(&q.protocol_version, &rid)?;
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_authorized_action(
+        &state,
+        &q.sender_id,
+        A2aCapability::EvolutionFetch,
+        A2aPrivilegeAction::TaskLifecycleRead,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
 
     let events = state
         .a2a_task_lifecycle_events
@@ -2179,10 +2505,11 @@ pub async fn evolution_a2a_session_start(
     ensure_task_session_protocol_version(&req.protocol_version, &rid)?;
 
     let principal = resolve_a2a_principal(&headers, &state);
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::Coordination,
+        A2aPrivilegeAction::TaskSessionStart,
         principal.as_ref(),
         &rid,
     )
@@ -2240,10 +2567,11 @@ pub async fn evolution_a2a_session_dispatch(
     }
 
     let principal = resolve_a2a_principal(&headers, &state);
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::SupervisedDevloop,
+        A2aPrivilegeAction::TaskSessionDispatch,
         principal.as_ref(),
         &rid,
     )
@@ -2304,10 +2632,11 @@ pub async fn evolution_a2a_session_progress(
     }
 
     let principal = resolve_a2a_principal(&headers, &state);
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::SupervisedDevloop,
+        A2aPrivilegeAction::TaskSessionProgress,
         principal.as_ref(),
         &rid,
     )
@@ -2376,18 +2705,20 @@ pub async fn evolution_a2a_session_complete(
     })?;
 
     let principal = resolve_a2a_principal(&headers, &state);
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::SupervisedDevloop,
+        A2aPrivilegeAction::TaskSessionComplete,
         principal.as_ref(),
         &rid,
     )
     .await?;
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
         A2aCapability::ReplayFeedback,
+        A2aPrivilegeAction::TaskSessionComplete,
         principal.as_ref(),
         &rid,
     )
@@ -2471,10 +2802,11 @@ pub async fn evolution_a2a_session_snapshot(
     ensure_task_session_protocol_version(&q.protocol_version, &rid)?;
 
     let principal = resolve_a2a_principal(&headers, &state);
-    ensure_a2a_capability(
+    ensure_a2a_authorized_action(
         &state,
         &q.sender_id,
         A2aCapability::Coordination,
+        A2aPrivilegeAction::TaskSessionSnapshot,
         principal.as_ref(),
         &rid,
     )
@@ -4450,6 +4782,19 @@ mod tests {
         agent_id: &str,
         capabilities: &[&str],
     ) -> serde_json::Value {
+        handshake_agent_with_caps_and_level(router, agent_id, "A4", capabilities).await
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    async fn handshake_agent_with_caps_and_level(
+        router: &axum::Router,
+        agent_id: &str,
+        capability_level: &str,
+        capabilities: &[&str],
+    ) -> serde_json::Value {
         let handshake_req = Request::builder()
             .method(Method::POST)
             .uri("/v1/evolution/a2a/handshake")
@@ -4458,7 +4803,7 @@ mod tests {
                 serde_json::json!({
                     "agent_id": agent_id,
                     "role": "Planner",
-                    "capability_level": "A1",
+                    "capability_level": capability_level,
                     "supported_protocols": [
                         {
                             "name": crate::agent_contract::A2A_PROTOCOL_NAME,
@@ -4482,10 +4827,17 @@ mod tests {
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
     ))]
-    async fn fetch_lifecycle_events(router: &axum::Router, task_id: &str) -> serde_json::Value {
+    async fn fetch_lifecycle_events(
+        router: &axum::Router,
+        task_id: &str,
+        sender_id: &str,
+    ) -> serde_json::Value {
         let req = Request::builder()
             .method(Method::GET)
-            .uri(format!("/v1/evolution/a2a/tasks/{task_id}/lifecycle"))
+            .uri(format!(
+                "/v1/evolution/a2a/tasks/{task_id}/lifecycle?sender_id={sender_id}&protocol_version={}",
+                crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
+            ))
             .body(Body::empty())
             .unwrap();
         let resp = router.clone().oneshot(req).await.unwrap();
@@ -4897,6 +5249,9 @@ mod tests {
     #[tokio::test]
     async fn evolution_a2a_lifecycle_events_track_run_flow_and_query_by_task_id() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake_json =
+            handshake_agent_with_caps(&router, "lifecycle-reader-run", &["EvolutionFetch"]).await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
 
         let run_req = Request::builder()
             .method(Method::POST)
@@ -4913,7 +5268,8 @@ mod tests {
         let run_resp = router.clone().oneshot(run_req).await.unwrap();
         assert_eq!(run_resp.status(), StatusCode::OK);
 
-        let lifecycle_json = fetch_lifecycle_events(&router, "a2a-lifecycle-run-1").await;
+        let lifecycle_json =
+            fetch_lifecycle_events(&router, "a2a-lifecycle-run-1", "lifecycle-reader-run").await;
         let events = lifecycle_json["data"]["events"]
             .as_array()
             .expect("lifecycle events array");
@@ -4945,6 +5301,13 @@ mod tests {
     #[tokio::test]
     async fn evolution_a2a_lifecycle_events_capture_replay_failure_terminal_state() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake_json = handshake_agent_with_caps(
+            &router,
+            "lifecycle-reader-replay-failure",
+            &["EvolutionFetch"],
+        )
+        .await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
 
         let replay_req = Request::builder()
             .method(Method::POST)
@@ -4955,7 +5318,12 @@ mod tests {
         let replay_resp = router.clone().oneshot(replay_req).await.unwrap();
         assert_eq!(replay_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-        let lifecycle_json = fetch_lifecycle_events(&router, "a2a-replay-missing").await;
+        let lifecycle_json = fetch_lifecycle_events(
+            &router,
+            "a2a-replay-missing",
+            "lifecycle-reader-replay-failure",
+        )
+        .await;
         let events = lifecycle_json["data"]["events"]
             .as_array()
             .expect("lifecycle events array");
@@ -4980,6 +5348,10 @@ mod tests {
         repo.enqueue_attempt("attempt-a2a-supervised-1", "run-a2a-supervised-1")
             .expect("enqueue supervised attempt");
         let router = build_router(state);
+        let handshake_json =
+            handshake_agent_with_caps(&router, "lifecycle-reader-worker", &["EvolutionFetch"])
+                .await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
 
         let report_req = Request::builder()
             .method(Method::POST)
@@ -5013,7 +5385,12 @@ mod tests {
         let ack_resp = router.clone().oneshot(ack_req).await.unwrap();
         assert_eq!(ack_resp.status(), StatusCode::OK);
 
-        let lifecycle_json = fetch_lifecycle_events(&router, "attempt-a2a-supervised-1").await;
+        let lifecycle_json = fetch_lifecycle_events(
+            &router,
+            "attempt-a2a-supervised-1",
+            "lifecycle-reader-worker",
+        )
+        .await;
         let events = lifecycle_json["data"]["events"]
             .as_array()
             .expect("lifecycle events array");
@@ -5298,6 +5675,262 @@ mod tests {
             crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
         );
         assert_eq!(start_json["error"]["details"]["actual"], "0.0.1");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_privilege_profiles_enforce_allow_deny_matrix() {
+        let store_root =
+            std::env::temp_dir().join(format!("oris-a2a-privilege-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&store_root);
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_evolution_store(Arc::new(
+                crate::evolution::JsonlEvolutionStore::new(&store_root),
+            )),
+        );
+
+        let full_caps = [
+            "Coordination",
+            "SupervisedDevloop",
+            "ReplayFeedback",
+            "EvolutionPublish",
+            "EvolutionFetch",
+            "EvolutionRevoke",
+        ];
+        let observer =
+            handshake_agent_with_caps_and_level(&router, "profile-observer", "A1", &full_caps)
+                .await;
+        let operator =
+            handshake_agent_with_caps_and_level(&router, "profile-operator", "A3", &full_caps)
+                .await;
+        let governor =
+            handshake_agent_with_caps_and_level(&router, "profile-governor", "A4", &full_caps)
+                .await;
+        assert_eq!(observer["data"]["accepted"], true);
+        assert_eq!(operator["data"]["accepted"], true);
+        assert_eq!(governor["data"]["accepted"], true);
+
+        let observer_fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "profile-observer",
+                    "signals": ["rust"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let observer_fetch_resp = router.clone().oneshot(observer_fetch_req).await.unwrap();
+        assert_eq!(observer_fetch_resp.status(), StatusCode::OK);
+
+        let observer_publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "profile-observer",
+                    "assets": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let observer_publish_resp = router.clone().oneshot(observer_publish_req).await.unwrap();
+        assert_eq!(observer_publish_resp.status(), StatusCode::FORBIDDEN);
+        let observer_publish_body =
+            axum::body::to_bytes(observer_publish_resp.into_body(), usize::MAX)
+                .await
+                .expect("observer publish body");
+        let observer_publish_json: serde_json::Value =
+            serde_json::from_slice(&observer_publish_body).expect("observer publish json");
+        assert_eq!(
+            observer_publish_json["error"]["message"],
+            "a2a privilege profile does not allow this action"
+        );
+
+        let operator_publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "profile-operator",
+                    "assets": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let operator_publish_resp = router.clone().oneshot(operator_publish_req).await.unwrap();
+        assert_eq!(operator_publish_resp.status(), StatusCode::OK);
+
+        let operator_revoke_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "profile-operator",
+                    "asset_ids": [],
+                    "reason": "profile test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let operator_revoke_resp = router.clone().oneshot(operator_revoke_req).await.unwrap();
+        assert_eq!(operator_revoke_resp.status(), StatusCode::FORBIDDEN);
+
+        let operator_session_start_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/sessions/start")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "profile-operator",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "task_id": "profile-operator-task",
+                    "task_summary": "operator session start"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let operator_session_start_resp = router
+            .clone()
+            .oneshot(operator_session_start_req)
+            .await
+            .unwrap();
+        assert_eq!(operator_session_start_resp.status(), StatusCode::OK);
+
+        let governor_revoke_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "profile-governor",
+                    "asset_ids": [],
+                    "reason": "governor allowed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let governor_revoke_resp = router.oneshot(governor_revoke_req).await.unwrap();
+        assert_eq!(governor_revoke_resp.status(), StatusCode::OK);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_privilege_audit_logs_include_principal_capability_and_reason() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_persisted_api_key_record_with_role(
+                    "a2a-audit-key",
+                    "a2a-audit-secret",
+                    true,
+                    ApiRole::Admin,
+                );
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let handshake_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/handshake")
+            .header("x-api-key-id", "a2a-audit-key")
+            .header("x-api-key", "a2a-audit-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "audit-profile-observer",
+                    "role": "Planner",
+                    "capability_level": "A1",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION
+                        }
+                    ],
+                    "advertised_capabilities": ["EvolutionPublish", "EvolutionFetch"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let handshake_resp = router.clone().oneshot(handshake_req).await.unwrap();
+        assert_eq!(handshake_resp.status(), StatusCode::OK);
+
+        let denied_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("x-api-key-id", "a2a-audit-key")
+            .header("x-api-key", "a2a-audit-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "audit-profile-observer",
+                    "assets": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let denied_resp = router.clone().oneshot(denied_req).await.unwrap();
+        assert_eq!(denied_resp.status(), StatusCode::FORBIDDEN);
+
+        let allowed_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/fetch")
+            .header("x-api-key-id", "a2a-audit-key")
+            .header("x-api-key", "a2a-audit-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "audit-profile-observer",
+                    "signals": ["rust"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let allowed_resp = router.clone().oneshot(allowed_req).await.unwrap();
+        assert_eq!(allowed_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(100).expect("list audit logs");
+        let denied_log = logs
+            .iter()
+            .find(|log| log.action == "a2a.privilege.evolution.publish" && log.result == "denied")
+            .expect("denied privilege log");
+        let denied_details: serde_json::Value = serde_json::from_str(
+            denied_log
+                .details_json
+                .as_deref()
+                .expect("denied details json"),
+        )
+        .expect("parse denied details");
+        assert_eq!(denied_log.actor_id.as_deref(), Some("a2a-audit-key"));
+        assert_eq!(denied_details["required_capability"], "EvolutionPublish");
+        assert_eq!(denied_details["privilege_profile"], "observer");
+        assert_eq!(denied_details["reason"], "profile_denied");
+
+        let allowed_log = logs
+            .iter()
+            .find(|log| log.action == "a2a.privilege.evolution.fetch" && log.result == "allowed")
+            .expect("allowed privilege log");
+        let allowed_details: serde_json::Value = serde_json::from_str(
+            allowed_log
+                .details_json
+                .as_deref()
+                .expect("allowed details json"),
+        )
+        .expect("parse allowed details");
+        assert_eq!(allowed_details["required_capability"], "EvolutionFetch");
+        assert_eq!(allowed_details["reason"], "authorized");
     }
 
     #[tokio::test]

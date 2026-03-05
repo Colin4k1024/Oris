@@ -32,6 +32,7 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
 - remote A2A task session transitions follow `Started -> Dispatched -> InProgress* -> Completed|Failed|Cancelled`
 - session completion payloads are normalized into `ReplayFeedback` (`SkipPlanner` or `PlanFallback`) so remote results can feed replay-aware evolution decisions
 - remote task session protocol versions are strictly checked; incompatible versions return deterministic `400` errors
+- runtime now enforces agent-managed privilege profiles (`observer`/`operator`/`governor`) across evolution and A2A session endpoints, with audit logs capturing principal, capability, and allow/deny reasons
 
 Not yet implemented in the checked-in crate:
 

@@ -53,10 +53,35 @@ Protocol compatibility:
 - runtime requires `protocol_version == 0.1.0-experimental`
 - incompatible versions fail with deterministic `400` error message: `incompatible a2a task session protocol version`
 
+A2A execution privilege model (experimental):
+
+- privilege profile is derived from negotiated `capability_level`:
+  - `A0`/`A1` -> `observer`
+  - `A2`/`A3` -> `operator`
+  - `A4` -> `governor`
+- runtime enforces both negotiated capability membership and privilege profile allow-list
+- denied and allowed privileged checks are recorded into audit logs with principal + capability + reason fields
+
+Privilege matrix:
+
+| Action | Observer | Operator | Governor |
+| --- | --- | --- | --- |
+| `evolution.fetch` | allow | allow | allow |
+| `evolution.publish` | deny | allow | allow |
+| `evolution.revoke` | deny | deny | allow |
+| `a2a.task_session.start/dispatch/progress/complete` | deny | allow | allow |
+| `a2a.task_session.snapshot` | allow | allow | allow |
+| `a2a.task_lifecycle.read` | allow | allow | allow |
+
+Recommended deployment defaults:
+
+- default external peers to `A1` + `EvolutionFetch` only (observer read path)
+- grant CI/operator peers `A3` for publish + remote task session flows, but keep revoke out
+- reserve `A4` governor profile for tightly scoped internal principals that must revoke assets
+
 Not yet implemented in the checked-in code:
 
 - cross-node negotiated session propagation
-- agent-managed execution privileges
 
 ## Related Documents
 
