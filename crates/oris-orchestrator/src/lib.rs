@@ -1,3 +1,4 @@
+pub mod coordinator;
 pub mod evidence;
 pub mod github_adapter;
 pub mod release_gate;

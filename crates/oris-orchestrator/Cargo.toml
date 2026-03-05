@@ -7,3 +7,6 @@ license = "MIT"
 description = "Oris orchestration contracts and control flow primitives."
 
 [dependencies]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
