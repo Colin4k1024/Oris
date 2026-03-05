@@ -832,7 +832,6 @@ fn deterministic_phrase_match(candidate: &CanonicalSignal, input: &CanonicalSign
         0.0
     }
 }
-
 fn seconds_since_timestamp(timestamp: &str, now: DateTime<Utc>) -> Option<u64> {
     let parsed = DateTime::parse_from_rfc3339(timestamp)
         .ok()?
