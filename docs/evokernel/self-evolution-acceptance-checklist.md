@@ -166,7 +166,7 @@ Definition of done:
 
 - one learned fix can help multiple semantically equivalent task variants, not just near-identical ones (regression: `multiple_semantically_adjacent_signal_variants_replay_same_capsule`)
 
-### Stage 3. Introduce Continuous Confidence Control
+### Stage 3. Introduce Continuous Confidence Control (Shipped)
 
 Goal:
 
@@ -188,7 +188,7 @@ Current deterministic boundary:
 
 Definition of done:
 
-- stale or environment-diverged assets lose priority automatically before they become harmful
+- stale or environment-diverged assets lose priority automatically before they become harmful (regression: `stale_confidence_forces_revalidation_before_replay`, `env_divergence_reduces_replay_eligibility`)
 
 ### Stage 4. Close the Agent Feedback Loop
 

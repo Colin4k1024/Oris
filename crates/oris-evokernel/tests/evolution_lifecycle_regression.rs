@@ -196,20 +196,27 @@ index 0000000..1111111
 }
 
 fn replay_input(signal: &str, workspace: &std::path::Path) -> EvoSelectorInput {
-    let rustc_version = std::process::Command::new("rustc")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_else(|| "rustc unknown".into());
-    let cargo_lock_hash = std::fs::read(workspace.join("Cargo.lock"))
-        .ok()
-        .map(|bytes| compute_artifact_hash(&String::from_utf8_lossy(&bytes)))
-        .unwrap_or_else(|| "missing-cargo-lock".into());
-    EvoSelectorInput {
-        signals: vec![signal.into()],
-        env: EvoEnvFingerprint {
+    replay_input_with_env(signal, workspace, None)
+}
+
+fn replay_input_with_env(
+    signal: &str,
+    workspace: &std::path::Path,
+    env_override: Option<EvoEnvFingerprint>,
+) -> EvoSelectorInput {
+    let env = env_override.unwrap_or_else(|| {
+        let rustc_version = std::process::Command::new("rustc")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_else(|| "rustc unknown".into());
+        let cargo_lock_hash = std::fs::read(workspace.join("Cargo.lock"))
+            .ok()
+            .map(|bytes| compute_artifact_hash(&String::from_utf8_lossy(&bytes)))
+            .unwrap_or_else(|| "missing-cargo-lock".into());
+        EvoEnvFingerprint {
             rustc_version,
             cargo_lock_hash,
             target_triple: format!(
@@ -218,7 +225,11 @@ fn replay_input(signal: &str, workspace: &std::path::Path) -> EvoSelectorInput {
                 std::env::consts::OS
             ),
             os: std::env::consts::OS.into(),
-        },
+        }
+    });
+    EvoSelectorInput {
+        signals: vec![signal.into()],
+        env,
         spec_id: None,
         limit: 1,
     }
@@ -970,6 +981,35 @@ async fn stale_confidence_forces_revalidation_before_replay() {
                 && reason.contains("confidence decayed")
     )));
     assert_eq!(metrics.confidence_revalidations_total, 1);
+}
+
+#[tokio::test]
+async fn env_divergence_reduces_replay_eligibility() {
+    let (workspace, _store, evo) = test_evo("self-evolve-env-divergence");
+
+    let _captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-env-divergence".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-env-divergence"),
+        )
+        .await
+        .unwrap();
+
+    let diverged_env = EvoEnvFingerprint {
+        rustc_version: "rustc diverged".into(),
+        cargo_lock_hash: "diverged-lock-hash".into(),
+        target_triple: "diverged-triple".into(),
+        os: "diverged-os".into(),
+    };
+    let diverged_input = replay_input_with_env("missing readme", &workspace, Some(diverged_env));
+
+    let decision = evo.replay_or_fallback(diverged_input).await.unwrap();
+
+    assert!(
+        !decision.used_capsule,
+        "env divergence (e.g. cargo lock change) should reduce replay eligibility and trigger fallback"
+    );
+    assert!(decision.fallback_to_planner);
 }
 
 #[tokio::test]
