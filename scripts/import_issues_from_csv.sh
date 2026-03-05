@@ -18,7 +18,8 @@ Options:
   --help                   Show this help
 
 CSV columns:
-  title, body, labels, milestone
+  Required/consumed: title, body, labels, milestone
+  Additional columns are ignored
 
 Examples:
   bash scripts/import_issues_from_csv.sh --dry-run
@@ -220,7 +221,9 @@ while IFS=$'\t' read -r title_b64 body_b64 labels_b64 milestone_b64; do
   if [[ -n "$milestone" ]]; then
     cmd+=("--milestone" "$milestone")
   fi
-  cmd+=("${label_args[@]}")
+  if [[ ${#label_args[@]} -gt 0 ]]; then
+    cmd+=("${label_args[@]}")
+  fi
 
   if [[ "$dry_run" == "true" ]]; then
     printf 'dry-run create issue: '

@@ -167,7 +167,8 @@ AgentTask
 
 ## 7. 批量创建路线图 Issue（可选）
 
-已提供脚本，可从 `docs/issues-roadmap.csv` 批量创建 GitHub Issues：
+已提供脚本，可从 `docs/issues-roadmap.csv` 批量创建 GitHub Issues。
+这个 CSV 现在同时也是路线图账本：前四列 `title/body/labels/milestone` 用于导入，后续归档与状态列仅用于追踪，导入脚本会自动忽略它们。
 
 ```bash
 bash scripts/import_issues_from_csv.sh --repo Colin4k1024/Oris --create-milestones --create-labels

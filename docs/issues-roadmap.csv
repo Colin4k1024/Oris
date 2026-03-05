@@ -1,25 +1,1103 @@
-"title","body","labels","milestone"
-"[SEC-01] Add unified auth middleware for execution APIs","Scope: enforce auth on /v1/jobs/*, /v1/workers/*, /v1/interrupts/*. DoD: missing credential returns 401; invalid credential returns 401; valid credential passes baseline API tests.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)"
-"[SEC-02] Implement API key authentication","Scope: support key_id, hashed secret storage, key active/disabled state, and rotation-friendly model. DoD: disabled key is rejected immediately with 401 and covered by tests.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)"
-"[SEC-03] Implement JWT authentication with JWKS","Scope: validate iss/aud/exp and cache JWKS for runtime verification. DoD: expired token and wrong audience are rejected; JWKS cache behavior is observable.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)"
-"[SEC-04] Introduce minimum RBAC model","Scope: define admin/operator/worker roles and route-level permission matrix. DoD: unauthorized role access returns 403 and matrix is covered by automated tests.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)"
-"[SEC-05] Persist audit logs for control-plane operations","Scope: record actor, action, resource, result, request_id, and timestamp for run/resume/replay/cancel/reject. DoD: 100 percent of key control actions produce durable audit entries.","area/security,area/runtime,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)"
-"[SEC-06] Add security regression test suite","Scope: add tests for auth bypass, privilege escalation, request_id spoof handling, and replay resistance baseline. DoD: CI has a dedicated security job and it is required for merge.","area/security,type/test,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)"
-"[DB-01] Complete PostgreSQL RuntimeRepository parity","Scope: implement PostgreSQL RuntimeRepository to match SQLite contract and semantics. DoD: same runtime repository test suite passes on sqlite and postgres backends.","area/storage,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)"
-"[DB-02] Harden lease/attempt/interrupt transaction logic on PostgreSQL","Scope: enforce transaction boundaries and conflict handling for dispatch and ownership flows. DoD: concurrency tests show no double-dispatch and no inconsistent lease ownership.","area/storage,area/scheduler,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)"
-"[DB-03] Introduce schema migration workflow","Scope: add schema versioning with forward migrations and documented rollback path. DoD: clean init and incremental upgrade are repeatable in CI and local environments.","area/storage,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)"
-"[DB-04] Add backend selection and startup health checks","Scope: allow runtime backend selection via config and fail fast on invalid DSN or missing schema. DoD: startup emits actionable error and exits non-zero for bad backend config.","area/storage,area/runtime,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)"
-"[DB-05] Publish PostgreSQL backup and restore runbook","Scope: document and script backup, restore, and validation path for runtime data. DoD: one full rehearsal (backup to restore to resume execution) is recorded.","area/storage,type/docs,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)"
-"[DB-06] Add PostgreSQL integration matrix in CI","Scope: run key runtime tests on both sqlite and postgres, including crash recovery scenarios. DoD: CI blocks merge when either backend matrix fails.","area/storage,type/test,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)"
-"[SCH-01] Add retry policies for attempts","Scope: support fixed and exponential backoff with max retry count. DoD: failed attempts retry according to policy and retry history is queryable.","area/scheduler,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)"
-"[SCH-02] Add attempt timeout policy","Scope: define execution timeout and terminal behavior on timeout. DoD: timed-out attempts transition deterministically to configured terminal state.","area/scheduler,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)"
-"[SCH-03] Introduce dead-letter queue model and APIs","Scope: persist unrecoverable attempts and expose list/inspect/replay APIs. DoD: DLQ attempts are visible and replayable through control-plane APIs.","area/scheduler,area/runtime,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)"
-"[SCH-04] Add priority-aware dispatch","Scope: support attempt priority and prefer high-priority dispatch under mixed queues. DoD: load test shows lower wait latency for high-priority attempts.","area/scheduler,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)"
-"[SCH-05] Add worker and tenant rate limits","Scope: implement configurable worker and tenant throttling integrated with backpressure decisions. DoD: over-limit traffic returns deterministic backpressure decisions and metrics.","area/scheduler,area/multitenancy,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)"
-"[SCH-06] Build failover and conflict stress test suite","Scope: create fault-injection scripts for lease expiry, conflict, and failover recovery measurements. DoD: baseline report includes conflict rate, recovery latency, and throughput.","area/scheduler,type/test,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)"
-"[OBS-01] Add end-to-end OpenTelemetry traces","Scope: instrument run/thread/attempt lifecycle with trace context propagation. DoD: one run can be traced end-to-end across API and worker flow.","area/observability,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)"
-"[OBS-02] Expose Prometheus runtime metrics","Scope: expose queue depth, dispatch latency, lease conflict rate, and recovery latency metrics. DoD: /metrics endpoint is scrape-ready and metrics are documented.","area/observability,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)"
-"[OBS-03] Provide Grafana dashboards and alert rules","Scope: add dashboard JSON and alert thresholds for error rate, recovery latency, and sustained backpressure. DoD: dashboard and alerts are validated against sample workload.","area/observability,type/docs,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)"
-"[REL-01] Add replay side-effect safety guard","Scope: persist effect log and idempotency fingerprint to avoid duplicated external side effects during replay. DoD: replay test proves no duplicate side-effect execution.","area/reliability,area/runtime,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)"
-"[OSS-01] Publish cargo-generate templates for service/worker/operator","Scope: package and document cargo-generate flow for the three starter archetypes. DoD: external user can scaffold and run each archetype with one command path.","area/developer-experience,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)"
-"[OSS-02] Complete production operations docs","Scope: publish deploy, upgrade, migration, SLO, and incident-response guides for operators. DoD: docs provide an end-to-end path from fresh deploy to production readiness.","area/developer-experience,type/docs,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)"
+"title","body","labels","milestone","roadmap_track","roadmap_status","issue_number","issue_state","issue_url"
+"[SEC-01] Add unified auth middleware for execution APIs","Scope: enforce auth on /v1/jobs/*, /v1/workers/*, /v1/interrupts/*. DoD: missing credential returns 401; invalid credential returns 401; valid credential passes baseline API tests.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)","runtime-v1","archived","4","CLOSED","https://github.com/Colin4k1024/Oris/issues/4"
+"[SEC-02] Implement API key authentication","Scope: support key_id, hashed secret storage, key active/disabled state, and rotation-friendly model. DoD: disabled key is rejected immediately with 401 and covered by tests.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)","runtime-v1","archived","5","CLOSED","https://github.com/Colin4k1024/Oris/issues/5"
+"[SEC-03] Implement JWT authentication with JWKS","Scope: validate iss/aud/exp and cache JWKS for runtime verification. DoD: expired token and wrong audience are rejected; JWKS cache behavior is observable.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)","runtime-v1","archived","6","CLOSED","https://github.com/Colin4k1024/Oris/issues/6"
+"[SEC-04] Introduce minimum RBAC model","Scope: define admin/operator/worker roles and route-level permission matrix. DoD: unauthorized role access returns 403 and matrix is covered by automated tests.","area/security,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)","runtime-v1","archived","7","CLOSED","https://github.com/Colin4k1024/Oris/issues/7"
+"[SEC-05] Persist audit logs for control-plane operations","Scope: record actor, action, resource, result, request_id, and timestamp for run/resume/replay/cancel/reject. DoD: 100 percent of key control actions produce durable audit entries.","area/security,area/runtime,type/feature,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)","runtime-v1","archived","8","CLOSED","https://github.com/Colin4k1024/Oris/issues/8"
+"[SEC-06] Add security regression test suite","Scope: add tests for auth bypass, privilege escalation, request_id spoof handling, and replay resistance baseline. DoD: CI has a dedicated security job and it is required for merge.","area/security,type/test,priority/P0,sprint/1","Sprint 1 (2026-03-02 ~ 2026-03-08)","runtime-v1","archived","9","CLOSED","https://github.com/Colin4k1024/Oris/issues/9"
+"[DB-01] Complete PostgreSQL RuntimeRepository parity","Scope: implement PostgreSQL RuntimeRepository to match SQLite contract and semantics. DoD: same runtime repository test suite passes on sqlite and postgres backends.","area/storage,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)","runtime-v1","archived","10","CLOSED","https://github.com/Colin4k1024/Oris/issues/10"
+"[DB-02] Harden lease/attempt/interrupt transaction logic on PostgreSQL","Scope: enforce transaction boundaries and conflict handling for dispatch and ownership flows. DoD: concurrency tests show no double-dispatch and no inconsistent lease ownership.","area/storage,area/scheduler,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)","runtime-v1","archived","11","CLOSED","https://github.com/Colin4k1024/Oris/issues/11"
+"[DB-03] Introduce schema migration workflow","Scope: add schema versioning with forward migrations and documented rollback path. DoD: clean init and incremental upgrade are repeatable in CI and local environments.","area/storage,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)","runtime-v1","archived","12","CLOSED","https://github.com/Colin4k1024/Oris/issues/12"
+"[DB-04] Add backend selection and startup health checks","Scope: allow runtime backend selection via config and fail fast on invalid DSN or missing schema. DoD: startup emits actionable error and exits non-zero for bad backend config.","area/storage,area/runtime,type/feature,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)","runtime-v1","archived","13","CLOSED","https://github.com/Colin4k1024/Oris/issues/13"
+"[DB-05] Publish PostgreSQL backup and restore runbook","Scope: document and script backup, restore, and validation path for runtime data. DoD: one full rehearsal (backup to restore to resume execution) is recorded.","area/storage,type/docs,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)","runtime-v1","archived","14","CLOSED","https://github.com/Colin4k1024/Oris/issues/14"
+"[DB-06] Add PostgreSQL integration matrix in CI","Scope: run key runtime tests on both sqlite and postgres, including crash recovery scenarios. DoD: CI blocks merge when either backend matrix fails.","area/storage,type/test,priority/P0,sprint/2","Sprint 2 (2026-03-09 ~ 2026-03-15)","runtime-v1","archived","15","CLOSED","https://github.com/Colin4k1024/Oris/issues/15"
+"[SCH-01] Add retry policies for attempts","Scope: support fixed and exponential backoff with max retry count. DoD: failed attempts retry according to policy and retry history is queryable.","area/scheduler,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)","runtime-v1","archived","16","CLOSED","https://github.com/Colin4k1024/Oris/issues/16"
+"[SCH-02] Add attempt timeout policy","Scope: define execution timeout and terminal behavior on timeout. DoD: timed-out attempts transition deterministically to configured terminal state.","area/scheduler,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)","runtime-v1","archived","17","CLOSED","https://github.com/Colin4k1024/Oris/issues/17"
+"[SCH-03] Introduce dead-letter queue model and APIs","Scope: persist unrecoverable attempts and expose list/inspect/replay APIs. DoD: DLQ attempts are visible and replayable through control-plane APIs.","area/scheduler,area/runtime,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)","runtime-v1","archived","18","CLOSED","https://github.com/Colin4k1024/Oris/issues/18"
+"[SCH-04] Add priority-aware dispatch","Scope: support attempt priority and prefer high-priority dispatch under mixed queues. DoD: load test shows lower wait latency for high-priority attempts.","area/scheduler,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)","runtime-v1","archived","19","CLOSED","https://github.com/Colin4k1024/Oris/issues/19"
+"[SCH-05] Add worker and tenant rate limits","Scope: implement configurable worker and tenant throttling integrated with backpressure decisions. DoD: over-limit traffic returns deterministic backpressure decisions and metrics.","area/scheduler,area/multitenancy,type/feature,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)","runtime-v1","archived","20","CLOSED","https://github.com/Colin4k1024/Oris/issues/20"
+"[SCH-06] Build failover and conflict stress test suite","Scope: create fault-injection scripts for lease expiry, conflict, and failover recovery measurements. DoD: baseline report includes conflict rate, recovery latency, and throughput.","area/scheduler,type/test,priority/P1,sprint/3","Sprint 3 (2026-03-16 ~ 2026-03-22)","runtime-v1","archived","21","CLOSED","https://github.com/Colin4k1024/Oris/issues/21"
+"[OBS-01] Add end-to-end OpenTelemetry traces","Scope: instrument run/thread/attempt lifecycle with trace context propagation. DoD: one run can be traced end-to-end across API and worker flow.","area/observability,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)","runtime-v1","archived","22","CLOSED","https://github.com/Colin4k1024/Oris/issues/22"
+"[OBS-02] Expose Prometheus runtime metrics","Scope: expose queue depth, dispatch latency, lease conflict rate, and recovery latency metrics. DoD: /metrics endpoint is scrape-ready and metrics are documented.","area/observability,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)","runtime-v1","archived","23","CLOSED","https://github.com/Colin4k1024/Oris/issues/23"
+"[OBS-03] Provide Grafana dashboards and alert rules","Scope: add dashboard JSON and alert thresholds for error rate, recovery latency, and sustained backpressure. DoD: dashboard and alerts are validated against sample workload.","area/observability,type/docs,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)","runtime-v1","archived","24","CLOSED","https://github.com/Colin4k1024/Oris/issues/24"
+"[REL-01] Add replay side-effect safety guard","Scope: persist effect log and idempotency fingerprint to avoid duplicated external side effects during replay. DoD: replay test proves no duplicate side-effect execution.","area/reliability,area/runtime,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)","runtime-v1","archived","25","CLOSED","https://github.com/Colin4k1024/Oris/issues/25"
+"[OSS-01] Publish cargo-generate templates for service/worker/operator","Scope: package and document cargo-generate flow for the three starter archetypes. DoD: external user can scaffold and run each archetype with one command path.","area/developer-experience,type/feature,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)","runtime-v1","archived","26","CLOSED","https://github.com/Colin4k1024/Oris/issues/26"
+"[OSS-02] Complete production operations docs","Scope: publish deploy, upgrade, migration, SLO, and incident-response guides for operators. DoD: docs provide an end-to-end path from fresh deploy to production readiness.","area/developer-experience,type/docs,priority/P1,sprint/4","Sprint 4 (2026-03-23 ~ 2026-03-29)","runtime-v1","archived","27","CLOSED","https://github.com/Colin4k1024/Oris/issues/27"
+"[ARCH] Add async checkpoint API for better performance","## Description
+
+Currently the checkpoint API is synchronous, which blocks the runtime during persistence operations. Adding async checkpoint APIs would improve throughput.
+
+## Scope
+- Add async versions of checkpoint save/load functions
+- Ensure backward compatibility
+- Add tests for new async APIs
+
+## Type
+- type/feature
+- area/runtime","type/feature,area/runtime","","runtime-followups","archived","33","CLOSED","https://github.com/Colin4k1024/Oris/issues/33"
+"[FEATURE] Add plugin system for custom node types","## Description
+
+Oris should support a plugin system that allows users to define custom node types at runtime.
+
+## Scope
+- Define plugin trait/interface
+- Add registration mechanism for custom nodes
+- Ensure type safety at runtime
+- Add documentation and examples
+
+## Motivation
+Currently, node types are hardcoded. A plugin system would allow extensibility without modifying the core runtime.
+
+## Type
+- type/feature
+- area/runtime","type/feature,area/runtime","","runtime-followups","archived","34","CLOSED","https://github.com/Colin4k1024/Oris/issues/34"
+"[CI-01] Consolidate CI workflows and enforce lint/example gates","## Description
+
+The repository currently runs two overlapping GitHub workflows (`.github/workflows/ci.yml` and `.github/workflows/rust.yml`). The stronger workflow still does not enforce `cargo clippy`, and critical examples are only validated manually.
+
+## Scope
+- Consolidate duplicate CI coverage into one canonical workflow
+- Add `cargo clippy --all-targets --all-features -- -D warnings`
+- Add CI checks for critical examples (including `custom_node_plugins`)
+- Add a small OS matrix (at least Linux + macOS; Windows if feasible)
+
+## Motivation
+CI should be the source of truth for contributor checks, not a partial subset of `CONTRIBUTING.md`.
+
+## Definition of done
+- One primary CI workflow covers PR + main validation
+- Lint failures fail CI
+- Example drift is caught automatically
+- Cross-platform breakage is surfaced before merge","priority/P0,type/test,area/developer-experience","","runtime-followups","archived","35","CLOSED","https://github.com/Colin4k1024/Oris/issues/35"
+"[PLG-01] Define external plugin packaging and compatibility rules","## Description
+
+The new runtime plugin system supports in-process registration, but it does not yet define how third-party plugins should be packaged, versioned, or compatibility-checked.
+
+## Scope
+- Define a plugin authoring/package contract for 0.1.x
+- Document API compatibility expectations for plugins across runtime upgrades
+- Define registry metadata/capability descriptors if needed
+- Document safety boundaries and what remains in-process / unsandboxed
+
+## Motivation
+Without a compatibility contract, plugin support is useful for app-local composition but not yet a stable ecosystem surface.
+
+## Definition of done
+- Plugin authoring guidance exists for external users
+- Compatibility rules are explicit
+- At least one non-trivial packaged plugin example or reference layout exists","type/feature,area/runtime,priority/P1,area/developer-experience","","runtime-followups","archived","36","CLOSED","https://github.com/Colin4k1024/Oris/issues/36"
+"[OSS-03] Expand ecosystem integration examples beyond Axum","## Description
+
+The project now has better starter templates, but the concrete integration examples are still narrow (primarily Axum plus a small set of templates).
+
+## Scope
+- Add at least two more integration paths (for example: `tonic`, `actix-web`, pure Tokio worker, deployment-oriented examples)
+- Document when to choose each integration path
+- Ensure new examples compile in CI or a dedicated example validation job
+- Update the examples index and onboarding docs
+
+## Motivation
+Adoption improves when users can map Oris onto the Rust stack they already run.
+
+## Definition of done
+- New ecosystem examples/guides are added
+- Example selection guidance is documented
+- The examples index clearly points users to the new paths","type/docs,priority/P1,area/developer-experience","","runtime-followups","archived","37","CLOSED","https://github.com/Colin4k1024/Oris/issues/37"
+"[PERF-01] Add a dedicated benchmark suite and regression policy","## Description
+
+Current performance coverage relies on stress-style tests inside the runtime test suite. There is no dedicated benchmark harness, stable baseline, or explicit regression policy.
+
+## Scope
+- Add repeatable benchmarks for key hot paths (dispatch, lease heartbeat, replay, API endpoints)
+- Separate benchmark reporting from correctness tests
+- Capture baseline outputs in a stable format
+- Define how benchmark regressions are reviewed (CI threshold, manual gate, or scheduled run)
+
+## Motivation
+Stress tests are useful for correctness, but they are not a substitute for measured performance tracking.
+
+## Definition of done
+- A benchmark harness exists and is documented
+- Baseline metrics are captured in-repo or artifacted consistently
+- A clear regression review policy is defined","area/runtime,type/test,area/scheduler,priority/P1","","runtime-followups","archived","38","CLOSED","https://github.com/Colin4k1024/Oris/issues/38"
+"[API-01] Publish a machine-readable runtime API contract","## Description
+
+The runtime API is documented in `README.md`, but there is no machine-readable contract (OpenAPI / JSON schema) for operators, SDKs, or generated clients.
+
+## Scope
+- Generate an OpenAPI spec or equivalent machine-readable schema for the runtime API
+- Cover the current v1 endpoints and request/response DTOs
+- Publish the artifact in-repo (or expose it from the execution server)
+- Add a drift check so docs/spec stay aligned
+
+## Motivation
+Text-only API docs do not scale well once the control-plane surface grows.
+
+## Definition of done
+- A machine-readable runtime API contract exists
+- The spec is reproducible from code or checked in with drift protection
+- README points to the canonical contract location","type/feature,area/runtime,priority/P1,area/developer-experience","","runtime-followups","archived","39","CLOSED","https://github.com/Colin4k1024/Oris/issues/39"
+"[SCH-07] Harden remaining scheduler and lease semantics","## Description
+
+The runtime repository, scheduler, and lease manager still contain explicit TODOs around transactional dispatch semantics, fairness, heartbeat grace handling, and split-brain protection.
+
+## Scope
+- Eliminate the remaining `phase1.1` scheduler/lease TODOs
+- Define atomic attempt-status + lease-write semantics
+- Use lease versions and heartbeat grace for stricter expiry handling
+- Add tests for split-brain, fairness/ordering, and conflict scenarios
+
+## Motivation
+The core queue/lease path should no longer rely on skeleton semantics now that the v1 runtime surface has expanded.
+
+## Definition of done
+- Remaining dispatch-semantics TODOs in repository/scheduler/lease are removed
+- Attempt ownership transitions are explicit and test-covered
+- Split-brain and fairness regressions have dedicated tests","type/feature,priority/P0,area/runtime,area/storage,area/scheduler","","runtime-followups","archived","40","CLOSED","https://github.com/Colin4k1024/Oris/issues/40"
+"[SEC-07] Add supply-chain and dependency scanning to CI","## Description
+
+Current CI validates runtime security regressions, but it does not check dependency advisories, license policy, or supply-chain drift.
+
+## Scope
+- Add a dependency scanning job (`cargo audit`, `cargo deny`, or equivalent)
+- Fail CI on unapproved advisories / license violations
+- Commit the baseline config and document how exceptions are reviewed
+- Keep the new job separate from runtime auth regression tests
+
+## Motivation
+Runtime API security tests do not protect against vulnerable or policy-breaking dependencies.
+
+## Definition of done
+- CI includes a supply-chain scan job
+- Baseline config is versioned in the repository
+- Exceptions are explicit and reviewable
+- Failing advisories block merges by default","area/security,priority/P0,type/test","","runtime-followups","archived","41","CLOSED","https://github.com/Colin4k1024/Oris/issues/41"
+"[REL-02] Fix crate metadata and repository link hygiene","## Description
+
+The crate manifest and docs still contain stale repository links from the previous GitHub location, and the crate does not declare a `rust-version`.
+
+## Scope
+- Update `repository` and `homepage` in `crates/oris-runtime/Cargo.toml`
+- Update stale GitHub links in `README.md` and onboarding docs
+- Declare a supported `rust-version`
+- Add a lightweight validation so release metadata and public links stay consistent
+
+## Motivation
+Incorrect public metadata creates avoidable friction for users, package consumers, and release automation.
+
+## Definition of done
+- No stale GitHub URLs remain in release-facing docs/metadata
+- `rust-version` is declared in the crate manifest
+- Release metadata consistency is documented and/or checked automatically","priority/P0,type/docs,area/developer-experience","","runtime-followups","archived","42","CLOSED","https://github.com/Colin4k1024/Oris/issues/42"
+"[K1] Implement ExecutionStep Contract Freeze","**Description:** Eliminate async side effects, hidden runtime mutations, and adapter nondeterminism by defining a strict, canonical execution contract.
+
+**Tasks:**
+- Implement the `ExecutionStep` trait (`execute(state, input) -> StepResult`).
+- Enforce pure boundary conditions.
+- Define and validate explicit inputs and outputs.
+
+**Acceptance Criteria:** Adapters can only interact through the frozen step contract.","type/feature,epic/K1-Execution-Determinism","Oris 2.0 Kernel","kernel-2.0","archived","44","CLOSED","https://github.com/Colin4k1024/Oris/issues/44"
+"[K1] Implement Runtime Effect Capture","**Description:** Intercept and record all side effects generated during execution.
+
+**Tasks:**
+- Introduce `RuntimeEffect` enum (`LLMCall`, `ToolCall`, `StateWrite`, `InterruptRaise`).
+- Implement kernel-level hooks to log all instances of `RuntimeEffect` to the active thread context.
+
+**Acceptance Criteria:** Zero uncaptured side effects leak into the execution state.","type/feature,epic/K1-Execution-Determinism","Oris 2.0 Kernel","kernel-2.0","archived","45","CLOSED","https://github.com/Colin4k1024/Oris/issues/45"
+"[K1] Build Determinism Guard & Execution Modes","**Description:** Prevent nondeterministic operations from corrupting the state and introduce strict runtime modes.
+
+**Tasks:**
+- Implement `KernelMode` (`Normal`, `Record`, `Replay`, `Verify`).
+- Add trap handlers to immediately fail execution on clock access, hardware randomness detection, or uncontrolled thread spawning.
+
+**Acceptance Criteria:** Same run guarantees an identical event stream hash; replay mismatches are instantly detected and halted.","type/feature,epic/K1-Execution-Determinism","Oris 2.0 Kernel","kernel-2.0","archived","46","CLOSED","https://github.com/Colin4k1024/Oris/issues/46"
+"[K2] Build Canonical Execution Log Store","**Description:** Move away from checkpoint-driven state management to an event-sourced log as the source of truth.
+
+**Tasks:**
+- Implement `ExecutionLog` struct (`thread_id`, `step_id`, `event_index`, `event`, `state_hash`).
+- Refactor current checkpointing to act strictly as an optimization/snapshot layer.","type/feature,epic/K2-Replay-Engine","Oris 2.0 Kernel","kernel-2.0","archived","47","CLOSED","https://github.com/Colin4k1024/Oris/issues/47"
+"[K2] Develop Replay Cursor Engine","**Description:** Build the core algorithm to reconstruct state from historical events without triggering live side effects.
+
+**Tasks:**
+- Implement replay loop: Load checkpoint → Replay events → Inject recorded outputs → Reconstruct state.
+- Ensure live tool execution is hard-disabled during replay.","type/feature,epic/K2-Replay-Engine","Oris 2.0 Kernel","kernel-2.0","archived","48","CLOSED","https://github.com/Colin4k1024/Oris/issues/48"
+"[K2] Implement Replay Verification API","**Description:** Create a diagnostic API to cryptographically verify the integrity of a run.
+
+**Tasks:**
+- Expose `oris kernel verify <thread_id>` CLI/API command.
+- Implement validation logic for state hash equality, tool checksum matching, and interrupt consistency.","type/feature,epic/K2-Replay-Engine","Oris 2.0 Kernel","kernel-2.0","archived","49","CLOSED","https://github.com/Colin4k1024/Oris/issues/49"
+"[K2] Enable Branch Replay (Timeline Forking)","**Description:** Allow execution timelines to fork from a specific historical checkpoint.
+
+**Tasks:**
+- Implement logic to resume replay from checkpoint N, inject an alternate decision, and fork the event stream.
+
+**Acceptance Criteria:** Reasoning timelines can be successfully reconstructed, audited, simulated, and forked.","type/feature,epic/K2-Replay-Engine","Oris 2.0 Kernel","kernel-2.0","archived","50","CLOSED","https://github.com/Colin4k1024/Oris/issues/50"
+"[K3] Define and Store Kernel Interrupt Object","**Description:** Standardize how interrupts are represented and persisted.
+
+**Tasks:**
+- Implement `Interrupt` struct (`id`, `thread_id`, `kind`, `payload_schema`, `created_at`).
+- Ensure interrupts are flushed and stored alongside execution checkpoints.","type/feature,epic/K3-Interrupt-Kernel","Oris 2.0 Kernel","kernel-2.0","archived","51","CLOSED","https://github.com/Colin4k1024/Oris/issues/51"
+"[K3] Implement Execution Suspension State Machine","**Description:** Handle the safe teardown of workers when an execution is paused.
+
+**Tasks:**
+- Implement kernel state transitions: `Running` → `Suspended` → `WaitingInput`.
+- Ensure the worker safely exits and releases resources upon suspension.","type/feature,epic/K3-Interrupt-Kernel","Oris 2.0 Kernel","kernel-2.0","archived","52","CLOSED","https://github.com/Colin4k1024/Oris/issues/52"
+"[K3] Enforce Replay-Based Resume Semantics","**Description:** Guarantee that resuming a suspended state does not rely on active memory.
+
+**Tasks:**
+- Implement resume logic strictly as: Replay + Inject Decision.
+- Write tests to guarantee resuming N times yields identical results (idempotent resumes).","type/feature,epic/K3-Interrupt-Kernel","Oris 2.0 Kernel","kernel-2.0","archived","53","CLOSED","https://github.com/Colin4k1024/Oris/issues/53"
+"[K3] Build Unified Interrupt Routing Layer","**Description:** Create a single resolver for all external interrupt sources.
+
+**Tasks:**
+- Implement `InterruptResolver` trait (`async fn resolve(interrupt) -> Value`).
+- Map inputs from UI, agents, policy engines, and APIs through the resolver.
+
+**Acceptance Criteria:** A process can be suspended, memory completely cleared, and successfully resumed days later.","type/feature,epic/K3-Interrupt-Kernel","Oris 2.0 Kernel","kernel-2.0","archived","54","CLOSED","https://github.com/Colin4k1024/Oris/issues/54"
+"[K4] Define and Enforce Plugin Categories","**Description:** Standardize the types of plugins the kernel will recognize and load.
+
+**Tasks:**
+- Implement interfaces for `NodePlugin`, `ToolPlugin`, `MemoryPlugin`, `LLMAdapter`, and `SchedulerPlugin`.","type/feature,epic/K4-Plugin-Runtime","Oris 2.0 Kernel","kernel-2.0","archived","55","CLOSED","https://github.com/Colin4k1024/Oris/issues/55"
+"[K4] Implement Plugin Determinism Declarations","**Description:** Force plugins to declare their behavioral boundaries to the kernel.
+
+**Tasks:**
+- Require `PluginMetadata` (`deterministic`, `side_effects`, `replay_safe`) for all plugins.
+- Build kernel enforcement logic (replay substitution, sandbox routing).","type/feature,epic/K4-Plugin-Runtime","Oris 2.0 Kernel","kernel-2.0","archived","56","CLOSED","https://github.com/Colin4k1024/Oris/issues/56"
+"[K4] Build Plugin Execution Sandbox","**Description:** Isolate plugin execution based on safety requirements.
+
+**Tasks:**
+- Implement execution mode routers (`InProcess`, `IsolatedProcess`, `Remote`).
+- (Spike/Future): Blueprint WASM execution mode.","type/feature,epic/K4-Plugin-Runtime","Oris 2.0 Kernel","kernel-2.0","archived","57","CLOSED","https://github.com/Colin4k1024/Oris/issues/57"
+"[K4] Implement Plugin Version Negotiation & Dynamic Registry","**Description:** Prevent runtime corruption through strict validation and enable hot-loading.
+
+**Tasks:**
+- Add validation for `plugin_api_version`, `kernel_compat`, and `schema_hash` on load.
+- Upgrade `NodePluginRegistry` to support dynamic hot-loading and unloading of validated plugins.
+
+**Acceptance Criteria:** Third-party tools can be loaded and executed without threatening kernel determinism.","type/feature,epic/K4-Plugin-Runtime","Oris 2.0 Kernel","kernel-2.0","archived","58","CLOSED","https://github.com/Colin4k1024/Oris/issues/58"
+"[K5] Finalize Lease-Based Execution","**Description:** Formalize ownership of execution attempts.
+
+**Tasks:**
+- Implement `WorkerLease` to strictly enforce single-owner execution.
+- Build lease expiry, recovery, and replay-restart logic.","type/feature,epic/K5-Distributed-Execution","Oris 2.0 Kernel","kernel-2.0","archived","59","CLOSED","https://github.com/Colin4k1024/Oris/issues/59"
+"[K5] Implement Zero-Data-Loss Failure Recovery Loop","**Description:** Automate the recovery pipeline when a worker abruptly crashes.
+
+**Tasks:**
+- Implement the crash recovery pipeline: Lease expires → Checkpoint reloads → Execution replays → Dispatched to new worker.","type/feature,epic/K5-Distributed-Execution","Oris 2.0 Kernel","kernel-2.0","archived","60","CLOSED","https://github.com/Colin4k1024/Oris/issues/60"
+"[K5] Build Context-Aware Scheduler Kernel","**Description:** Upgrade the dispatcher to route tasks intelligently across the cluster.
+
+**Tasks:**
+- Inject awareness of tenant limits, priority queues, plugin requirements, interrupt backlogs, and specific worker capabilities into the scheduling algorithm.","type/feature,epic/K5-Distributed-Execution","Oris 2.0 Kernel","kernel-2.0","archived","61","CLOSED","https://github.com/Colin4k1024/Oris/issues/61"
+"[K5] Implement Safe Backpressure Engine & Kernel Observability","**Description:** Protect the cluster from overload and provide deep kernel insights (not just standard logs).
+
+**Tasks:**
+- Build safe rejection mechanisms returning explicit `tenant_limit` reasons.
+- Expose telemetry for Reasoning Timeline, Lease Graph, Replay Cost, and Interrupt Latency.
+
+**Acceptance Criteria:** `kill -9` on an active worker → cluster restarts → resumes exactly where it left off with an identical reasoning outcome.","type/feature,epic/K5-Distributed-Execution","Oris 2.0 Kernel","kernel-2.0","archived","62","CLOSED","https://github.com/Colin4k1024/Oris/issues/62"
+"EvoKernel Wave 0: Add experimental crate skeletons and feature wiring","## Summary
+Establish the repo topology for the full EvoKernel blueprint without changing stable runtime paths.
+
+## Tasks
+- Add new workspace members for `oris-governor`, `oris-evolution-network`, `oris-economics`, `oris-spec`, and `oris-agent-contract`
+- Split `oris-evolution`, `oris-evokernel`, and `oris-sandbox` internals into modules while preserving current behavior
+- Add experimental features in `oris-runtime`: `governor-experimental`, `evolution-network-experimental`, `economics-experimental`, `spec-experimental`, `agent-contract-experimental`, and `full-evolution-experimental`
+- Wire `full-evolution-experimental` to aggregate all experimental evolution layers
+- Keep all new crates `publish = false`
+- Preserve existing `oris_runtime::evolution` imports and stable module paths
+
+## Acceptance Criteria
+- Workspace compiles
+- `examples/evo_oris_repo` still compiles without import path changes
+- Existing `oris_runtime::evolution` API remains usable","","","evolution","archived","63","CLOSED","https://github.com/Colin4k1024/Oris/issues/63"
+"EvoKernel Wave 1: Add sqlite kernel stores and unify kernel trace/timeline","## Summary
+Make the kernel locally durable across in-memory, SQLite, and Postgres, and expose richer execution observability.
+
+## Tasks
+- Implement `SqliteEventStore` and `SqliteSnapshotStore` in `oris-kernel`
+- Make `sqlite-persistence` in `oris-kernel` a real feature instead of a placeholder
+- Add a unified `KernelTraceEvent` model with `run_id`, `seq`, `step_id`, `action_id`, `kind`, and `timestamp_ms`
+- Update `execution_log.rs` and `timeline.rs` to produce consistent event fields
+- Populate `KernelObservability` in `oris-execution-runtime` with real values instead of placeholders
+- Thread richer trace context through existing execution server response models without breaking routes
+
+## Acceptance Criteria
+- Kernel replay tests pass for in-memory, SQLite, and Postgres stores
+- Each `KernelObservability` field is populated on at least one execution path
+- Execution server API only gains optional fields; no breaking removals","","","evolution","archived","64","CLOSED","https://github.com/Colin4k1024/Oris/issues/64"
+"EvoKernel Wave 3: Introduce governor crate and governor-aware capture flow","## Summary
+Add an append-only, policy-only Governor layer that decides promotion, cooldown, and revocation without becoming a second source of truth.
+
+## Tasks
+- Create `oris-governor` with `GovernorConfig`, `GovernorInput`, `GovernorDecision`, `CoolingWindow`, `RevocationReason`, and `CandidateSource`
+- Define `Governor` trait and a default policy implementation
+- Default policy: first local success => `Candidate`
+- Promote only after `success_count >= 3` and blast radius within limits
+- Keep high-blast-radius mutations as `Candidate`
+- Apply a default 30 minute cooldown after promotion
+- Auto-revoke after two replay validation failures
+- Add `capture_mutation_with_governor(...) -> CaptureOutcome` to `oris-evokernel`
+- Preserve `capture_successful_mutation(...) -> Capsule` as a compatibility wrapper
+- Ensure replay only attempts `Promoted` assets by default
+
+## Acceptance Criteria
+- Repeated success transitions a candidate into a promoted asset
+- High blast radius never auto-promotes
+- Revoked assets stop being selected immediately","","","evolution","archived","65","CLOSED","https://github.com/Colin4k1024/Oris/issues/65"
+"EvoKernel Wave 4: Implement OEN protocol and quarantine import pipeline","## Summary
+Add a minimal Oris Evolution Network protocol layer and the local quarantine pipeline for remote assets.
+
+## Tasks
+- Create `oris-evolution-network` for protocol DTOs and canonical hashing
+- Add `EvolutionEnvelope`, `MessageType`, `NetworkAsset`, `PublishRequest`, `FetchQuery`, `FetchResponse`, and `RevokeNotice`
+- Fix envelope defaults: `protocol = ""oen""`, `protocol_version = ""0.1""`
+- Compute `content_hash` from canonical JSON without the `content_hash` field
+- Add `export_promoted_assets(...) -> EvolutionEnvelope` in `oris-evokernel`
+- Add `import_remote_envelope(...) -> ImportOutcome` in `oris-evokernel`
+- On import: validate hash, validate schema, append remote import and quarantine events, run local validation, then hand off to governor
+- Add feature-gated experimental routes for publish, fetch, and revoke in runtime/server facades
+
+## Acceptance Criteria
+- A promoted local capsule can be exported as a valid envelope
+- Invalid hash or schema is rejected with audit-visible events
+- Remote assets remain `Quarantined` until local validation completes","","","evolution","archived","66","CLOSED","https://github.com/Colin4k1024/Oris/issues/66"
+"EvoKernel Wave 2: Add asset lifecycle states and evolution event extensions","## Summary
+Upgrade the evolution domain from immediate commit-only behavior to explicit lifecycle-managed assets.
+
+## Tasks
+- Add `AssetState` with `Candidate`, `Promoted`, `Revoked`, `Archived`, and `Quarantined`
+- Extend `Gene` and `Capsule` with `state`
+- Extend `Outcome` with `lines_changed` and `replay_verified`
+- Add `BlastRadius` support sourced from patch text in `oris-sandbox`
+- Extend `EvolutionEvent` with promotion, revocation, quarantine, remote import, and spec-link variants
+- Update projection rebuild logic so selector only uses `Promoted` assets by default
+- Keep old log compatibility by defaulting legacy records to `Promoted`
+
+## Acceptance Criteria
+- Successful mutation capture records assets in explicit lifecycle states
+- Projection rebuild reflects event-chain-derived state accurately
+- Existing historical `events.jsonl` remains readable","","","evolution","archived","67","CLOSED","https://github.com/Colin4k1024/Oris/issues/67"
+"EvoKernel Wave 7: Add agent runtime contract and DEVLOOP end-to-end example","## Summary
+Introduce a stable agent-facing runtime contract and prove the full DEVLOOP path with an end-to-end example.
+
+## Tasks
+- Create `oris-agent-contract`
+- Add `AgentTask`, `MutationProposal`, `ExecutionFeedback`, `AgentCapabilityLevel`, and `ProposalTarget`
+- Enforce that agents only submit proposals while kernel owns mutation execution and evolution persistence
+- Add `capture_from_proposal(...)` and `feedback_for_agent(...)` in `oris-evokernel`
+- Extend `examples/evo_oris_repo` to cover `task -> proposal -> mutation -> validation -> candidate -> promoted -> replay`
+- Document feature flags and maturity status in `docs/evokernel/`
+
+## Acceptance Criteria
+- At least two agent sources can enter the same capture pipeline
+- A recurring task can replay on the second pass without repeating agent reasoning
+- The end-to-end example runs under `full-evolution-experimental`","","","evolution","archived","68","CLOSED","https://github.com/Colin4k1024/Oris/issues/68"
+"EvoKernel Wave 6: Add OUSL YAML spec compiler and spec-linked mutations","## Summary
+Introduce the spec layer so repository-native YAML specs compile into mutations and remain traceable through evolution events.
+
+## Tasks
+- Create `oris-spec`
+- Make OUSL v0.1 YAML the only accepted first-pass spec format
+- Add `SpecDocument`, `SpecId`, `SpecVersion`, `SpecConstraint`, `CompiledMutationPlan`, and `SpecCompiler`
+- Standardize spec directories under `/specs/behavior`, `/specs/repair`, `/specs/optimization`, and `/specs/evolution`
+- Extend `MutationIntent` with `spec_id: Option<String>`
+- Add `prepare_mutation_from_spec(...)` to `oris-evokernel`
+- Append `SpecLinked` evolution events for spec-driven mutations
+- Allow selector to optionally narrow by `spec_id` while still defaulting to signals first
+
+## Acceptance Criteria
+- A minimal YAML spec compiles into a `PreparedMutation`
+- Invalid specs fail before sandbox execution
+- Evolution logs can trace a capsule back to its originating `spec_id`","","","evolution","archived","69","CLOSED","https://github.com/Colin4k1024/Oris/issues/69"
+"EvoKernel Wave 5: Add EVU ledger and reputation-based economics layer","## Summary
+Introduce a non-financial local economics layer for publish gating, validator incentives, and reputation weighting.
+
+## Tasks
+- Create `oris-economics`
+- Add `EvuLedger`, `EvuAccount`, `StakePolicy`, `ReputationRecord`, and `ValidationSettlement`
+- Require stake before publish of remote-facing assets
+- Increase publisher reputation and EVU on successful remote reuse
+- Burn stake or reduce reputation on failed remote reuse
+- Penalize validator reputation when validator reports diverge from local final validation
+- Expose economics outputs as governor/selector inputs without replacing validation truth
+
+## Acceptance Criteria
+- Insufficient EVU blocks publish but does not block local replay
+- Remote reuse success/failure updates the ledger
+- Reputation can be used as an optional selector weight without overriding validation truth","","","evolution","archived","70","CLOSED","https://github.com/Colin4k1024/Oris/issues/70"
+"EvoKernel Wave 1.5: Deterministic Execution Core","## Summary
+
+Implement deterministic execution core for Phase 1.5, extending Wave 1 to add step-by-step execution tracking, retry safety, interrupt recovery, and replay engine v0.
+
+## Context
+
+Phase 1 (Week 2-3) covers deterministic execution per [implementation-roadmap.md](docs/evokernel/implementation-roadmap.md). Wave 1 (#64) covers SQLite stores and trace/timeline, but detailed execution components are missing.
+
+## Implementation Details
+
+### Step-by-Step Execution Tracking
+- Record each execution step with input state, mutation applied, output, and environment hash
+- Implement deterministic execution hash computation
+- Add step-level checkpointing for granular replay
+
+### Retry Safety
+- Ensure identical execution results across retries
+- Track retry count and ensure idempotency
+- Implement deterministic mutation application
+
+### Interrupt Recovery
+- Save execution state on interrupt (SIGINT, crash)
+- Resume from last checkpoint
+- Maintain execution determinism after recovery
+
+### Replay Engine v0
+- Implement deterministic replay from captured trace
+- Verify identical output reproduction
+- Support environment fingerprint matching
+
+## Acceptance Criteria
+
+- [ ] Step-level execution trace persisted to SQLite
+- [ ] Retry produces identical output (deterministic hash matches)
+- [ ] Interrupted execution can resume from last checkpoint
+- [ ] Replay engine reproduces identical execution results
+- [ ] Deterministic execution hash validates correctly
+
+## References
+
+- [kernel.md - Execution Engine](docs/evokernel/kernel.md)
+- [implementation-roadmap.md - Phase 1](docs/evokernel/implementation-roadmap.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","71","CLOSED","https://github.com/Colin4k1024/Oris/issues/71"
+"EvoKernel Wave 2.1: Evolution Solidification Engine","## Summary
+
+Implement evolution solidification engine for Phase 2, extending Wave 2 to add Codex adapter, signal extraction, Solidifier implementation, and append-only evolution store.
+
+## Context
+
+Phase 2 (Week 4-5) covers evolution solidification per [implementation-roadmap.md](docs/evokernel/implementation-roadmap.md). Wave 2 (#67) covers asset lifecycle states and events, but detailed solidification components are missing.
+
+## Implementation Details
+
+### Codex Adapter
+- Capture patch diff from code changes
+- Collect execution logs and validation results
+- Store environment fingerprint alongside artifacts
+
+### Signal Extraction from Logs
+- Extract deterministic signals from:
+  - Compiler diagnostics
+  - Stack traces
+  - Execution logs
+  - Failure signatures
+  - Performance telemetry
+- Implement signal normalization and hashing
+
+### Solidifier Engine
+- Implement Gene creation (strategy summary, constraints, validation rules)
+- Implement Capsule creation (gene reference, diff hash, confidence score, environment fingerprint, outcome metrics)
+- Emit EvolutionEvent for immutable lineage tracking
+- Integrate with append-only evolution store
+
+### Append-Only Evolution Store
+- Implement immutable storage for Gene, Capsule, EvolutionEvent
+- Support query by signal, gene, environment fingerprint
+- Ensure auditability and replay reconstruction
+
+## Acceptance Criteria
+
+- [ ] Codex adapter captures patch diff, logs, validation result
+- [ ] Signal extraction produces deterministic signal hash
+- [ ] Successful executions automatically generate Capsule
+- [ ] Evolution store maintains immutable history
+- [ ] Gene can be queried by signal pattern
+
+## References
+
+- [evolution.md - Evolution Assets](docs/evokernel/evolution.md)
+- [implementation-roadmap.md - Phase 2](docs/evokernel/implementation-roadmap.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","72","CLOSED","https://github.com/Colin4k1024/Oris/issues/72"
+"EvoKernel Wave 3: Selection and Replay System","## Summary
+
+Implement selection and replay system for Phase 3, enabling self-reuse of proven solutions and reducing reasoning frequency.
+
+## Context
+
+Phase 3 (Week 6-7) covers selection and replay per [implementation-roadmap.md](docs/evokernel/implementation-roadmap.md). This is currently missing a dedicated issue.
+
+## Implementation Details
+
+### Selector Implementation
+- Implement selection factors:
+  - Success rate (historical success percentage)
+  - Reuse count (how often selected)
+  - Recency (last used timestamp)
+  - Environment match (environment fingerprint similarity)
+- Implement ranking algorithm combining all factors
+
+### Replay Executor
+- Detect signals from current execution context
+- Find matching Capsule by signal pattern
+- Apply stored patch/diff to execution
+- Validate result matches expected outcome
+
+### Signal Detection System
+- Monitor runtime for signal patterns
+- Match against known gene signals
+- Trigger selection when confidence threshold met
+
+### Environment Fingerprint Matching
+- Capture environment characteristics (OS, versions, dependencies)
+- Calculate similarity score between execution environments
+- Weight selection by environment match quality
+
+### Capsule Lookup and Ranking
+- Query evolution store by signal
+- Rank candidates by composite score
+- Select best match above threshold
+
+## Acceptance Criteria
+
+- [ ] Repeated issues solved without new reasoning
+- [ ] Token usage decreases for known patterns
+- [ ] Selector ranks candidates by composite score
+- [ ] Replay successfully applies stored Capsule
+- [ ] Environment fingerprint matching improves selection accuracy
+
+## References
+
+- [evolution.md - Selection and Replay](docs/evokernel/evolution.md)
+- [implementation-roadmap.md - Phase 3](docs/evokernel/implementation-roadmap.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","73","CLOSED","https://github.com/Colin4k1024/Oris/issues/73"
+"EvoKernel Wave 8: Observability and Metrics","## Summary
+
+Implement observability and metrics collection system to track evolution performance, success rates, and system health.
+
+## Context
+
+Per [implementation-roadmap.md](docs/evokernel/implementation-roadmap.md) Section 10 - Parallel Workstreams, observability is a critical parallel workstream that supports all phases.
+
+## Implementation Details
+
+### Core Metrics
+
+Implement collection for:
+- **Replay Success Rate**: Percentage of replay attempts that successfully reproduce expected outcomes
+- **Promotion Ratio**: Rate of Capsule promotion from Candidate to Promoted
+- **Revoke Frequency**: How often strategies are revoked due to regression
+- **Mutation Velocity**: Rate of new mutations per time window
+
+### Metrics Pipeline
+
+- Add metrics collection points in:
+  - Execution engine (latency, step count)
+  - Solidifier (genes/capsules generated)
+  - Selector (selection count, match quality)
+  - Governor (mutations applied, revocations)
+- Implement metrics aggregation and storage
+- Add Prometheus/OTLP export capability
+
+### Dashboard Integration
+
+- Expose metrics via HTTP endpoint
+- Support Grafana dashboard consumption
+- Implement health check endpoint
+
+## Acceptance Criteria
+
+- [ ] Replay success rate tracked and exposed
+- [ ] Promotion ratio metrics collected
+- [ ] Revoke frequency tracked over time
+- [ ] Mutation velocity metrics available
+- [ ] Metrics endpoint serves Prometheus format
+
+## References
+
+- [implementation-roadmap.md - Observability](docs/evokernel/implementation-roadmap.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","74","CLOSED","https://github.com/Colin4k1024/Oris/issues/74"
+"EvoKernel Wave 9: Evolution Testing Suite","## Summary
+
+Implement comprehensive testing infrastructure for deterministic replay, sandbox safety, and governor regression detection.
+
+## Context
+
+Per [implementation-roadmap.md](docs/evokernel/implementation-roadmap.md) Section 10 - Parallel Workstreams, testing infrastructure is critical for evolution safety and reliability.
+
+## Implementation Details
+
+### Deterministic Replay Tests
+
+- Create test suite that verifies identical execution reproduction
+- Test across
+ different environments- Test across different time windows
+- Verify deterministic hash consistency
+
+### Sandbox Safety Tests
+
+- Test mutation isolation boundaries
+- Verify unauthorized code cannot escape sandbox
+- Test resource limits (memory, CPU, network)
+- Verify cleanup on termination
+
+### Governor Regression Tests
+
+- Test mutation rate limit enforcement
+- Test blast radius calculation accuracy
+- Test confidence decay function
+- Test cooling window behavior
+- Verify regression detection triggers correctly
+
+### Integration Tests
+
+- End-to-end evolution loop tests
+- Selection -> Mutation -> Execution -> Validation -> Solidification
+- Multi-run stability tests
+
+## Acceptance Criteria
+
+- [ ] Deterministic replay tests pass consistently
+- [ ] Sandbox safety tests verify isolation
+- [ ] Governor regression tests cover all policies
+- [ ] Integration tests verify full evolution loop
+
+## References
+
+- [implementation-roadmap.md - Testing](docs/evokernel/implementation-roadmap.md)
+- [governor.md](docs/evokernel/governor.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","75","CLOSED","https://github.com/Colin4k1024/Oris/issues/75"
+"EvoKernel Wave 10: Governor Detailed Policies","## Summary
+
+Implement detailed governor policies extending Wave 3 (#65) - mutation rate limits, blast radius calculation, confidence decay, regression detection, and cooling window management.
+
+## Context
+
+Wave 3 (#65) introduces the governor crate and governor-aware capture flow. This issue covers the detailed policy implementations needed for safe evolution.
+
+## Implementation Details
+
+### Mutation Rate Limit Enforcement
+- Implement configurable limits:
+  - Max mutations per time window
+  - Max concurrent mutations
+  - Per-capsule mutation limits
+- Add rate limiting middleware in execution path
+
+### Blast Radius Calculation
+- Implement code change impact analysis
+- Calculate affected function/module count
+- Measure dependency distance
+- Set blast radius thresholds
+
+### Confidence Decay Implementation
+- Implement confidence score calculation:
+  - Initial confidence from validation score
+  - Time-based decay function
+  - Success/failure adjustment
+- Persist confidence history
+
+### Regression Detection System
+- Monitor success rate trends
+- Detect significant drops below threshold
+- Trigger automatic revocation of degraded strategies
+- Implement rollback capability
+
+### Cooling Window Management
+- Implement cooling period after:
+  - Failed promotion attempts
+  - Revocation events
+  - High mutation activity
+- Configure cooling window durations
+
+## Acceptance Criteria
+
+- [ ] Mutation rate limits enforced correctly
+- [ ] Blast radius calculated and capped
+- [ ] Confidence decays over time per spec
+- [ ] Regression detection triggers auto-revoke
+- [ ] Cooling windows prevent rapid re-attempts
+
+## References
+
+- [governor.md](docs/evokernel/governor.md)
+- [implementation-roadmap.md - Phase 4](docs/evokernel/implementation-roadmap.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","76","CLOSED","https://github.com/Colin4k1024/Oris/issues/76"
+"EvoKernel Wave 11: Multi-Agent Coordination","## Summary
+
+Implement multi-agent coordination patterns extending Wave 7 (#68), covering planner, coding, repair, and optimization agent roles and their coordination.
+
+## Context
+
+Wave 7 (#68) covers agent runtime contract and DEVLOOP end-to-end example. This issue addresses multi-agent coordination specifically, per [devloop.md](docs/evokernel/devloop.md).
+
+## Implementation Details
+
+### Agent Role Definitions
+
+Implement coordination for:
+- **Planner Agent**: Task decomposition, goal setting
+- **Coding Agent**: Code generation, mutation application
+- **Repair Agent**: Error detection, fix application
+- **Optimization Agent**: Performance tuning, refactoring
+
+### Coordination Protocol
+
+- Define message types between agents
+- Implement conversation state management
+- Add coordination primitives (sequential, parallel, conditional)
+
+### Task Distribution
+
+- Implement task splitting logic
+- Add result aggregation
+- Handle partial failures
+
+### Inter-Agent Communication
+
+- Message queue implementation
+- Event-driven coordination
+- Timeout and retry handling
+
+## Acceptance Criteria
+
+- [ ] Planner can decompose complex tasks
+- [ ] Coding agent receives clear task specifications
+- [ ] Repair agent detects and fixes errors
+- [ ] Optimization agent improves performance
+- [ ] Coordination protocol enables reliable multi-agent execution
+
+## References
+
+- [agent.md](docs/evokernel/agent.md)
+- [devloop.md](docs/evokernel/devloop.md)
+- [implementation-roadmap.md](docs/evokernel/implementation-roadmap.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","77","CLOSED","https://github.com/Colin4k1024/Oris/issues/77"
+"EvoKernel Wave 12: Bootstrap and Initial Seeding","## Summary
+
+Implement bootstrap mechanism and initial gene seeding for the evolution system, enabling self-starting capability without pre-existing knowledge.
+
+## Context
+
+Per [devloop.md](docs/evokernel/devloop.md) Section 14, bootstrap interaction and first genes should be generated automatically. This is the final piece for a fully self-contained evolution system.
+
+## Implementation Details
+
+### Initial Seeding Strategy
+
+- Implement automatic seed gene generation:
+  - Common patterns from standard library
+  - Basic algorithm implementations
+  - Fundamental data structures
+- Add curated seed capsules for common problem types
+
+### Bootstrap Execution
+
+- Implement first-run bootstrap flow:
+  - Detect empty evolution store
+  - Apply seeding strategy
+  - Verify seed genes are valid
+
+### Seed Validation
+
+- Validate seed genes:
+  - Syntax correctness
+  - Basic functionality tests
+  - Environment compatibility
+
+### Self-Generation Capability
+
+- Implement mechanism for system to:
+  - Generate new genes from execution
+  - Improve existing genes over time
+  - Reach critical mass for self-improvement
+
+## Acceptance Criteria
+
+- [ ] System starts with non-empty gene store
+- [ ] Initial seeds cover common patterns
+- [ ] Bootstrap flow works on first run
+- [ ] System generates new genes automatically
+- [ ] Seeds improve over time through evolution
+
+## References
+
+- [bootstrap.md](docs/evokernel/bootstrap.md)
+- [devloop.md - Section 14](docs/evokernel/devloop.md)
+- [evolution.md](docs/evokernel/evolution.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","78","CLOSED","https://github.com/Colin4k1024/Oris/issues/78"
+"EvoKernel Wave 13: Documentation Sync","## Summary
+
+Synchronize all EvoKernel design documents with implementation progress, ensuring documentation remains accurate and reflects current architecture.
+
+## Context
+
+Per [implementation-roadmap.md](docs/evokernel/implementation-roadmap.md) Section 10 - Parallel Workstreams, documentation sync is a parallel workstream that should track with implementation.
+
+## Implementation Details
+
+### Documentation Inventory
+
+Sync the following documents:
+- **architecture.md**: Overall system architecture
+- **evolution.md**: Evolution mechanism (Gene, Capsule, EvolutionEvent)
+- **governor.md**: Stability and safety model
+- **network.md**: OEN protocol
+- **economics.md**: EVU economy layer
+- **kernel.md**: Kernel core modules
+- **spec.md**: OUSL specification language
+- **devloop.md**: Self-accelerating development loop
+- **agent.md**: Agent-related content
+- **bootstrap.md**: Bootstrap mechanisms
+
+### Sync Requirements
+
+For each document:
+- Verify implementation matches design
+- Add implementation status markers
+- Update API signatures if changed
+- Add version compatibility notes
+
+### Implementation Status Format
+
+Add status badges to each section:
+- `Not Started` - no implementation
+- `In Progress` - actively being developed
+- `Implemented` - feature complete
+- `Needs Update` - implementation diverged from design
+
+## Acceptance Criteria
+
+- [ ] All 10+ design documents reviewed
+- [ ] Implementation status markers added
+- [ ] API changes reflected in docs
+- [ ] Cross-references between docs updated
+
+## References
+
+- [implementation-roadmap.md - Documentation sync](docs/evokernel/implementation-roadmap.md)
+
+---
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>","","","evolution","archived","79","CLOSED","https://github.com/Colin4k1024/Oris/issues/79"
+"EvoKernel Wave 14: Lifecycle Audit Follow-up","## Summary
+
+Continue the post-documentation EvoKernel code audit as a dedicated follow-up issue, focusing on lifecycle state transitions, remote import semantics, replay attribution, and projection/metrics consistency.
+
+## Context
+
+The original documentation sync issue `#79` is closed, but the audit expanded into runtime behavior verification and surfaced several implementation/documentation drift items. Some of those have already been fixed locally during the current review pass, and the remaining audit work should be tracked independently.
+
+## Current Status
+
+Already fixed during the active audit pass:
+- Replay reuse attribution now records the current replay execution `run_id` via `replay_or_fallback_for_run(...)`.
+- Local governor capture now uses existing confidence context and emits `GeneRevoked` for local revocations.
+- Public replay candidate previews no longer expose bootstrap-only candidates that replay cannot execute.
+- Remote import now records publisher attribution per successfully imported asset, preserving sender ownership across partial import failures.
+- Remote genes now enter `Quarantined` on import and only promote after the first successful local replay.
+
+## Remaining Scope
+
+- Audit EvoKernel event sequences for any remaining lifecycle state drift across local capture, replay, revoke, and remote import paths.
+- Verify projection rebuild semantics stay consistent with emitted event order.
+- Check metrics snapshots and exported assets for any undercounting or state leakage.
+- Reconcile any remaining Evo docs that still overstate or understate the shipped runtime behavior.
+- Run broader validation once the audit fixes settle; current coverage is targeted regression testing only.
+
+## Acceptance Criteria
+
+- [ ] Remaining EvoKernel lifecycle inconsistencies are identified and either fixed or explicitly documented.
+- [ ] Event log semantics are consistent for equivalent state transitions.
+- [ ] Projection, metrics, and export behavior match the intended lifecycle state model.
+- [ ] Broader validation scope is defined or executed before closeout.
+
+## References
+
+- Follow-up from `#79`
+- Current local audit pass on `crates/oris-evokernel/src/core.rs`
+","","","evolution","archived","82","CLOSED","https://github.com/Colin4k1024/Oris/issues/82"
+"Follow up remote replay scoring and export scan cost","## Summary
+
+Track the two non-blocking issues found during the self-review of PR #83 / the v0.13.1 release.
+
+## Scope
+
+1. Normalize remote cold-start replay scoring.
+   - `quarantined_remote_exact_match_candidates(...)` now counts matched gene signals and divides by the number of requested signals.
+   - That can produce scores greater than `1.0` when a single query term matches multiple gene signals, which biases ranking toward redundant overlapping signals instead of better query coverage.
+
+2. Reduce duplicate event-log scans in export and fetch paths.
+   - `export_promoted_assets_from_store(...)` and `fetch_assets_from_store(...)` already rebuild the projection.
+   - The new replay export helper then calls `scan(1)` again to recover `MutationDeclared` / `SpecLinked`, which adds an extra full event-log read on hot paths.
+
+## Acceptance Criteria
+
+- Remote cold-start candidate scoring is bounded and reflects distinct query coverage, not duplicate overlapping signal strings.
+- A regression test covers the ranking behavior so a single query term cannot inflate the score above the intended range.
+- Export / fetch avoid the extra full event-log pass, or otherwise derive the replay payloads from data already available in the same read path.
+- Targeted validation covers the updated replay selection and asset export behavior.
+
+## References
+
+- Follow-up from PR #83
+- Released context: `oris-evolution v0.2.1`, `oris-evokernel v0.6.1`, `oris-runtime v0.13.1`","","","evolution","archived","84","CLOSED","https://github.com/Colin4k1024/Oris/issues/84"
+"[EVO] Track staged self-evolution from replay baseline to supervised devloop","## Why
+We now have a checked-in self-evolution acceptance baseline and regression suite, but the current implementation is still constrained replay-driven reuse, not a closed-loop autonomous devloop.
+
+## Current baseline
+- capture verified mutations into the evolution store
+- replay learned tasks on later runs
+- keep remote assets quarantined until local validation
+- preserve replay behavior across restart with the same store
+- keep false-positive replay under control in the current regression suite
+
+## Next stages
+1. Expand task-class generalization beyond current normalized signal matching.
+2. Add continuous confidence control: decay, revalidation, demotion, and freshness-aware ranking.
+3. Close the agent feedback loop with structured replay hints, fallback reasons, and reasoning-avoidance metrics.
+4. Move toward supervised DEVLOOP orchestration for bounded development tasks.
+5. Harden federated evolution: attribution fidelity, economics, revocation propagation, and network consistency.
+
+## Deliverables
+- break this direction into issue-sized follow-up work
+- keep the self-evolution acceptance checklist aligned with shipped behavior
+- keep the replay regression suite as the minimum test gate
+
+## References
+- docs/evokernel/self-evolution-acceptance-checklist.md
+- docs/evokernel/implementation-roadmap.md","","","evolution","archived","86","CLOSED","https://github.com/Colin4k1024/Oris/issues/86"
+"[EVO-01] Expand deterministic task-class replay matching beyond normalized signals","Parent: #86
+
+## Goal
+Move from exact or currently normalized signal replay into broader deterministic task-class reuse without increasing false positives.
+
+## Scope
+- enrich deterministic signal extraction from intent, diff, validation logs, and stage outputs
+- add a broader task-class replay matching layer beyond current exact and normalized matches
+- keep negative controls proving unrelated tasks do not replay
+- update the self-evolution acceptance checklist when the new boundary ships
+
+## Definition of done
+- at least one learned mutation replays across multiple semantically adjacent signal variants
+- false-positive replay remains controlled in the black-box regression suite
+- replay ranking distinguishes near-match from true no-match more clearly than today
+
+## Non-goals
+- embeddings or LLM-only similarity matching
+- autonomous planning or orchestration
+
+## Validation
+- targeted new regression coverage
+- cargo test -p oris-evokernel --test evolution_lifecycle_regression","","","evolution","archived","87","CLOSED","https://github.com/Colin4k1024/Oris/issues/87"
+"[EVO-02] Add a continuous confidence lifecycle for evolution assets","Parent: #86
+
+## Goal
+Move from one-shot promotion into continuously managed asset trust with decay, revalidation, and demotion paths.
+
+## Scope
+- add confidence decay over time
+- define revalidation or shadow-check triggers
+- support automatic demotion or revocation on drift
+- make replay ranking freshness-aware
+- expose confidence-driven transitions in the acceptance checklist and metrics surface
+
+## Definition of done
+- stale or environment-diverged assets lose priority automatically
+- at least one regression path proves decay or drift changes replay eligibility
+- confidence-driven state transitions are visible and auditable
+
+## Non-goals
+- full autonomous background scheduling across the whole runtime
+- non-deterministic heuristic revocation
+
+## Validation
+- targeted unit and regression coverage for decay, revalidation, and demotion
+- cargo test -p oris-evolution --lib
+- cargo test -p oris-evokernel --test evolution_lifecycle_regression","","","evolution","archived","88","CLOSED","https://github.com/Colin4k1024/Oris/issues/88"
+"[EVO-03] Close the replay feedback loop for agent callers","Parent: #86
+
+## Goal
+Make replay outcomes first-class agent-facing signals so repeated work measurably reduces reasoning and implementation effort.
+
+## Scope
+- expose structured replay hints for callers
+- expose explicit fallback reasons that a planner can consume
+- add metrics for replay utilization and reasoning avoided per task class
+- wire the current proposal path and example flow to consume replay feedback
+- update docs and examples for the new feedback boundary
+
+## Definition of done
+- the agent-facing API surfaces actionable replay result data, not just a binary outcome
+- repeated tasks show lower reasoning dependence in the test harness or example flow
+- fallback paths remain explicit and auditable
+
+## Non-goals
+- autonomous issue intake
+- autonomous release or PR orchestration
+
+## Validation
+- targeted integration coverage for replay feedback
+- cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+- cargo test -p oris-evokernel --test evolution_lifecycle_regression","","","evolution","archived","89","CLOSED","https://github.com/Colin4k1024/Oris/issues/89"
+"[EVO-04] Introduce supervised DEVLOOP orchestration for bounded tasks","Parent: #86
+
+## Goal
+Move from reusable replay memory into a supervised, bounded development loop for a narrow class of tasks.
+
+## Scope
+- define a bounded task intake model
+- add deterministic task classification or routing for the bounded scope
+- define the gated mutation proposal and validation pipeline
+- define explicit human approval boundaries
+- keep the execution path auditable and policy-controlled
+
+## Definition of done
+- at least one bounded task class can run end-to-end through a supervised DEVLOOP
+- failure paths remain gated and never bypass policy
+- the flow stops short of autonomous release behavior
+
+## Non-goals
+- fully autonomous repository maintenance
+- ungated branch, PR, or publish automation
+
+## Validation
+- bounded end-to-end DEVLOOP smoke coverage
+- targeted policy and fallback regression coverage","","","evolution","archived","90","CLOSED","https://github.com/Colin4k1024/Oris/issues/90"
+"[EVO-05] Harden federated evolution attribution, economics, and revocation","Parent: #86
+
+## Goal
+Make multi-node evolution sharing trustworthy under attribution, economics, retries, restart, and revocation pressure.
+
+## Scope
+- harden publisher and validator attribution fidelity
+- keep reputation weighting and settlement behavior consistent
+- strengthen anti-spam publish economics
+- define and validate revocation propagation
+- keep import and export paths consistent under duplicate import, partial failure, and restart
+
+## Definition of done
+- remote reuse settlement remains attributable and stable under restart
+- revocation propagates without corrupting local state
+- distributed import and export paths remain idempotent and auditable under retries
+
+## Non-goals
+- multi-org product packaging
+- non-local trust assumptions that bypass quarantine
+
+## Validation
+- targeted distributed regression coverage
+- cargo test -p oris-evokernel --lib
+- cargo test -p oris-evokernel --test evolution_lifecycle_regression","","","evolution","archived","91","CLOSED","https://github.com/Colin4k1024/Oris/issues/91"
