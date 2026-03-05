@@ -13,6 +13,7 @@ members = [
     "crates/oris-spec",
     "crates/oris-agent-contract",
     "crates/oris-runtime",
+    "crates/oris-orchestrator",
     "examples/evo_oris_repo",
     "examples/vector_store_surrealdb",
     "examples/oris_starter_axum",
