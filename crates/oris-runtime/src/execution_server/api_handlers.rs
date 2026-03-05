@@ -27,7 +27,7 @@ use tokio::sync::RwLock;
     feature = "evolution-network-experimental"
 ))]
 use crate::agent_contract::{
-    A2aCapability, A2aErrorCode, A2aHandshakeRequest, A2aHandshakeResponse,
+    A2aCapability, A2aErrorCode, A2aHandshakeRequest, A2aHandshakeResponse, A2aProtocol,
 };
 #[cfg(feature = "evolution-network-experimental")]
 use crate::evolution::{
@@ -174,6 +174,16 @@ pub struct StaticApiKeyConfig {
     pub secret_hash: String,
     pub active: bool,
     pub role: ApiRole,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug)]
+struct A2aSession {
+    negotiated_protocol: A2aProtocol,
+    enabled_capabilities: Vec<A2aCapability>,
 }
 
 const METRIC_BUCKETS_MS: [f64; 9] = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
@@ -523,6 +533,11 @@ pub struct ExecutionApiState {
     pub evolution_store: Arc<dyn EvoEvolutionStore>,
     #[cfg(feature = "evolution-network-experimental")]
     pub evolution_node: Arc<EvolutionNetworkNode>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    a2a_sessions: Arc<RwLock<HashMap<String, A2aSession>>>,
     pub auth: ExecutionApiAuthConfig,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
@@ -548,6 +563,11 @@ impl ExecutionApiState {
             evolution_store: evolution_store.clone(),
             #[cfg(feature = "evolution-network-experimental")]
             evolution_node: Arc::new(EvolutionNetworkNode::new(evolution_store)),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            a2a_sessions: Arc::new(RwLock::new(HashMap::new())),
             auth: ExecutionApiAuthConfig::default(),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
@@ -1438,6 +1458,14 @@ pub async fn evolution_publish(
 ) -> Result<Json<ApiEnvelope<ImportOutcome>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    #[cfg(feature = "agent-contract-experimental")]
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::EvolutionPublish,
+        &rid,
+    )
+    .await?;
     let outcome = state
         .evolution_node
         .accept_publish_request(&req)
@@ -1457,6 +1485,8 @@ pub async fn evolution_fetch(
 ) -> Result<Json<ApiEnvelope<FetchResponse>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    #[cfg(feature = "agent-contract-experimental")]
+    ensure_a2a_capability(&state, &req.sender_id, A2aCapability::EvolutionFetch, &rid).await?;
     let response = state
         .evolution_node
         .fetch_assets("execution-api", &req)
@@ -1477,6 +1507,8 @@ pub async fn evolution_revoke(
 ) -> Result<Json<ApiEnvelope<RevokeNotice>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    #[cfg(feature = "agent-contract-experimental")]
+    ensure_a2a_capability(&state, &req.sender_id, A2aCapability::EvolutionRevoke, &rid).await?;
     let response = state
         .evolution_node
         .revoke_assets(&req)
@@ -1541,13 +1573,70 @@ fn negotiate_a2a_handshake(req: &A2aHandshakeRequest) -> A2aHandshakeResponse {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+async fn ensure_a2a_capability(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    capability: A2aCapability,
+    rid: &str,
+) -> Result<(), ApiError> {
+    let sessions = state.a2a_sessions.read().await;
+    let Some(session) = sessions.get(sender_id) else {
+        return Err(
+            ApiError::forbidden("a2a handshake required before calling evolution routes")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "sender_id": sender_id,
+                    "required_capability": format!("{capability:?}"),
+                    "handshake_endpoint": "/v1/evolution/a2a/handshake",
+                })),
+        );
+    };
+    if !session.enabled_capabilities.contains(&capability) {
+        return Err(ApiError::forbidden(
+            "negotiated capabilities do not allow this evolution action",
+        )
+        .with_request_id(rid.to_string())
+        .with_details(serde_json::json!({
+            "sender_id": sender_id,
+            "required_capability": format!("{capability:?}"),
+            "negotiated_protocol": format!(
+                "{}@{}",
+                session.negotiated_protocol.name,
+                session.negotiated_protocol.version
+            ),
+            "enabled_capabilities": session
+                .enabled_capabilities
+                .iter()
+                .map(|item| format!("{item:?}"))
+                .collect::<Vec<_>>(),
+        })));
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 pub async fn evolution_a2a_handshake(
+    State(state): State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<A2aHandshakeRequest>,
 ) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.agent_id).map_err(|e| e.with_request_id(rid.clone()))?;
     let response = negotiate_a2a_handshake(&req);
+    if response.accepted {
+        if let Some(protocol) = response.negotiated_protocol.clone() {
+            state.a2a_sessions.write().await.insert(
+                req.agent_id.clone(),
+                A2aSession {
+                    negotiated_protocol: protocol,
+                    enabled_capabilities: response.enabled_capabilities.clone(),
+                },
+            );
+        }
+    }
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -3386,6 +3475,43 @@ mod tests {
         Arc::new(graph.compile_with_persistence(Some(saver), None).unwrap())
     }
 
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    async fn handshake_agent_with_caps(
+        router: &axum::Router,
+        agent_id: &str,
+        capabilities: &[&str],
+    ) -> serde_json::Value {
+        let handshake_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/handshake")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": agent_id,
+                    "role": "Planner",
+                    "capability_level": "A1",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION
+                        }
+                    ],
+                    "advertised_capabilities": capabilities
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let handshake_resp = router.clone().oneshot(handshake_req).await.unwrap();
+        assert_eq!(handshake_resp.status(), StatusCode::OK);
+        let handshake_body = axum::body::to_bytes(handshake_resp.into_body(), usize::MAX)
+            .await
+            .expect("handshake body");
+        serde_json::from_slice(&handshake_body).expect("handshake json")
+    }
+
     #[cfg(feature = "evolution-network-experimental")]
     #[tokio::test]
     async fn evolution_publish_fetch_and_revoke_routes_work() {
@@ -3397,6 +3523,21 @@ mod tests {
                 crate::evolution::JsonlEvolutionStore::new(&store_root),
             )),
         );
+
+        #[cfg(feature = "agent-contract-experimental")]
+        {
+            let handshake_json = handshake_agent_with_caps(
+                &router,
+                "node-a",
+                &["EvolutionPublish", "EvolutionFetch", "EvolutionRevoke"],
+            )
+            .await;
+            assert_eq!(handshake_json["data"]["accepted"], true);
+
+            let consumer_handshake_json =
+                handshake_agent_with_caps(&router, "consumer-a", &["EvolutionFetch"]).await;
+            assert_eq!(consumer_handshake_json["data"]["accepted"], true);
+        }
 
         let publish_req = Request::builder()
             .method(Method::POST)
@@ -3511,35 +3652,79 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
-    async fn evolution_a2a_handshake_route_accepts_compatible_agent() {
+    async fn evolution_publish_requires_handshake_when_agent_contract_enabled() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
-        let req = Request::builder()
+        let publish_req = Request::builder()
             .method(Method::POST)
-            .uri("/v1/evolution/a2a/handshake")
+            .uri("/v1/evolution/publish")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::json!({
-                    "agent_id": "agent-a",
-                    "role": "Planner",
-                    "capability_level": "A1",
-                    "supported_protocols": [
-                        {
-                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
-                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION
-                        }
-                    ],
-                    "advertised_capabilities": ["Coordination", "ReplayFeedback"]
+                    "sender_id": "node-a",
+                    "assets": []
                 })
                 .to_string(),
             ))
             .unwrap();
-
-        let resp = router.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        let publish_resp = router.oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::FORBIDDEN);
+        let publish_body = axum::body::to_bytes(publish_resp.into_body(), usize::MAX)
             .await
-            .expect("handshake body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("handshake json");
+            .expect("publish body");
+        let publish_json: serde_json::Value =
+            serde_json::from_slice(&publish_body).expect("publish json");
+        assert_eq!(
+            publish_json["error"]["message"],
+            "a2a handshake required before calling evolution routes"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_publish_rejects_missing_negotiated_capability() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake_json =
+            handshake_agent_with_caps(&router, "node-a", &["EvolutionFetch"]).await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
+
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-a",
+                    "assets": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let publish_resp = router.oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::FORBIDDEN);
+        let publish_body = axum::body::to_bytes(publish_resp.into_body(), usize::MAX)
+            .await
+            .expect("publish body");
+        let publish_json: serde_json::Value =
+            serde_json::from_slice(&publish_body).expect("publish json");
+        assert_eq!(
+            publish_json["error"]["message"],
+            "negotiated capabilities do not allow this evolution action"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_handshake_route_accepts_compatible_agent() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let json =
+            handshake_agent_with_caps(&router, "agent-a", &["Coordination", "ReplayFeedback"])
+                .await;
         assert_eq!(json["data"]["accepted"], true);
         assert_eq!(
             json["data"]["negotiated_protocol"]["name"],

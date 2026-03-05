@@ -20,6 +20,7 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
   - `POST /v1/evolution/fetch`
   - `POST /v1/evolution/revoke`
   - `POST /v1/evolution/a2a/handshake` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
+- when `agent-contract-experimental` is enabled, publish/fetch/revoke calls require a prior successful handshake for the same `sender_id` and a negotiated matching capability
 
 Not yet implemented in the checked-in crate:
 
