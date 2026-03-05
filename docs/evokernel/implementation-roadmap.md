@@ -2,9 +2,9 @@
 
 Source: https://www.notion.so/317e8a70eec580cfb252f8b09a40d21c
 
-Last synced: March 4, 2026
+Last synced: March 5, 2026
 
-## Current Baseline Update (March 4, 2026)
+## Current Baseline Update (March 5, 2026)
 
 The repository now passes a concrete self-evolution baseline.
 
@@ -28,9 +28,10 @@ The acceptance baseline and current test gate now live in:
 
 - `docs/evokernel/self-evolution-acceptance-checklist.md`
 
-The planning issue for the next staged evolution pass is:
+The staged evolution tracking issue is now complete:
 
-- GitHub issue `#86`, `[EVO] Track staged self-evolution from replay baseline to supervised devloop`
+- GitHub issue `#86`, `[EVO] Track staged self-evolution from replay baseline to supervised devloop` (closed)
+- Released in `oris-runtime v0.14.0`
 
 ## Near-Term Execution Priorities
 
@@ -42,7 +43,7 @@ Before pushing further into autonomy, the next implementation priority order is:
 4. Move toward supervised DEVLOOP orchestration for bounded development tasks.
 5. Harden federated evolution with stronger attribution, economics, and revocation propagation.
 
-The current stage-tracking issue split is:
+Completed stage-tracking issue split (all closed and shipped in `oris-runtime v0.14.0`):
 
 - `#87` `EVO-01`: expand deterministic task-class replay matching beyond normalized signals
 - `#88` `EVO-02`: add a continuous confidence lifecycle for evolution assets
