@@ -2,6 +2,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrPayload {
@@ -64,12 +66,131 @@ impl fmt::Display for GitHubAdapterError {
 
 impl std::error::Error for GitHubAdapterError {}
 
+impl From<reqwest::Error> for GitHubAdapterError {
+    fn from(value: reqwest::Error) -> Self {
+        Self::new(format!("github http error: {}", value))
+    }
+}
+
 #[async_trait]
 pub trait GitHubAdapter: Send + Sync {
     async fn create_pull_request(
         &self,
         payload: &PrPayload,
     ) -> Result<CreatedPullRequest, GitHubAdapterError>;
+}
+
+#[derive(Clone)]
+pub struct GitHubApiAdapter {
+    owner: String,
+    repo: String,
+    token: String,
+    base_url: String,
+    http: reqwest::Client,
+}
+
+#[derive(Debug, Serialize)]
+struct CreatePullRequestRequest {
+    title: String,
+    head: String,
+    base: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePullRequestResponse {
+    number: u64,
+    html_url: String,
+}
+
+impl GitHubApiAdapter {
+    pub fn new(
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+            token: token.into(),
+            base_url: "https://api.github.com".to_string(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    pub fn with_base_url(
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+        token: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+            token: token.into(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    fn issue_title(issue_id: &str) -> String {
+        format!("Automated update for {}", issue_id)
+    }
+}
+
+#[async_trait]
+impl GitHubAdapter for GitHubApiAdapter {
+    async fn create_pull_request(
+        &self,
+        payload: &PrPayload,
+    ) -> Result<CreatedPullRequest, GitHubAdapterError> {
+        payload
+            .validate()
+            .map_err(|e| GitHubAdapterError::new(e.to_string()))?;
+
+        if self.token.trim().is_empty() {
+            return Err(GitHubAdapterError::new(
+                "github token is required for API adapter",
+            ));
+        }
+
+        let request = CreatePullRequestRequest {
+            title: Self::issue_title(&payload.issue_id),
+            head: payload.head.clone(),
+            base: payload.base.clone(),
+            body: payload.body.clone(),
+        };
+
+        let url = format!("{}/repos/{}/{}/pulls", self.base_url, self.owner, self.repo);
+
+        let response = self
+            .http
+            .post(url)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", self.token),
+            )
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .header(reqwest::header::USER_AGENT, "oris-orchestrator")
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(GitHubAdapterError::new(format!(
+                "github api returned {}: {}",
+                status, body
+            )));
+        }
+
+        let created = response.json::<CreatePullRequestResponse>().await?;
+        Ok(CreatedPullRequest {
+            number: created.number,
+            url: created.html_url,
+        })
+    }
 }
 
 #[derive(Clone, Default)]

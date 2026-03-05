@@ -5,11 +5,12 @@ use oris_agent_contract::A2aTaskLifecycleState;
 
 use crate::evidence::{EvidenceBundle, ValidationGate};
 use crate::github_adapter::{
-    CreatedPullRequest, GitHubAdapter, GitHubAdapterError, InMemoryGitHubAdapter, PrPayload,
+    CreatedPullRequest, GitHubAdapter, GitHubAdapterError, GitHubApiAdapter, InMemoryGitHubAdapter,
+    PrPayload,
 };
 use crate::runtime_client::{
-    default_handshake_request, A2aSessionCompletion, A2aSessionRequest, InMemoryRuntimeA2aClient,
-    RuntimeA2aClient, RuntimeClientError,
+    default_handshake_request, A2aSessionCompletion, A2aSessionRequest, HttpRuntimeA2aClient,
+    InMemoryRuntimeA2aClient, RuntimeA2aClient, RuntimeClientError,
 };
 use crate::state::{transition, TaskState, TaskTransitionError};
 use crate::task_spec::TaskSpec;
@@ -56,6 +57,24 @@ impl Coordinator {
             Arc::new(InMemoryRuntimeA2aClient::default()),
             Arc::new(InMemoryGitHubAdapter::default()),
             CoordinatorConfig::default(),
+        )
+    }
+
+    pub fn with_http_clients(
+        runtime_base_url: impl Into<String>,
+        github_owner: impl Into<String>,
+        github_repo: impl Into<String>,
+        github_token: impl Into<String>,
+        config: CoordinatorConfig,
+    ) -> Self {
+        Self::new(
+            Arc::new(HttpRuntimeA2aClient::new(runtime_base_url)),
+            Arc::new(GitHubApiAdapter::new(
+                github_owner,
+                github_repo,
+                github_token,
+            )),
+            config,
         )
     }
 
