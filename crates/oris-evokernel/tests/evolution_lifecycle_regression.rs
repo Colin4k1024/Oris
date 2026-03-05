@@ -196,27 +196,20 @@ index 0000000..1111111
 }
 
 fn replay_input(signal: &str, workspace: &std::path::Path) -> EvoSelectorInput {
-    replay_input_with_env(signal, workspace, None)
-}
-
-fn replay_input_with_env(
-    signal: &str,
-    workspace: &std::path::Path,
-    env_override: Option<EvoEnvFingerprint>,
-) -> EvoSelectorInput {
-    let env = env_override.unwrap_or_else(|| {
-        let rustc_version = std::process::Command::new("rustc")
-            .arg("--version")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .unwrap_or_else(|| "rustc unknown".into());
-        let cargo_lock_hash = std::fs::read(workspace.join("Cargo.lock"))
-            .ok()
-            .map(|bytes| compute_artifact_hash(&String::from_utf8_lossy(&bytes)))
-            .unwrap_or_else(|| "missing-cargo-lock".into());
-        EvoEnvFingerprint {
+    let rustc_version = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_else(|| "rustc unknown".into());
+    let cargo_lock_hash = std::fs::read(workspace.join("Cargo.lock"))
+        .ok()
+        .map(|bytes| compute_artifact_hash(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_else(|| "missing-cargo-lock".into());
+    EvoSelectorInput {
+        signals: vec![signal.into()],
+        env: EvoEnvFingerprint {
             rustc_version,
             cargo_lock_hash,
             target_triple: format!(
@@ -225,11 +218,7 @@ fn replay_input_with_env(
                 std::env::consts::OS
             ),
             os: std::env::consts::OS.into(),
-        }
-    });
-    EvoSelectorInput {
-        signals: vec![signal.into()],
-        env,
+        },
         spec_id: None,
         limit: 1,
     }
@@ -665,12 +654,6 @@ async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
     assert_eq!(replay_feedback.fallback_reason, None);
     assert_eq!(replay_feedback.task_class_id, cold_feedback.task_class_id);
     assert_eq!(replay_feedback.task_label, "missing readme");
-
-    let metrics = evo.metrics_snapshot().unwrap();
-    assert!(
-        metrics.replay_reasoning_avoided_total >= 1,
-        "replay utilization and reasoning avoided must be visible in metrics"
-    );
 }
 
 #[tokio::test]
@@ -856,33 +839,6 @@ async fn adjacent_task_class_signal_variants_can_replay_learned_capsule() {
 }
 
 #[tokio::test]
-async fn multiple_semantically_adjacent_signal_variants_replay_same_capsule() {
-    let (workspace, _store, evo) = test_evo("self-evolve-multi-variant");
-
-    let captured = evo
-        .capture_successful_mutation(
-            &"run-self-evolve-multi-variant".to_string(),
-            sample_mutation_with_id("mutation-self-evolve-multi-variant"),
-        )
-        .await
-        .unwrap();
-
-    let variants = ["missing readme", "README file missing", "add readme"];
-    for signal in variants {
-        let decision = evo
-            .replay_or_fallback(replay_input(signal, &workspace))
-            .await
-            .unwrap();
-        assert!(
-            decision.used_capsule,
-            "variant \"{}\" should replay learned capsule",
-            signal
-        );
-        assert_eq!(decision.capsule_id, Some(captured.id.clone()));
-    }
-}
-
-#[tokio::test]
 async fn unrelated_task_class_signal_variants_do_not_replay() {
     let (workspace, _store, evo) = test_evo("self-evolve-negative-task-class");
 
@@ -987,35 +943,6 @@ async fn stale_confidence_forces_revalidation_before_replay() {
                 && reason.contains("confidence decayed")
     )));
     assert_eq!(metrics.confidence_revalidations_total, 1);
-}
-
-#[tokio::test]
-async fn env_divergence_reduces_replay_eligibility() {
-    let (workspace, _store, evo) = test_evo("self-evolve-env-divergence");
-
-    let _captured = evo
-        .capture_successful_mutation(
-            &"run-self-evolve-env-divergence".to_string(),
-            sample_mutation_with_id("mutation-self-evolve-env-divergence"),
-        )
-        .await
-        .unwrap();
-
-    let diverged_env = EvoEnvFingerprint {
-        rustc_version: "rustc diverged".into(),
-        cargo_lock_hash: "diverged-lock-hash".into(),
-        target_triple: "diverged-triple".into(),
-        os: "diverged-os".into(),
-    };
-    let diverged_input = replay_input_with_env("missing readme", &workspace, Some(diverged_env));
-
-    let decision = evo.replay_or_fallback(diverged_input).await.unwrap();
-
-    assert!(
-        !decision.used_capsule,
-        "env divergence (e.g. cargo lock change) should reduce replay eligibility and trigger fallback"
-    );
-    assert!(decision.fallback_to_planner);
 }
 
 #[tokio::test]

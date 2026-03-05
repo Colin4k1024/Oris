@@ -27,6 +27,7 @@ const GROUP_EVO: &str = "evo";
 const PLANNER_DEEPSEEK: &str = "deepseek";
 const PLANNER_OLLAMA: &str = "ollama";
 const PLANNER_OPENAI_COMPAT: &str = "openai-compatible";
+const SHAREABLE_ASSET_RUNTIME_ROOT: &str = "examples/evo_oris_repo/assets/evo-shareable/runtime";
 const SHAREABLE_ASSET_GENERATED_ROOT: &str =
     "examples/evo_oris_repo/assets/evo-shareable/generated";
 const DEFAULT_OPENAI_COMPAT_BASE_URL: &str = "https://mgallery.haier.net/v1";
@@ -547,7 +548,6 @@ pub async fn run_evo_vs_non_evo_benchmark(
     write_shareable_assets_manifest(
         &run_id,
         config,
-        &tasks,
         &created_assets,
         &canonical_envelope_path,
         &config.output_assets_json,
@@ -1336,10 +1336,9 @@ fn benchmark_proposal(task: &BenchmarkTask, source: &str) -> MutationProposal {
 }
 
 fn benchmark_tasks(run_id: &str) -> Vec<BenchmarkTask> {
-    let docs_path = format!("{SHAREABLE_ASSET_GENERATED_ROOT}/{run_id}/docs/evo-bench-doc.md");
-    let code_path = format!("{SHAREABLE_ASSET_GENERATED_ROOT}/{run_id}/code/bench_helper.rs");
-    let config_path =
-        format!("{SHAREABLE_ASSET_GENERATED_ROOT}/{run_id}/config/evo-bench-alert.yml");
+    let docs_path = format!("{SHAREABLE_ASSET_RUNTIME_ROOT}/{run_id}/docs/evo-bench-doc.md");
+    let code_path = format!("{SHAREABLE_ASSET_RUNTIME_ROOT}/{run_id}/code/bench_helper.rs");
+    let config_path = format!("{SHAREABLE_ASSET_RUNTIME_ROOT}/{run_id}/config/evo-bench-alert.yml");
 
     vec![
         BenchmarkTask {
@@ -1395,6 +1394,20 @@ fn task_visible_content(task: &BenchmarkTask, bundle: &AssetBundle, run_id: &str
             "# Evo Bench Doc Asset\n\nThis docs asset is used for benchmark replay.\n\ngenerated-by=evo-benchmark\nrun_id={run_id}\ngene_id={}\ncapsule_id={}\n",
             bundle.gene_id, bundle.capsule_id
         ),
+    }
+}
+
+fn visible_asset_path(run_id: &str, asset_id: &str) -> PathBuf {
+    match asset_id {
+        "asset-code" => PathBuf::from(format!(
+            "{SHAREABLE_ASSET_GENERATED_ROOT}/{run_id}/code/bench_helper.rs"
+        )),
+        "asset-config" => PathBuf::from(format!(
+            "{SHAREABLE_ASSET_GENERATED_ROOT}/{run_id}/config/evo-bench-alert.yml"
+        )),
+        _ => PathBuf::from(format!(
+            "{SHAREABLE_ASSET_GENERATED_ROOT}/{run_id}/docs/evo-bench-doc.md"
+        )),
     }
 }
 
@@ -1534,15 +1547,16 @@ fn materialize_visible_assets(
         let task = task_by_id
             .get(&bundle.asset_id)
             .ok_or_else(|| format!("missing task for asset {}", bundle.asset_id))?;
-        if let Some(parent) = Path::new(&task.target_path).parent() {
+        let visible_path = visible_asset_path(run_id, &bundle.asset_id);
+        if let Some(parent) = visible_path.parent() {
             fs::create_dir_all(parent)?;
         }
         let content = task_visible_content(task, bundle, run_id);
-        fs::write(&task.target_path, content)?;
+        fs::write(&visible_path, content)?;
         println!(
             "[evo-bench][asset] asset_id={} target_path={} gene_id={} capsule_id={} signals_count={}",
             bundle.asset_id,
-            task.target_path,
+            visible_path.to_string_lossy(),
             bundle.gene_id,
             bundle.capsule_id,
             bundle.signals.len()
@@ -1560,7 +1574,7 @@ fn materialize_visible_assets(
             None,
             Some(&format!(
                 "target_path={} gene_id={} capsule_id={} signals_count={}",
-                task.target_path,
+                visible_path.to_string_lossy(),
                 bundle.gene_id,
                 bundle.capsule_id,
                 bundle.signals.len()
@@ -1631,7 +1645,6 @@ fn write_envelope_snapshots(
 fn write_shareable_assets_manifest(
     run_id: &str,
     config: &BenchmarkConfig,
-    tasks: &[BenchmarkTask],
     bundles: &[AssetBundle],
     canonical_envelope_path: &Path,
     canonical_assets_path: &Path,
@@ -1659,18 +1672,13 @@ fn write_shareable_assets_manifest(
         fs::create_dir_all(parent)?;
     }
 
-    let task_paths = tasks
-        .iter()
-        .map(|task| (task.asset_id.clone(), task.target_path.clone()))
-        .collect::<BTreeMap<_, _>>();
     let assets = bundles
         .iter()
         .map(|bundle| ShareableAssetInfo {
             asset_id: bundle.asset_id.clone(),
-            target_path: task_paths
-                .get(&bundle.asset_id)
-                .cloned()
-                .unwrap_or_else(|| "<unknown>".to_string()),
+            target_path: visible_asset_path(run_id, &bundle.asset_id)
+                .to_string_lossy()
+                .to_string(),
             gene_id: bundle.gene_id.clone(),
             capsule_id: bundle.capsule_id.clone(),
             signals: bundle.signals.clone(),

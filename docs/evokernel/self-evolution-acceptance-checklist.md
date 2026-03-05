@@ -116,9 +116,8 @@ The following are still outside the present acceptance envelope:
 - no autonomous mutation proposal generation
 - no autonomous planner loop
 - no autonomous issue-to-release closed loop
+- no broader semantic equivalence layer beyond the currently implemented signal normalization and matching behavior
 - no shadow-mode confidence lifecycle that continuously revalidates assets in the background
-
-The following has been addressed: deterministic task-class replay now includes richer signal extraction (intent key phrases, Rust error codes from validation logs) and a regression test proves multiple semantically adjacent signal variants replay the same learned capsule.
 
 ## 7. Overall Evolution Direction
 
@@ -143,7 +142,7 @@ Definition of done:
 
 - replay is reliable enough to be trusted as a real optimization path
 
-### Stage 2. Expand Task-Class Generalization (Shipped)
+### Stage 2. Expand Task-Class Generalization (Next)
 
 Goal:
 
@@ -160,13 +159,12 @@ Current deterministic boundary:
 
 - reordered or superset multi-token signal phrases can match when at least two normalized tokens align
 - isolated single-token overlap does not qualify as task-class replay on its own
-- signal extraction includes intent key phrases and Rust error codes from validation logs
 
 Definition of done:
 
-- one learned fix can help multiple semantically equivalent task variants, not just near-identical ones (regression: `multiple_semantically_adjacent_signal_variants_replay_same_capsule`)
+- one learned fix can help multiple semantically equivalent task variants, not just near-identical ones
 
-### Stage 3. Introduce Continuous Confidence Control (Shipped)
+### Stage 3. Introduce Continuous Confidence Control
 
 Goal:
 
@@ -188,9 +186,9 @@ Current deterministic boundary:
 
 Definition of done:
 
-- stale or environment-diverged assets lose priority automatically before they become harmful (regression: `stale_confidence_forces_revalidation_before_replay`, `env_divergence_reduces_replay_eligibility`)
+- stale or environment-diverged assets lose priority automatically before they become harmful
 
-### Stage 4. Close the Agent Feedback Loop (Shipped)
+### Stage 4. Close the Agent Feedback Loop
 
 Goal:
 
@@ -205,9 +203,9 @@ Focus:
 
 Definition of done:
 
-- replay measurably reduces agent reasoning and implementation latency on repeated work (regression: `replay_feedback_surfaces_planner_hints_and_reasoning_savings`; example: evo_oris_repo consumes `replay_feedback_for_agent`)
+- replay measurably reduces agent reasoning and implementation latency on repeated work
 
-### Stage 5. Move Toward Autonomous DEVLOOP (Shipped)
+### Stage 5. Move Toward Autonomous DEVLOOP
 
 Goal:
 
@@ -224,9 +222,9 @@ Focus:
 
 Definition of done:
 
-- Oris can execute a bounded subset of development work end-to-end under supervision (regression: `supervised_devloop_executes_bounded_docs_task_after_approval`, `supervised_devloop_stops_before_execution_without_human_approval`, `supervised_devloop_rejects_out_of_scope_tasks_without_bypassing_policy`)
+- Oris can execute a bounded subset of development work end-to-end under supervision
 
-### Stage 6. Mature Federated Evolution (Shipped)
+### Stage 6. Mature Federated Evolution
 
 Goal:
 
@@ -242,7 +240,7 @@ Focus:
 
 Definition of done:
 
-- remote learning becomes a trustworthy multiplier rather than a contamination risk (regression: `remote_learning_requires_local_validation_before_becoming_shareable`, `distributed_learning_survives_restart_and_replays_again`, `duplicate_remote_import_does_not_requarantine_locally_validated_assets`, `retry_remote_import_after_partial_failure_only_imports_missing_assets`; lib: revocation and reputation bias coverage)
+- remote learning becomes a trustworthy multiplier rather than a contamination risk
 
 ## 8. North-Star Outcome
 
