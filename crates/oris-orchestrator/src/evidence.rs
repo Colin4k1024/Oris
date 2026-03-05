@@ -15,6 +15,10 @@ impl EvidenceBundle {
             policy_ok,
         }
     }
+
+    pub fn bundle_id(&self) -> String {
+        format!("evidence-{}", self.run_id)
+    }
 }
 
 pub struct ValidationGate;
