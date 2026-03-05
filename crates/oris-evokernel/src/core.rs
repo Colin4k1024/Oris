@@ -1817,7 +1817,6 @@ impl<S: KernelState> EvoKernel<S> {
             ),
         })
     }
-
     pub fn coordinate(&self, plan: CoordinationPlan) -> CoordinationResult {
         MultiAgentCoordinator::new().coordinate(plan)
     }
