@@ -34,6 +34,9 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
   - `POST /v1/evolution/a2a/sessions/:session_id/progress`
   - `POST /v1/evolution/a2a/sessions/:session_id/complete`
   - `GET /v1/evolution/a2a/sessions/:session_id?sender_id=<id>&protocol_version=<version>`
+  - `GET /v1/evolution/a2a/sessions/:sender_id/replicate?protocol_version=<version>`
+  - `POST /v1/evolution/a2a/sessions/replicate`
+- negotiated A2A sessions can now be exported from one node and imported into another node for cross-node reuse of negotiated capabilities
 
 Remote task session protocol contract (experimental):
 
@@ -81,7 +84,7 @@ Recommended deployment defaults:
 
 Not yet implemented in the checked-in code:
 
-- cross-node negotiated session propagation
+- automatic peer discovery/gossip for session replication (current propagation is explicit export/import API driven)
 
 ## Related Documents
 

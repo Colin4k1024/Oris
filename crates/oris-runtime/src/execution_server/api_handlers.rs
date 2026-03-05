@@ -329,6 +329,53 @@ pub struct A2aTaskSessionLookupQuery {
     protocol_version: String,
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aSessionReplicationExportQuery {
+    protocol_version: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct A2aSessionReplicationPayload {
+    sender_id: String,
+    protocol: A2aProtocol,
+    enabled_capabilities: Vec<A2aCapability>,
+    actor_type: Option<String>,
+    actor_id: Option<String>,
+    actor_role: Option<String>,
+    expires_at_ms: u64,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aSessionReplicationImportRequest {
+    source_node_id: String,
+    protocol_version: String,
+    session: A2aSessionReplicationPayload,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aSessionReplicationResponse {
+    imported: bool,
+    source_node_id: String,
+    sender_id: String,
+    expires_at_ms: u64,
+}
+
 const METRIC_BUCKETS_MS: [f64; 9] = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
 
 #[derive(Clone, Debug)]
@@ -953,6 +1000,14 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
             post(evolution_a2a_session_complete),
         )
         .route(
+            "/v1/evolution/a2a/sessions/:sender_id/replicate",
+            get(evolution_a2a_export_session),
+        )
+        .route(
+            "/v1/evolution/a2a/sessions/replicate",
+            post(evolution_a2a_import_session),
+        )
+        .route(
             "/v1/evolution/a2a/sessions/:session_id",
             get(evolution_a2a_session_snapshot),
         )
@@ -1488,6 +1543,11 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
                 resource_id: Some((*session_id).to_string()),
             })
         }
+        ("evolution", ["v1", "evolution", "a2a", "sessions", "replicate"]) => Some(AuditTarget {
+            action: "a2a.session.replicate.import",
+            resource_type: "sender",
+            resource_id: None,
+        }),
         _ => None,
     }
 }
@@ -1700,6 +1760,24 @@ async fn ensure_not_cancelled(state: &ExecutionApiState, thread_id: &str) -> Res
 ))]
 fn lifecycle_timestamp_ms(now: chrono::DateTime<Utc>) -> u64 {
     now.timestamp_millis().max(0) as u64
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn datetime_from_unix_ms(
+    ms: u64,
+    rid: &str,
+    field: &str,
+) -> Result<chrono::DateTime<Utc>, ApiError> {
+    let value = i64::try_from(ms).map_err(|_| {
+        ApiError::bad_request(format!("{field} is out of range")).with_request_id(rid.to_string())
+    })?;
+    chrono::DateTime::from_timestamp_millis(value).ok_or_else(|| {
+        ApiError::bad_request(format!("{field} is not a valid unix-millis timestamp"))
+            .with_request_id(rid.to_string())
+    })
 }
 
 #[cfg(all(
@@ -2784,6 +2862,209 @@ pub async fn evolution_a2a_session_complete(
         meta: ApiMeta::ok(),
         request_id: rid,
         data: completion_response,
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_export_session(
+    State(state): State<ExecutionApiState>,
+    Path(sender_id): Path<String>,
+    Query(q): Query<A2aSessionReplicationExportQuery>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<A2aSessionReplicationPayload>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_sender_id(&sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    ensure_task_session_protocol_version(&q.protocol_version, &rid)?;
+    let now = Utc::now();
+
+    #[cfg(feature = "sqlite-persistence")]
+    let mut session = state.a2a_sessions.read().await.get(&sender_id).cloned();
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let session = state.a2a_sessions.read().await.get(&sender_id).cloned();
+
+    #[cfg(feature = "sqlite-persistence")]
+    if session.is_none() {
+        if let Some(repo) = state.runtime_repo.as_ref() {
+            if let Some(stored) = repo
+                .get_active_a2a_session(&sender_id, now)
+                .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?
+            {
+                let enabled_capabilities: Vec<A2aCapability> =
+                    serde_json::from_str(&stored.enabled_capabilities_json).map_err(|e| {
+                        ApiError::internal(format!("invalid persisted a2a capabilities: {}", e))
+                            .with_request_id(rid.to_string())
+                    })?;
+                let principal_from_store = match (stored.actor_type, stored.actor_role) {
+                    (Some(actor_type), Some(actor_role)) => Some(A2aSessionPrincipal {
+                        actor_type,
+                        actor_id: stored.actor_id,
+                        actor_role,
+                    }),
+                    (None, None) => None,
+                    _ => {
+                        return Err(ApiError::internal(
+                            "invalid persisted a2a principal binding shape",
+                        )
+                        .with_request_id(rid.to_string()))
+                    }
+                };
+                let hydrated = A2aSession {
+                    negotiated_protocol: A2aProtocol {
+                        name: stored.protocol,
+                        version: stored.protocol_version,
+                    },
+                    privilege_profile: privilege_profile_from_capabilities(&enabled_capabilities),
+                    enabled_capabilities,
+                    principal: principal_from_store,
+                    expires_at: stored.expires_at,
+                };
+                state
+                    .a2a_sessions
+                    .write()
+                    .await
+                    .insert(sender_id.clone(), hydrated.clone());
+                session = Some(hydrated);
+            }
+        }
+    }
+
+    let Some(session) = session else {
+        return Err(
+            ApiError::not_found(format!("a2a session not found for sender: {sender_id}"))
+                .with_request_id(rid),
+        );
+    };
+    if session.expires_at <= now {
+        state.a2a_sessions.write().await.remove(&sender_id);
+        return Err(
+            ApiError::not_found(format!("a2a session expired for sender: {sender_id}"))
+                .with_request_id(request_id(&headers)),
+        );
+    }
+
+    let payload = A2aSessionReplicationPayload {
+        sender_id,
+        protocol: session.negotiated_protocol,
+        enabled_capabilities: session.enabled_capabilities,
+        actor_type: session.principal.as_ref().map(|p| p.actor_type.clone()),
+        actor_id: session.principal.as_ref().and_then(|p| p.actor_id.clone()),
+        actor_role: session.principal.as_ref().map(|p| p.actor_role.clone()),
+        expires_at_ms: lifecycle_timestamp_ms(session.expires_at),
+    };
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: request_id(&headers),
+        data: payload,
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_import_session(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aSessionReplicationImportRequest>,
+) -> Result<Json<ApiEnvelope<A2aSessionReplicationResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    ensure_task_session_protocol_version(&req.protocol_version, &rid)?;
+    validate_sender_id(&req.session.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    if req.source_node_id.trim().is_empty() {
+        return Err(ApiError::bad_request("source_node_id must not be empty").with_request_id(rid));
+    }
+    if req.session.protocol.name != crate::agent_contract::A2A_PROTOCOL_NAME
+        || req.session.protocol.version != crate::agent_contract::A2A_PROTOCOL_VERSION
+    {
+        return Err(
+            ApiError::bad_request("session protocol payload is incompatible")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "expected_name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                    "expected_version": crate::agent_contract::A2A_PROTOCOL_VERSION,
+                    "actual_name": req.session.protocol.name,
+                    "actual_version": req.session.protocol.version,
+                })),
+        );
+    }
+
+    let expires_at = datetime_from_unix_ms(req.session.expires_at_ms, &rid, "expires_at_ms")?;
+    if expires_at <= Utc::now() {
+        return Err(ApiError::bad_request("cannot import expired a2a session")
+            .with_request_id(rid)
+            .with_details(serde_json::json!({
+                "sender_id": req.session.sender_id,
+                "expires_at_ms": req.session.expires_at_ms
+            })));
+    }
+
+    let principal = match (
+        req.session.actor_type.clone(),
+        req.session.actor_id.clone(),
+        req.session.actor_role.clone(),
+    ) {
+        (Some(actor_type), actor_id, Some(actor_role)) => Some(A2aSessionPrincipal {
+            actor_type,
+            actor_id,
+            actor_role,
+        }),
+        (None, None, None) => None,
+        _ => {
+            return Err(
+                ApiError::bad_request("invalid session principal payload shape")
+                    .with_request_id(rid),
+            )
+        }
+    };
+
+    let session = A2aSession {
+        negotiated_protocol: req.session.protocol.clone(),
+        privilege_profile: privilege_profile_from_capabilities(&req.session.enabled_capabilities),
+        enabled_capabilities: req.session.enabled_capabilities.clone(),
+        principal,
+        expires_at,
+    };
+    state
+        .a2a_sessions
+        .write()
+        .await
+        .insert(req.session.sender_id.clone(), session.clone());
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        let now = Utc::now();
+        repo.upsert_a2a_session(&A2aSessionRow {
+            sender_id: req.session.sender_id.clone(),
+            protocol: session.negotiated_protocol.name.clone(),
+            protocol_version: session.negotiated_protocol.version.clone(),
+            enabled_capabilities_json: serde_json::to_string(&session.enabled_capabilities)
+                .map_err(|e| {
+                    ApiError::internal(format!("serialize negotiated a2a capabilities: {}", e))
+                        .with_request_id(request_id(&headers))
+                })?,
+            actor_type: session.principal.as_ref().map(|p| p.actor_type.clone()),
+            actor_id: session.principal.as_ref().and_then(|p| p.actor_id.clone()),
+            actor_role: session.principal.as_ref().map(|p| p.actor_role.clone()),
+            negotiated_at: now,
+            expires_at: session.expires_at,
+            updated_at: now,
+        })
+        .map_err(|e| ApiError::internal(e.to_string()).with_request_id(request_id(&headers)))?;
+    }
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: request_id(&headers),
+        data: A2aSessionReplicationResponse {
+            imported: true,
+            source_node_id: req.source_node_id,
+            sender_id: req.session.sender_id,
+            expires_at_ms: req.session.expires_at_ms,
+        },
     }))
 }
 
@@ -5104,6 +5385,117 @@ mod tests {
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_session_replication_propagates_across_nodes() {
+        let db_a = std::env::temp_dir().join(format!(
+            "oris-a2a-replicate-a-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db_b = std::env::temp_dir().join(format!(
+            "oris-a2a-replicate-b-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let db_a_str = db_a.to_string_lossy().to_string();
+        let db_b_str = db_b.to_string_lossy().to_string();
+        let store_a = std::env::temp_dir().join(format!(
+            "oris-a2a-replicate-store-a-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store_b = std::env::temp_dir().join(format!(
+            "oris-a2a-replicate-store-b-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_file(&db_a);
+        let _ = std::fs::remove_file(&db_b);
+        let _ = std::fs::remove_dir_all(&store_a);
+        let _ = std::fs::remove_dir_all(&store_b);
+
+        let router_a = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, &db_a_str)
+                .with_evolution_store(Arc::new(crate::evolution::JsonlEvolutionStore::new(
+                    &store_a,
+                ))),
+        );
+        let handshake_json = handshake_agent_with_caps_and_level(
+            &router_a,
+            "replicated-sender",
+            "A4",
+            &["EvolutionPublish", "EvolutionFetch"],
+        )
+        .await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
+
+        let export_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v1/evolution/a2a/sessions/replicated-sender/replicate?protocol_version={}",
+                crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let export_resp = router_a.clone().oneshot(export_req).await.unwrap();
+        assert_eq!(export_resp.status(), StatusCode::OK);
+        let export_body = axum::body::to_bytes(export_resp.into_body(), usize::MAX)
+            .await
+            .expect("export body");
+        let export_json: serde_json::Value =
+            serde_json::from_slice(&export_body).expect("export json");
+        let session_payload = export_json["data"].clone();
+
+        let router_b = build_router(
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, &db_b_str)
+                .with_evolution_store(Arc::new(crate::evolution::JsonlEvolutionStore::new(
+                    &store_b,
+                ))),
+        );
+        let import_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/sessions/replicate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "source_node_id": "node-a",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "session": session_payload
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let import_resp = router_b.clone().oneshot(import_req).await.unwrap();
+        assert_eq!(import_resp.status(), StatusCode::OK);
+        let import_body = axum::body::to_bytes(import_resp.into_body(), usize::MAX)
+            .await
+            .expect("import body");
+        let import_json: serde_json::Value =
+            serde_json::from_slice(&import_body).expect("import json");
+        assert_eq!(import_json["data"]["imported"], true);
+
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "replicated-sender",
+                    "assets": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let publish_resp = router_b.oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::OK);
+
+        let _ = std::fs::remove_file(&db_a);
+        let _ = std::fs::remove_file(&db_b);
+        let _ = std::fs::remove_dir_all(&store_a);
+        let _ = std::fs::remove_dir_all(&store_b);
     }
 
     #[cfg(all(

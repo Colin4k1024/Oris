@@ -25,6 +25,8 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
   - `POST /v1/evolution/a2a/sessions/:session_id/progress`
   - `POST /v1/evolution/a2a/sessions/:session_id/complete`
   - `GET /v1/evolution/a2a/sessions/:session_id`
+  - `GET /v1/evolution/a2a/sessions/:sender_id/replicate`
+  - `POST /v1/evolution/a2a/sessions/replicate`
   - `GET /v1/evolution/a2a/tasks/:task_id/lifecycle` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
 - when `agent-contract-experimental` is enabled, publish/fetch/revoke calls require a prior successful handshake for the same `sender_id` and a negotiated matching capability
 - when both `agent-contract-experimental` and `sqlite-persistence` are enabled, negotiated handshake sessions are persisted in runtime storage and can be reused after process restart
@@ -33,6 +35,7 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
 - session completion payloads are normalized into `ReplayFeedback` (`SkipPlanner` or `PlanFallback`) so remote results can feed replay-aware evolution decisions
 - remote task session protocol versions are strictly checked; incompatible versions return deterministic `400` errors
 - runtime now enforces agent-managed privilege profiles (`observer`/`operator`/`governor`) across evolution and A2A session endpoints, with audit logs capturing principal, capability, and allow/deny reasons
+- negotiated A2A sessions can be explicitly replicated across nodes via export/import APIs, enabling cross-node reuse after handshake on the source node
 
 Not yet implemented in the checked-in crate:
 
