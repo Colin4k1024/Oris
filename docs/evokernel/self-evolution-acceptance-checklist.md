@@ -207,7 +207,7 @@ Definition of done:
 
 - replay measurably reduces agent reasoning and implementation latency on repeated work (regression: `replay_feedback_surfaces_planner_hints_and_reasoning_savings`; example: evo_oris_repo consumes `replay_feedback_for_agent`)
 
-### Stage 5. Move Toward Autonomous DEVLOOP
+### Stage 5. Move Toward Autonomous DEVLOOP (Shipped)
 
 Goal:
 
@@ -224,7 +224,7 @@ Focus:
 
 Definition of done:
 
-- Oris can execute a bounded subset of development work end-to-end under supervision
+- Oris can execute a bounded subset of development work end-to-end under supervision (regression: `supervised_devloop_executes_bounded_docs_task_after_approval`, `supervised_devloop_stops_before_execution_without_human_approval`, `supervised_devloop_rejects_out_of_scope_tasks_without_bypassing_policy`)
 
 ### Stage 6. Mature Federated Evolution
 
