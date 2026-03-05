@@ -38,6 +38,16 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::A2aHandshakeResponse>();
     assert_type::<oris_runtime::agent_contract::A2aTaskLifecycleState>();
     assert_type::<oris_runtime::agent_contract::A2aTaskLifecycleEvent>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionState>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionStartRequest>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionDispatchRequest>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionProgressRequest>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionCompletionRequest>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionProgressItem>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionAck>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionResult>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionCompletionResponse>();
+    assert_type::<oris_runtime::agent_contract::A2aTaskSessionSnapshot>();
     assert_type::<oris_runtime::agent_contract::A2aErrorCode>();
     assert_type::<oris_runtime::agent_contract::A2aErrorEnvelope>();
     assert_type::<oris_runtime::agent_contract::AgentRole>();
@@ -69,6 +79,10 @@ fn full_evolution_experimental_paths_resolve() {
     assert_eq!(oris_runtime::agent_contract::A2A_PROTOCOL_NAME, "oris.a2a");
     assert_eq!(
         oris_runtime::agent_contract::A2A_PROTOCOL_VERSION,
+        "0.1.0-experimental"
+    );
+    assert_eq!(
+        oris_runtime::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
         "0.1.0-experimental"
     );
     let handshake_req = oris_runtime::agent_contract::A2aHandshakeRequest {

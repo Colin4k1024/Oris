@@ -102,6 +102,113 @@ pub struct A2aTaskLifecycleEvent {
     pub error: Option<A2aErrorEnvelope>,
 }
 
+pub const A2A_TASK_SESSION_PROTOCOL_VERSION: &str = A2A_PROTOCOL_VERSION;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum A2aTaskSessionState {
+    Started,
+    Dispatched,
+    InProgress,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionStartRequest {
+    pub sender_id: String,
+    pub protocol_version: String,
+    pub task_id: String,
+    pub task_summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionDispatchRequest {
+    pub sender_id: String,
+    pub protocol_version: String,
+    pub dispatch_id: String,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionProgressRequest {
+    pub sender_id: String,
+    pub protocol_version: String,
+    pub progress_pct: u8,
+    pub summary: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionCompletionRequest {
+    pub sender_id: String,
+    pub protocol_version: String,
+    pub terminal_state: A2aTaskLifecycleState,
+    pub summary: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub failure_code: Option<A2aErrorCode>,
+    pub failure_details: Option<String>,
+    pub used_capsule: bool,
+    pub capsule_id: Option<String>,
+    pub reasoning_steps_avoided: u64,
+    pub fallback_reason: Option<String>,
+    pub task_class_id: String,
+    pub task_label: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionProgressItem {
+    pub progress_pct: u8,
+    pub summary: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionAck {
+    pub session_id: String,
+    pub task_id: String,
+    pub state: A2aTaskSessionState,
+    pub summary: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionResult {
+    pub terminal_state: A2aTaskLifecycleState,
+    pub summary: String,
+    pub retryable: bool,
+    pub retry_after_ms: Option<u64>,
+    pub failure_code: Option<A2aErrorCode>,
+    pub failure_details: Option<String>,
+    pub replay_feedback: ReplayFeedback,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionCompletionResponse {
+    pub ack: A2aTaskSessionAck,
+    pub result: A2aTaskSessionResult,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A2aTaskSessionSnapshot {
+    pub session_id: String,
+    pub sender_id: String,
+    pub task_id: String,
+    pub protocol_version: String,
+    pub state: A2aTaskSessionState,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub dispatch_ids: Vec<String>,
+    pub progress: Vec<A2aTaskSessionProgressItem>,
+    pub result: Option<A2aTaskSessionResult>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum A2aErrorCode {
     UnsupportedProtocol,

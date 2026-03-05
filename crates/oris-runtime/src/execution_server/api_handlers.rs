@@ -28,7 +28,11 @@ use tokio::sync::RwLock;
 ))]
 use crate::agent_contract::{
     A2aCapability, A2aErrorCode, A2aErrorEnvelope, A2aHandshakeRequest, A2aHandshakeResponse,
-    A2aProtocol, A2aTaskLifecycleEvent, A2aTaskLifecycleState,
+    A2aProtocol, A2aTaskLifecycleEvent, A2aTaskLifecycleState, A2aTaskSessionAck,
+    A2aTaskSessionCompletionRequest, A2aTaskSessionCompletionResponse,
+    A2aTaskSessionDispatchRequest, A2aTaskSessionProgressItem, A2aTaskSessionProgressRequest,
+    A2aTaskSessionResult, A2aTaskSessionSnapshot, A2aTaskSessionStartRequest, A2aTaskSessionState,
+    ReplayFeedback, ReplayPlannerDirective, A2A_TASK_SESSION_PROTOCOL_VERSION,
 };
 #[cfg(feature = "evolution-network-experimental")]
 use crate::evolution::{
@@ -226,6 +230,16 @@ const A2A_TASK_EVENT_HISTORY_LIMIT: usize = 256;
 pub struct A2aTaskLifecycleResponse {
     task_id: String,
     events: Vec<A2aTaskLifecycleEvent>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aTaskSessionLookupQuery {
+    sender_id: String,
+    protocol_version: String,
 }
 
 const METRIC_BUCKETS_MS: [f64; 9] = [1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
@@ -585,6 +599,11 @@ pub struct ExecutionApiState {
         feature = "evolution-network-experimental"
     ))]
     a2a_task_lifecycle_events: Arc<RwLock<HashMap<String, Vec<A2aTaskLifecycleEvent>>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    a2a_task_sessions: Arc<RwLock<HashMap<String, A2aTaskSessionSnapshot>>>,
     pub auth: ExecutionApiAuthConfig,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
@@ -620,6 +639,11 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             a2a_task_lifecycle_events: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            a2a_task_sessions: Arc::new(RwLock::new(HashMap::new())),
             auth: ExecutionApiAuthConfig::default(),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
@@ -825,6 +849,26 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     #[cfg(feature = "agent-contract-experimental")]
     let router = router
         .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
+        .route(
+            "/v1/evolution/a2a/sessions/start",
+            post(evolution_a2a_session_start),
+        )
+        .route(
+            "/v1/evolution/a2a/sessions/:session_id/dispatch",
+            post(evolution_a2a_session_dispatch),
+        )
+        .route(
+            "/v1/evolution/a2a/sessions/:session_id/progress",
+            post(evolution_a2a_session_progress),
+        )
+        .route(
+            "/v1/evolution/a2a/sessions/:session_id/complete",
+            post(evolution_a2a_session_complete),
+        )
+        .route(
+            "/v1/evolution/a2a/sessions/:session_id",
+            get(evolution_a2a_session_snapshot),
+        )
         .route(
             "/v1/evolution/a2a/tasks/:task_id/lifecycle",
             get(evolution_a2a_task_lifecycle),
@@ -1687,6 +1731,79 @@ async fn record_task_cancelled(state: &ExecutionApiState, task_id: &str, summary
     let _ = (state, task_id, summary);
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn ensure_task_session_protocol_version(version: &str, rid: &str) -> Result<(), ApiError> {
+    if version == A2A_TASK_SESSION_PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(
+        ApiError::bad_request("incompatible a2a task session protocol version")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "expected": A2A_TASK_SESSION_PROTOCOL_VERSION,
+                "actual": version
+            })),
+    )
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn derive_replay_feedback(req: &A2aTaskSessionCompletionRequest) -> ReplayFeedback {
+    ReplayFeedback {
+        used_capsule: req.used_capsule,
+        capsule_id: req.capsule_id.clone(),
+        planner_directive: if req.used_capsule {
+            ReplayPlannerDirective::SkipPlanner
+        } else {
+            ReplayPlannerDirective::PlanFallback
+        },
+        reasoning_steps_avoided: req.reasoning_steps_avoided,
+        fallback_reason: req.fallback_reason.clone(),
+        task_class_id: req.task_class_id.clone(),
+        task_label: req.task_label.clone(),
+        summary: req.summary.clone(),
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn terminal_session_state(terminal_state: &A2aTaskLifecycleState) -> Option<A2aTaskSessionState> {
+    match terminal_state {
+        A2aTaskLifecycleState::Succeeded => Some(A2aTaskSessionState::Completed),
+        A2aTaskLifecycleState::Failed => Some(A2aTaskSessionState::Failed),
+        A2aTaskLifecycleState::Cancelled => Some(A2aTaskSessionState::Cancelled),
+        A2aTaskLifecycleState::Queued | A2aTaskLifecycleState::Running => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn task_session_ack(
+    session: &A2aTaskSessionSnapshot,
+    summary: &str,
+    retryable: bool,
+    retry_after_ms: Option<u64>,
+) -> A2aTaskSessionAck {
+    A2aTaskSessionAck {
+        session_id: session.session_id.clone(),
+        task_id: session.task_id.clone(),
+        state: session.state.clone(),
+        summary: summary.to_string(),
+        retryable,
+        retry_after_ms,
+        updated_at_ms: session.updated_at_ms,
+    }
+}
+
 #[cfg(feature = "evolution-network-experimental")]
 pub async fn evolution_publish(
     State(state): State<ExecutionApiState>,
@@ -2044,6 +2161,349 @@ pub async fn evolution_a2a_task_lifecycle(
         meta: ApiMeta::ok(),
         request_id: rid,
         data: A2aTaskLifecycleResponse { task_id, events },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_session_start(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aTaskSessionStartRequest>,
+) -> Result<Json<ApiEnvelope<A2aTaskSessionAck>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_thread_id(&req.task_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    ensure_task_session_protocol_version(&req.protocol_version, &rid)?;
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::Coordination,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let now = lifecycle_timestamp_ms(Utc::now());
+    let session_id = format!("a2a-session-{}", uuid::Uuid::new_v4());
+    let session = A2aTaskSessionSnapshot {
+        session_id: session_id.clone(),
+        sender_id: req.sender_id.clone(),
+        task_id: req.task_id.clone(),
+        protocol_version: req.protocol_version,
+        state: A2aTaskSessionState::Started,
+        created_at_ms: now,
+        updated_at_ms: now,
+        dispatch_ids: Vec::new(),
+        progress: Vec::new(),
+        result: None,
+    };
+    state
+        .a2a_task_sessions
+        .write()
+        .await
+        .insert(session_id, session.clone());
+
+    record_task_queued(
+        &state,
+        &req.task_id,
+        "remote a2a task session started and queued",
+    )
+    .await;
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: task_session_ack(&session, &req.task_summary, false, None),
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_session_dispatch(
+    State(state): State<ExecutionApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<A2aTaskSessionDispatchRequest>,
+) -> Result<Json<ApiEnvelope<A2aTaskSessionAck>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    ensure_task_session_protocol_version(&req.protocol_version, &rid)?;
+    if req.dispatch_id.trim().is_empty() {
+        return Err(ApiError::bad_request("dispatch_id must not be empty").with_request_id(rid));
+    }
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::SupervisedDevloop,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let now = lifecycle_timestamp_ms(Utc::now());
+    let (task_id, ack) = {
+        let mut sessions = state.a2a_task_sessions.write().await;
+        let session = sessions.get_mut(&session_id).ok_or_else(|| {
+            ApiError::not_found(format!("a2a task session not found: {session_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if session.sender_id != req.sender_id {
+            return Err(ApiError::forbidden("a2a task session sender mismatch")
+                .with_request_id(rid.clone())
+                .with_details(serde_json::json!({
+                    "session_id": session_id,
+                    "expected_sender_id": session.sender_id,
+                    "actual_sender_id": req.sender_id
+                })));
+        }
+        session.state = A2aTaskSessionState::Dispatched;
+        session.updated_at_ms = now;
+        if !session.dispatch_ids.contains(&req.dispatch_id) {
+            session.dispatch_ids.push(req.dispatch_id.clone());
+        }
+        (
+            session.task_id.clone(),
+            task_session_ack(session, &req.summary, false, None),
+        )
+    };
+
+    let dispatch_summary = format!("remote dispatch accepted: {}", req.dispatch_id);
+    record_task_running(&state, &task_id, dispatch_summary.as_str()).await;
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: ack,
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_session_progress(
+    State(state): State<ExecutionApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<A2aTaskSessionProgressRequest>,
+) -> Result<Json<ApiEnvelope<A2aTaskSessionAck>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    ensure_task_session_protocol_version(&req.protocol_version, &rid)?;
+    if req.progress_pct > 100 {
+        return Err(ApiError::bad_request("progress_pct must be <= 100").with_request_id(rid));
+    }
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::SupervisedDevloop,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let now = lifecycle_timestamp_ms(Utc::now());
+    let (task_id, ack) = {
+        let mut sessions = state.a2a_task_sessions.write().await;
+        let session = sessions.get_mut(&session_id).ok_or_else(|| {
+            ApiError::not_found(format!("a2a task session not found: {session_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if session.sender_id != req.sender_id {
+            return Err(ApiError::forbidden("a2a task session sender mismatch")
+                .with_request_id(rid.clone())
+                .with_details(serde_json::json!({
+                    "session_id": session_id,
+                    "expected_sender_id": session.sender_id,
+                    "actual_sender_id": req.sender_id
+                })));
+        }
+        session.state = A2aTaskSessionState::InProgress;
+        session.updated_at_ms = now;
+        session.progress.push(A2aTaskSessionProgressItem {
+            progress_pct: req.progress_pct,
+            summary: req.summary.clone(),
+            retryable: req.retryable,
+            retry_after_ms: req.retry_after_ms,
+            updated_at_ms: now,
+        });
+        (
+            session.task_id.clone(),
+            task_session_ack(session, &req.summary, req.retryable, req.retry_after_ms),
+        )
+    };
+
+    let progress_summary = format!(
+        "remote progress update: {}% {}",
+        req.progress_pct, req.summary
+    );
+    record_task_running(&state, &task_id, progress_summary.as_str()).await;
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: ack,
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_session_complete(
+    State(state): State<ExecutionApiState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<A2aTaskSessionCompletionRequest>,
+) -> Result<Json<ApiEnvelope<A2aTaskSessionCompletionResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    ensure_task_session_protocol_version(&req.protocol_version, &rid)?;
+    let session_state = terminal_session_state(&req.terminal_state).ok_or_else(|| {
+        ApiError::bad_request("terminal_state must be one of: Succeeded|Failed|Cancelled")
+            .with_request_id(rid.clone())
+    })?;
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::SupervisedDevloop,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+    ensure_a2a_capability(
+        &state,
+        &req.sender_id,
+        A2aCapability::ReplayFeedback,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let replay_feedback = derive_replay_feedback(&req);
+    let now = lifecycle_timestamp_ms(Utc::now());
+    let (task_id, completion_response) = {
+        let mut sessions = state.a2a_task_sessions.write().await;
+        let session = sessions.get_mut(&session_id).ok_or_else(|| {
+            ApiError::not_found(format!("a2a task session not found: {session_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if session.sender_id != req.sender_id {
+            return Err(ApiError::forbidden("a2a task session sender mismatch")
+                .with_request_id(rid.clone())
+                .with_details(serde_json::json!({
+                    "session_id": session_id,
+                    "expected_sender_id": session.sender_id,
+                    "actual_sender_id": req.sender_id
+                })));
+        }
+
+        session.state = session_state;
+        session.updated_at_ms = now;
+        let result = A2aTaskSessionResult {
+            terminal_state: req.terminal_state.clone(),
+            summary: req.summary.clone(),
+            retryable: req.retryable,
+            retry_after_ms: req.retry_after_ms,
+            failure_code: req.failure_code.clone(),
+            failure_details: req.failure_details.clone(),
+            replay_feedback,
+        };
+        session.result = Some(result.clone());
+        let ack = task_session_ack(session, &req.summary, req.retryable, req.retry_after_ms);
+        (
+            session.task_id.clone(),
+            A2aTaskSessionCompletionResponse { ack, result },
+        )
+    };
+
+    match req.terminal_state {
+        A2aTaskLifecycleState::Succeeded => {
+            record_task_succeeded(&state, &task_id, "remote a2a task session succeeded").await;
+        }
+        A2aTaskLifecycleState::Failed => {
+            let details = req
+                .failure_details
+                .clone()
+                .or_else(|| Some(req.summary.clone()));
+            record_task_failed(&state, &task_id, "remote a2a task session failed", details).await;
+        }
+        A2aTaskLifecycleState::Cancelled => {
+            record_task_cancelled(&state, &task_id, "remote a2a task session cancelled").await;
+        }
+        A2aTaskLifecycleState::Queued | A2aTaskLifecycleState::Running => {
+            // Handled by terminal state validation.
+        }
+    }
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: completion_response,
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_session_snapshot(
+    State(state): State<ExecutionApiState>,
+    Path(session_id): Path<String>,
+    Query(q): Query<A2aTaskSessionLookupQuery>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<A2aTaskSessionSnapshot>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_sender_id(&q.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    ensure_task_session_protocol_version(&q.protocol_version, &rid)?;
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_capability(
+        &state,
+        &q.sender_id,
+        A2aCapability::Coordination,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let snapshot = state
+        .a2a_task_sessions
+        .read()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::not_found(format!("a2a task session not found: {session_id}"))
+                .with_request_id(rid.clone())
+        })?;
+    if snapshot.sender_id != q.sender_id {
+        return Err(ApiError::forbidden("a2a task session sender mismatch")
+            .with_request_id(rid)
+            .with_details(serde_json::json!({
+                "session_id": session_id,
+                "expected_sender_id": snapshot.sender_id,
+                "actual_sender_id": q.sender_id
+            })));
+    }
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: snapshot,
     }))
 }
 
@@ -4562,6 +5022,282 @@ mod tests {
             .map(|event| event["state"].as_str().expect("lifecycle state"))
             .collect();
         assert_eq!(states, vec!["Running", "Succeeded"]);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_remote_task_session_happy_path_is_executable() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake_json = handshake_agent_with_caps(
+            &router,
+            "remote-session-agent",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+        )
+        .await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
+
+        let start_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/sessions/start")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "remote-session-agent",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "task_id": "remote-a2a-task-1",
+                    "task_summary": "remote task session start"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let start_resp = router.clone().oneshot(start_req).await.unwrap();
+        assert_eq!(start_resp.status(), StatusCode::OK);
+        let start_body = axum::body::to_bytes(start_resp.into_body(), usize::MAX)
+            .await
+            .expect("start body");
+        let start_json: serde_json::Value =
+            serde_json::from_slice(&start_body).expect("start json");
+        let session_id = start_json["data"]["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        assert_eq!(start_json["data"]["state"], "Started");
+
+        let dispatch_req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/evolution/a2a/sessions/{session_id}/dispatch"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "remote-session-agent",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "dispatch_id": "dispatch-1",
+                    "summary": "remote dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let dispatch_resp = router.clone().oneshot(dispatch_req).await.unwrap();
+        assert_eq!(dispatch_resp.status(), StatusCode::OK);
+
+        let progress_req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/evolution/a2a/sessions/{session_id}/progress"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "remote-session-agent",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "progress_pct": 60,
+                    "summary": "remote execution in progress",
+                    "retryable": false,
+                    "retry_after_ms": null
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let progress_resp = router.clone().oneshot(progress_req).await.unwrap();
+        assert_eq!(progress_resp.status(), StatusCode::OK);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/evolution/a2a/sessions/{session_id}/complete"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "remote-session-agent",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "terminal_state": "Succeeded",
+                    "summary": "remote execution completed",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "failure_code": null,
+                    "failure_details": null,
+                    "used_capsule": true,
+                    "capsule_id": "capsule-remote-1",
+                    "reasoning_steps_avoided": 7,
+                    "fallback_reason": null,
+                    "task_class_id": "build.fix",
+                    "task_label": "Fix build remotely"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["ack"]["state"], "Completed");
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["used_capsule"],
+            true
+        );
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["planner_directive"],
+            "SkipPlanner"
+        );
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["reasoning_steps_avoided"],
+            7
+        );
+
+        let snapshot_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v1/evolution/a2a/sessions/{session_id}?sender_id=remote-session-agent&protocol_version={}",
+                crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let snapshot_resp = router.clone().oneshot(snapshot_req).await.unwrap();
+        assert_eq!(snapshot_resp.status(), StatusCode::OK);
+        let snapshot_body = axum::body::to_bytes(snapshot_resp.into_body(), usize::MAX)
+            .await
+            .expect("snapshot body");
+        let snapshot_json: serde_json::Value =
+            serde_json::from_slice(&snapshot_body).expect("snapshot json");
+        assert_eq!(snapshot_json["data"]["state"], "Completed");
+        assert_eq!(
+            snapshot_json["data"]["dispatch_ids"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            snapshot_json["data"]["progress"].as_array().map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_remote_task_session_failure_semantics_are_deterministic() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake_json = handshake_agent_with_caps(
+            &router,
+            "remote-failure-agent",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+        )
+        .await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
+
+        let start_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/sessions/start")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "remote-failure-agent",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "task_id": "remote-a2a-task-failed",
+                    "task_summary": "remote task session start"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let start_resp = router.clone().oneshot(start_req).await.unwrap();
+        assert_eq!(start_resp.status(), StatusCode::OK);
+        let start_body = axum::body::to_bytes(start_resp.into_body(), usize::MAX)
+            .await
+            .expect("start body");
+        let start_json: serde_json::Value =
+            serde_json::from_slice(&start_body).expect("start json");
+        let session_id = start_json["data"]["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/v1/evolution/a2a/sessions/{session_id}/complete"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "remote-failure-agent",
+                    "protocol_version": crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION,
+                    "terminal_state": "Failed",
+                    "summary": "remote execution failed",
+                    "retryable": true,
+                    "retry_after_ms": 120000,
+                    "failure_code": "Timeout",
+                    "failure_details": "remote worker timeout",
+                    "used_capsule": false,
+                    "capsule_id": null,
+                    "reasoning_steps_avoided": 0,
+                    "fallback_reason": "remote timeout fallback",
+                    "task_class_id": "build.fix",
+                    "task_label": "Fix build remotely"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["ack"]["state"], "Failed");
+        assert_eq!(complete_json["data"]["result"]["retryable"], true);
+        assert_eq!(complete_json["data"]["result"]["retry_after_ms"], 120000);
+        assert_eq!(complete_json["data"]["result"]["failure_code"], "Timeout");
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["planner_directive"],
+            "PlanFallback"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_remote_task_session_rejects_incompatible_protocol_version() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake_json =
+            handshake_agent_with_caps(&router, "remote-bad-protocol", &["Coordination"]).await;
+        assert_eq!(handshake_json["data"]["accepted"], true);
+
+        let start_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/a2a/sessions/start")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "remote-bad-protocol",
+                    "protocol_version": "0.0.1",
+                    "task_id": "remote-a2a-task-bad-protocol",
+                    "task_summary": "bad protocol"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let start_resp = router.clone().oneshot(start_req).await.unwrap();
+        assert_eq!(start_resp.status(), StatusCode::BAD_REQUEST);
+        let start_body = axum::body::to_bytes(start_resp.into_body(), usize::MAX)
+            .await
+            .expect("bad protocol body");
+        let start_json: serde_json::Value =
+            serde_json::from_slice(&start_body).expect("bad protocol json");
+        assert_eq!(
+            start_json["error"]["message"],
+            "incompatible a2a task session protocol version"
+        );
+        assert_eq!(
+            start_json["error"]["details"]["expected"],
+            crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
+        );
+        assert_eq!(start_json["error"]["details"]["actual"], "0.0.1");
     }
 
     #[tokio::test]

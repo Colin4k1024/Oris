@@ -28,11 +28,34 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
 - execution-server records A2A task lifecycle events (`Queued`, `Running`, `Succeeded`, `Failed`, `Cancelled`) for runtime task execution stages
 - lifecycle events are retrievable by `task_id` through `GET /v1/evolution/a2a/tasks/:task_id/lifecycle`
 - replay failures and worker supervised acknowledgements are mapped into lifecycle terminal transitions
+- execution-server exposes remote A2A task session routes:
+  - `POST /v1/evolution/a2a/sessions/start`
+  - `POST /v1/evolution/a2a/sessions/:session_id/dispatch`
+  - `POST /v1/evolution/a2a/sessions/:session_id/progress`
+  - `POST /v1/evolution/a2a/sessions/:session_id/complete`
+  - `GET /v1/evolution/a2a/sessions/:session_id?sender_id=<id>&protocol_version=<version>`
+
+Remote task session protocol contract (experimental):
+
+- start (mandatory): `sender_id`, `protocol_version`, `task_id`, `task_summary`
+- dispatch (mandatory): `sender_id`, `protocol_version`, `dispatch_id`, `summary`
+- progress (mandatory): `sender_id`, `protocol_version`, `progress_pct`, `summary`, `retryable`
+- progress (optional): `retry_after_ms`
+- complete (mandatory): `sender_id`, `protocol_version`, `terminal_state`, `summary`, `retryable`, replay feedback basis fields (`used_capsule`, `reasoning_steps_avoided`, `task_class_id`, `task_label`)
+- complete (optional): `retry_after_ms`, `failure_code`, `failure_details`, `capsule_id`, `fallback_reason`
+
+Remote task session state machine:
+
+`Started -> Dispatched -> InProgress (repeatable) -> Completed | Failed | Cancelled`
+
+Protocol compatibility:
+
+- runtime requires `protocol_version == 0.1.0-experimental`
+- incompatible versions fail with deterministic `400` error message: `incompatible a2a task session protocol version`
 
 Not yet implemented in the checked-in code:
 
 - cross-node negotiated session propagation
-- an end-to-end remote agent task session protocol (beyond handshake + gated evo publish/fetch/revoke routes)
 - agent-managed execution privileges
 
 ## Related Documents
