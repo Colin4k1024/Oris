@@ -319,6 +319,17 @@ Run the orchestrator validation gate locally:
 bash scripts/run_orchestrator_checks.sh
 ```
 
+Run the orchestrator A2A-to-GitHub closed-loop example:
+
+```bash
+RUNTIME_BASE_URL=http://127.0.0.1:8080 \
+GITHUB_OWNER=Colin4k1024 \
+GITHUB_REPO=Oris \
+GITHUB_TOKEN=ghp_xxx \
+ISSUE_ID=issue-123 \
+cargo run -p oris-orchestrator --example http_closed_loop
+```
+
 What exists today: proposal-driven capture, sandboxed validation, JSONL evolution storage, and replay-first reuse.
 Use `replay_or_fallback_for_run` when you want an explicit replay audit id; it records `CapsuleReused.replay_run_id` while preserving the capsule's original `run_id`. `replay_or_fallback` still works and auto-generates one.
 What is still design-target only: always-on autonomous dev loops, issue intake, and automatic branch/release orchestration.
