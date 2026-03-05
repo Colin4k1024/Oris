@@ -665,6 +665,12 @@ async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
     assert_eq!(replay_feedback.fallback_reason, None);
     assert_eq!(replay_feedback.task_class_id, cold_feedback.task_class_id);
     assert_eq!(replay_feedback.task_label, "missing readme");
+
+    let metrics = evo.metrics_snapshot().unwrap();
+    assert!(
+        metrics.replay_reasoning_avoided_total >= 1,
+        "replay utilization and reasoning avoided must be visible in metrics"
+    );
 }
 
 #[tokio::test]

@@ -190,7 +190,7 @@ Definition of done:
 
 - stale or environment-diverged assets lose priority automatically before they become harmful (regression: `stale_confidence_forces_revalidation_before_replay`, `env_divergence_reduces_replay_eligibility`)
 
-### Stage 4. Close the Agent Feedback Loop
+### Stage 4. Close the Agent Feedback Loop (Shipped)
 
 Goal:
 
@@ -205,7 +205,7 @@ Focus:
 
 Definition of done:
 
-- replay measurably reduces agent reasoning and implementation latency on repeated work
+- replay measurably reduces agent reasoning and implementation latency on repeated work (regression: `replay_feedback_surfaces_planner_hints_and_reasoning_savings`; example: evo_oris_repo consumes `replay_feedback_for_agent`)
 
 ### Stage 5. Move Toward Autonomous DEVLOOP
 
