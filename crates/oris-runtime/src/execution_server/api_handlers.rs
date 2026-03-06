@@ -416,6 +416,7 @@ where
             return Err(ApiError::bad_request("unexpected gep-a2a message_type")
                 .with_request_id(rid.to_string())
                 .with_details(serde_json::json!({
+                    "a2a_error_code": A2aErrorCode::ValidationFailed,
                     "expected_message_type": expected_type,
                     "actual_message_type": envelope.message_type
                 })));
@@ -9264,6 +9265,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wrong_message_type_resp.status(), StatusCode::BAD_REQUEST);
+        let wrong_message_type_body =
+            axum::body::to_bytes(wrong_message_type_resp.into_body(), usize::MAX)
+                .await
+                .expect("wrong message type body");
+        let wrong_message_type_json: serde_json::Value =
+            serde_json::from_slice(&wrong_message_type_body).expect("wrong message type json");
+        assert_eq!(
+            wrong_message_type_json["error"]["details"]["a2a_error_code"],
+            serde_json::json!("ValidationFailed")
+        );
+        assert_eq!(
+            wrong_message_type_json["error"]["details"]["expected_message_type"],
+            serde_json::json!("fetch")
+        );
+        assert_eq!(
+            wrong_message_type_json["error"]["details"]["actual_message_type"],
+            serde_json::json!("hello")
+        );
     }
 
     #[cfg(not(feature = "evolution-network-experimental"))]
