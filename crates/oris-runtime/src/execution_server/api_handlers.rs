@@ -179,6 +179,8 @@ pub struct ExecutionApiAuthConfig {
     pub bearer_role: ApiRole,
     pub api_key_hash: Option<String>,
     pub api_key_role: ApiRole,
+    pub compat_node_secret_hash: Option<String>,
+    pub compat_node_secret_role: ApiRole,
     pub keyed_api_keys: HashMap<String, StaticApiKeyConfig>,
 }
 
@@ -1554,6 +1556,8 @@ impl ExecutionApiAuthConfig {
             bearer_role: ApiRole::Admin,
             api_key_hash: Self::normalize_hashed_secret(api_key),
             api_key_role: ApiRole::Admin,
+            compat_node_secret_hash: None,
+            compat_node_secret_role: ApiRole::Operator,
             keyed_api_keys: HashMap::new(),
         }
     }
@@ -1577,6 +1581,7 @@ impl ExecutionApiAuthConfig {
     fn is_enabled(&self) -> bool {
         self.bearer_token.is_some()
             || self.api_key_hash.is_some()
+            || self.compat_node_secret_hash.is_some()
             || !self.keyed_api_keys.is_empty()
     }
 }
@@ -1722,6 +1727,24 @@ impl ExecutionApiState {
     ) -> Self {
         self.auth.bearer_token = ExecutionApiAuthConfig::normalize_secret(Some(token.into()));
         self.auth.bearer_role = role;
+        self
+    }
+
+    pub fn with_compat_node_secret(mut self, secret: impl Into<String>) -> Self {
+        self.auth.compat_node_secret_hash =
+            ExecutionApiAuthConfig::normalize_hashed_secret(Some(secret.into()));
+        self.auth.compat_node_secret_role = ApiRole::Operator;
+        self
+    }
+
+    pub fn with_compat_node_secret_with_role(
+        mut self,
+        secret: impl Into<String>,
+        role: ApiRole,
+    ) -> Self {
+        self.auth.compat_node_secret_hash =
+            ExecutionApiAuthConfig::normalize_hashed_secret(Some(secret.into()));
+        self.auth.compat_node_secret_role = role;
         self
     }
 
@@ -2263,6 +2286,22 @@ fn api_key_id_from_headers(headers: &HeaderMap) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
+fn compat_node_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-node-id")
+        .or_else(|| headers.get("x-sender-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+fn is_a2a_compat_path(path: &str) -> bool {
+    path.starts_with("/a2a/")
+        || path.starts_with("/evolution/a2a/")
+        || path.starts_with("/v1/evolution/a2a/")
+}
+
 fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Option<AuthContext> {
     if auth
         .bearer_token
@@ -2275,6 +2314,20 @@ fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Op
             actor_type: "bearer".to_string(),
             actor_id: None,
             role: auth.bearer_role.clone(),
+        });
+    }
+
+    if auth
+        .compat_node_secret_hash
+        .as_deref()
+        .zip(bearer_token_from_headers(headers))
+        .map(|(expected_hash, actual)| expected_hash == ExecutionApiAuthConfig::secret_hash(actual))
+        .unwrap_or(false)
+    {
+        return Some(AuthContext {
+            actor_type: "node_secret".to_string(),
+            actor_id: compat_node_id_from_headers(headers),
+            role: auth.compat_node_secret_role.clone(),
         });
     }
 
@@ -2398,6 +2451,51 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
         .collect::<Vec<_>>();
     if seg.is_empty() {
         return None;
+    }
+    if seg[0] == "a2a" {
+        return match seg.as_slice() {
+            ["a2a", "hello"] => Some(AuditTarget {
+                action: "a2a.compat.hello",
+                resource_type: "sender",
+                resource_id: None,
+            }),
+            ["a2a", "fetch"] => Some(AuditTarget {
+                action: "a2a.compat.fetch",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "tasks", "distribute"] => Some(AuditTarget {
+                action: "a2a.compat.distribute",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "tasks", "claim"] | ["a2a", "task", "claim"] => Some(AuditTarget {
+                action: "a2a.compat.claim",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "tasks", "report"] | ["a2a", "task", "complete"] => Some(AuditTarget {
+                action: "a2a.compat.report",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "work", "claim"] => Some(AuditTarget {
+                action: "a2a.compat.work.claim",
+                resource_type: "assignment",
+                resource_id: None,
+            }),
+            ["a2a", "work", "complete"] => Some(AuditTarget {
+                action: "a2a.compat.work.complete",
+                resource_type: "assignment",
+                resource_id: None,
+            }),
+            ["a2a", "heartbeat"] => Some(AuditTarget {
+                action: "a2a.compat.heartbeat",
+                resource_type: "worker",
+                resource_id: None,
+            }),
+            _ => None,
+        };
     }
     if seg[0] == "evolution" {
         return match seg.as_slice() {
@@ -2603,12 +2701,14 @@ fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> b
     let is_audit = path.starts_with("/v1/audit");
     let is_attempts = path.starts_with("/v1/attempts");
     let is_dlq = path.starts_with("/v1/dlq");
+    let is_a2a_compat = is_a2a_compat_path(path);
     match role {
         ApiRole::Operator => {
             is_jobs_or_interrupts
                 || (is_audit && *method == axum::http::Method::GET)
                 || (is_attempts && *method == axum::http::Method::GET)
                 || is_dlq
+                || is_a2a_compat
         }
         ApiRole::Worker => {
             // Worker role can only call worker control/data-plane endpoints.
@@ -2622,6 +2722,9 @@ fn supported_auth_methods(state: &ExecutionApiState) -> Vec<&'static str> {
     let mut methods = Vec::new();
     if state.auth.bearer_token.is_some() {
         methods.push("bearer");
+    }
+    if state.auth.compat_node_secret_hash.is_some() {
+        methods.push("bearer(node_secret)");
     }
     if state.auth.api_key_hash.is_some() {
         methods.push("x-api-key");
@@ -2641,13 +2744,22 @@ async fn auth_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
-    let auth_enabled = state.auth.is_enabled() || has_runtime_repo_api_keys(&state);
-    if !auth_enabled {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let has_runtime_repo_keys = has_runtime_repo_api_keys(&state);
+    let compat_node_secret_only = state.auth.compat_node_secret_hash.is_some()
+        && state.auth.bearer_token.is_none()
+        && state.auth.api_key_hash.is_none()
+        && state.auth.keyed_api_keys.is_empty()
+        && !has_runtime_repo_keys;
+    if compat_node_secret_only && !is_a2a_compat_path(&path) {
         return next.run(request).await;
     }
 
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    let auth_enabled = state.auth.is_enabled() || has_runtime_repo_keys;
+    if !auth_enabled {
+        return next.run(request).await;
+    }
 
     let auth = resolve_auth_context(&headers, &state);
     let Some(auth) = auth else {
@@ -10660,6 +10772,149 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn auth_node_secret_compat_mode_only_applies_to_a2a_paths() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await)
+                .with_compat_node_secret("node-secret-1"),
+        );
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "node-secret-auth-scope-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+
+        let heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-secret-auth-scope-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_resp = router.clone().oneshot(heartbeat_req).await.unwrap();
+        assert_eq!(heartbeat_resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn auth_node_secret_compat_mode_authenticates_and_audits_denied_calls() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_compat_node_secret_with_role("node-secret-1", ApiRole::Operator);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("authorization", "Bearer node-secret-1")
+            .header("x-request-id", "req-node-secret-hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "node-secret-agent",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback", "EvolutionFetch"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+
+        let heartbeat_ok_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("authorization", "Bearer node-secret-1")
+            .header("x-request-id", "req-node-secret-ok")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-secret-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_ok_resp = router.clone().oneshot(heartbeat_ok_req).await.unwrap();
+        assert_eq!(heartbeat_ok_resp.status(), StatusCode::OK);
+
+        let heartbeat_denied_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("authorization", "Bearer wrong-node-secret")
+            .header("x-request-id", "req-node-secret-denied")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-secret-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_denied_resp = router.clone().oneshot(heartbeat_denied_req).await.unwrap();
+        assert_eq!(heartbeat_denied_resp.status(), StatusCode::UNAUTHORIZED);
+        let denied_body = axum::body::to_bytes(heartbeat_denied_resp.into_body(), usize::MAX)
+            .await
+            .expect("denied body");
+        let denied_json: serde_json::Value =
+            serde_json::from_slice(&denied_body).expect("denied json");
+        let supported_auth = denied_json["error"]["details"]["supported_auth"]
+            .as_array()
+            .expect("supported auth array");
+        assert!(supported_auth
+            .iter()
+            .any(|value| value.as_str() == Some("bearer(node_secret)")));
+
+        let logs = repo.list_audit_logs(50).expect("list audit logs");
+        let denied_log = logs
+            .iter()
+            .find(|log| {
+                log.request_id == "req-node-secret-denied"
+                    && log.action == "a2a.compat.heartbeat"
+                    && log.result == "error"
+            })
+            .expect("denied heartbeat audit log");
+        let denied_details: serde_json::Value = serde_json::from_str(
+            denied_log
+                .details_json
+                .as_deref()
+                .expect("denied heartbeat details json"),
+        )
+        .expect("parse denied heartbeat details");
+        assert_eq!(denied_details["path"], "/a2a/heartbeat");
+        assert_eq!(denied_details["status_code"], 401);
     }
 
     #[tokio::test]
