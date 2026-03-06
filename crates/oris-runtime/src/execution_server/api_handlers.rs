@@ -3699,6 +3699,119 @@ fn derive_replay_feedback(req: &A2aTaskSessionCompletionRequest) -> ReplayFeedba
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+fn normalized_experience_field(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn append_unique_signal(signals: &mut Vec<String>, value: &str) {
+    if let Some(normalized) = normalized_experience_field(value) {
+        if !signals.iter().any(|existing| existing == &normalized) {
+            signals.push(normalized);
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn a2a_experience_gene_id(sender_id: &str, task_id: &str, feedback: &ReplayFeedback) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        sender_id,
+        task_id,
+        feedback.task_class_id.as_str(),
+        feedback.task_label.as_str(),
+        feedback.summary.as_str(),
+    ] {
+        hasher.update(part.trim().as_bytes());
+        hasher.update(b"|");
+    }
+    if let Some(capsule_id) = feedback.capsule_id.as_deref() {
+        hasher.update(capsule_id.trim().as_bytes());
+    }
+    format!("a2a-gene-{:x}", hasher.finalize())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn persist_a2a_reported_experience(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    task_id: &str,
+    feedback: &ReplayFeedback,
+    rid: &str,
+) -> Result<(), ApiError> {
+    if !feedback.used_capsule {
+        return Ok(());
+    }
+    if feedback.task_class_id.trim().is_empty() {
+        return Ok(());
+    }
+
+    let mut signals = Vec::new();
+    append_unique_signal(&mut signals, &feedback.task_class_id);
+    append_unique_signal(&mut signals, &feedback.task_label);
+    append_unique_signal(&mut signals, task_id);
+    if signals.is_empty() {
+        signals.push("a2a".into());
+    }
+
+    let mut strategy = vec![
+        format!("reported_by={}", sender_id.trim()),
+        format!("task_class={}", feedback.task_class_id.trim()),
+        format!("task_label={}", feedback.task_label.trim()),
+    ];
+    if let Some(capsule_id) = feedback
+        .capsule_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        strategy.push(format!("source_capsule={capsule_id}"));
+    }
+    let summary = feedback.summary.trim();
+    if !summary.is_empty() {
+        strategy.push(format!("summary={summary}"));
+    }
+    if let Some(fallback_reason) = feedback
+        .fallback_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        strategy.push(format!("fallback_reason={fallback_reason}"));
+    }
+
+    let gene_id = a2a_experience_gene_id(sender_id, task_id, feedback);
+    state
+        .evolution_node
+        .record_reported_experience(
+            sender_id.to_string(),
+            gene_id,
+            signals,
+            strategy,
+            vec!["a2a.tasks.report".into()],
+        )
+        .map_err(|err| ApiError::internal(err.to_string()).with_request_id(rid.to_string()))?;
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 fn terminal_session_state(terminal_state: &A2aTaskLifecycleState) -> Option<A2aTaskSessionState> {
     match terminal_state {
         A2aTaskLifecycleState::Succeeded => Some(A2aTaskSessionState::Completed),
@@ -5887,6 +6000,14 @@ pub async fn evolution_a2a_session_complete(
     match req.terminal_state {
         A2aTaskLifecycleState::Succeeded => {
             record_task_succeeded(&state, &task_id, "remote a2a task session succeeded").await;
+            let replay_feedback = derive_replay_feedback(&req);
+            persist_a2a_reported_experience(
+                &state,
+                &req.sender_id,
+                &task_id,
+                &replay_feedback,
+                &rid,
+            )?;
         }
         A2aTaskLifecycleState::Failed => {
             let details = req
@@ -9005,6 +9126,140 @@ mod tests {
         let snapshot_json: serde_json::Value =
             serde_json::from_slice(&snapshot_body).expect("snapshot json");
         assert_eq!(snapshot_json["data"]["state"], "Completed");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_reported_experience_is_fetchable_by_new_agent() {
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-a2a-experience-fetch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&store_root);
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_evolution_store(Arc::new(
+                crate::evolution::JsonlEvolutionStore::new(&store_root),
+            )),
+        );
+
+        let reporter_handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "experience-reporter",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(reporter_handshake["data"]["accepted"], true);
+
+        let consumer_handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "experience-consumer",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(consumer_handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "experience-reporter",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "experience-task-1",
+                    "task_summary": "capture reusable docs replay strategy",
+                    "dispatch_id": "dispatch-experience-1",
+                    "summary": "experience dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "experience-reporter",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "experience-reporter",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "experience-task-1",
+                    "status": "succeeded",
+                    "summary": "documented reliable replay recipe",
+                    "retryable": false,
+                    "used_capsule": true,
+                    "capsule_id": "experience-capsule-1",
+                    "reasoning_steps_avoided": 5,
+                    "task_class_id": "docs.rewrite",
+                    "task_label": "Docs rewrite replay"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+
+        let fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "experience-consumer",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "signals": ["docs.rewrite"],
+                    "include_tasks": false
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+        assert_eq!(fetch_resp.status(), StatusCode::OK);
+        let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("fetch body");
+        let fetch_json: serde_json::Value =
+            serde_json::from_slice(&fetch_body).expect("fetch json");
+        let assets = fetch_json["data"]["assets"]
+            .as_array()
+            .expect("assets should be an array");
+        assert!(!assets.is_empty());
+        assert!(assets.iter().any(|asset| {
+            asset["kind"] == "gene"
+                && asset["gene"]["state"] == "Promoted"
+                && asset["gene"]["signals"]
+                    .as_array()
+                    .map(|signals| signals.iter().any(|signal| signal == "docs.rewrite"))
+                    .unwrap_or(false)
+        }));
+
+        let _ = std::fs::remove_dir_all(&store_root);
     }
 
     #[cfg(all(

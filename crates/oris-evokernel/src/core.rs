@@ -1285,6 +1285,24 @@ impl EvolutionNetworkNode {
         )
     }
 
+    pub fn record_reported_experience(
+        &self,
+        sender_id: impl Into<String>,
+        gene_id: impl Into<String>,
+        signals: Vec<String>,
+        strategy: Vec<String>,
+        validation: Vec<String>,
+    ) -> Result<ImportOutcome, EvoKernelError> {
+        record_reported_experience_in_store(
+            self.store.as_ref(),
+            sender_id.into(),
+            gene_id.into(),
+            signals,
+            strategy,
+            validation,
+        )
+    }
+
     pub fn publish_local_assets(
         &self,
         sender_id: impl Into<String>,
@@ -2826,6 +2844,106 @@ fn import_remote_envelope_into_store(
 
     Ok(ImportOutcome {
         imported_asset_ids,
+        accepted: true,
+    })
+}
+
+fn record_reported_experience_in_store(
+    store: &dyn EvolutionStore,
+    sender_id: String,
+    gene_id: String,
+    signals: Vec<String>,
+    strategy: Vec<String>,
+    validation: Vec<String>,
+) -> Result<ImportOutcome, EvoKernelError> {
+    let gene_id = gene_id.trim();
+    if gene_id.is_empty() {
+        return Err(EvoKernelError::Validation(
+            "reported experience gene_id must not be empty".into(),
+        ));
+    }
+
+    let mut unique_signals = BTreeSet::new();
+    let mut normalized_signals = Vec::new();
+    for signal in signals {
+        let normalized = signal.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if unique_signals.insert(normalized.clone()) {
+            normalized_signals.push(normalized);
+        }
+    }
+    if normalized_signals.is_empty() {
+        return Err(EvoKernelError::Validation(
+            "reported experience signals must not be empty".into(),
+        ));
+    }
+
+    let mut unique_strategy = BTreeSet::new();
+    let mut normalized_strategy = Vec::new();
+    for entry in strategy {
+        let normalized = entry.trim().to_string();
+        if normalized.is_empty() {
+            continue;
+        }
+        if unique_strategy.insert(normalized.clone()) {
+            normalized_strategy.push(normalized);
+        }
+    }
+    if normalized_strategy.is_empty() {
+        normalized_strategy.push("reported local replay experience".into());
+    }
+
+    let mut unique_validation = BTreeSet::new();
+    let mut normalized_validation = Vec::new();
+    for entry in validation {
+        let normalized = entry.trim().to_string();
+        if normalized.is_empty() {
+            continue;
+        }
+        if unique_validation.insert(normalized.clone()) {
+            normalized_validation.push(normalized);
+        }
+    }
+    if normalized_validation.is_empty() {
+        normalized_validation.push("a2a.tasks.report".into());
+    }
+
+    let gene = Gene {
+        id: gene_id.to_string(),
+        signals: normalized_signals,
+        strategy: normalized_strategy,
+        validation: normalized_validation,
+        state: AssetState::Promoted,
+    };
+    let sender_id = normalized_sender_id(&sender_id);
+
+    store
+        .append_event(EvolutionEvent::RemoteAssetImported {
+            source: CandidateSource::Local,
+            asset_ids: vec![gene.id.clone()],
+            sender_id,
+        })
+        .map_err(store_err)?;
+    store
+        .append_event(EvolutionEvent::GeneProjected { gene: gene.clone() })
+        .map_err(store_err)?;
+    store
+        .append_event(EvolutionEvent::PromotionEvaluated {
+            gene_id: gene.id.clone(),
+            state: AssetState::Promoted,
+            reason: "trusted local report promoted reusable experience".into(),
+        })
+        .map_err(store_err)?;
+    store
+        .append_event(EvolutionEvent::GenePromoted {
+            gene_id: gene.id.clone(),
+        })
+        .map_err(store_err)?;
+
+    Ok(ImportOutcome {
+        imported_asset_ids: vec![gene.id],
         accepted: true,
     })
 }
