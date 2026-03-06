@@ -483,6 +483,19 @@ echo "${final_claim_resp}" | jq -e '.data.claimed == false'
 - Lease owner mismatch during task/work completion:
   response is `403` with message `compat task lease is owned by another claimer` or `a2a work assignment is owned by another claimer`.
 
+Deterministic scheduler regression matrix command:
+
+```bash
+cargo test -p oris-runtime --all-features evolution_a2a_scheduler_deterministic_matrix_is_replay_equivalent -- --nocapture
+```
+
+Operator triage when this matrix fails:
+
+- `stale_owner_status != 404`: re-check sender-scoped session lookup in `/a2a/tasks/report` and stale owner rejection paths in `/a2a/task/complete`.
+- `second_claimed == true` while lease is active: inspect claim conflict guard and retry window behavior.
+- `heartbeat_active_available_work_count != 0` or `heartbeat_expired_available_work_count != 1`: inspect lease expiry/grace handling for fetch/heartbeat task visibility.
+- `duplicate_complete_status != 409`: inspect completion idempotency and task-removal sequencing after terminal writes.
+
 ## Related Documents
 
 - [evolution.md](evolution.md)

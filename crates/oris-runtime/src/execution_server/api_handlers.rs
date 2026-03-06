@@ -9073,6 +9073,272 @@ mod tests {
     }
 
     #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_scheduler_deterministic_matrix_is_replay_equivalent() {
+        async fn run_matrix_case(case_id: &str) -> serde_json::Value {
+            let state =
+                ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+            let repo = state.runtime_repo.clone().expect("runtime repo");
+            let router = build_router(state);
+
+            let owner_id = format!("compat-matrix-owner-{case_id}");
+            let intruder_id = format!("compat-matrix-intruder-{case_id}");
+            let task_id = format!("compat-matrix-task-{case_id}");
+            let dispatch_id = format!("dispatch-matrix-{case_id}");
+
+            let owner_handshake = handshake_agent_with_caps_and_protocols(
+                &router,
+                "/a2a/hello",
+                &owner_id,
+                "A4",
+                &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+                &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+            )
+            .await;
+            assert_eq!(owner_handshake["data"]["accepted"], true);
+            let intruder_handshake = handshake_agent_with_caps_and_protocols(
+                &router,
+                "/a2a/hello",
+                &intruder_id,
+                "A4",
+                &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+                &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+            )
+            .await;
+            assert_eq!(intruder_handshake["data"]["accepted"], true);
+
+            let distribute_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/tasks/distribute")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "task_summary": "deterministic scheduler matrix task",
+                        "dispatch_id": dispatch_id
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+            assert_eq!(distribute_resp.status(), StatusCode::OK);
+            let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+                .await
+                .expect("distribute body");
+            let distribute_json: serde_json::Value =
+                serde_json::from_slice(&distribute_body).expect("distribute json");
+            let session_id = distribute_json["data"]["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+
+            let claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+            assert_eq!(claim_resp.status(), StatusCode::OK);
+            let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("claim body");
+            let claim_json: serde_json::Value =
+                serde_json::from_slice(&claim_body).expect("claim json");
+            assert_eq!(claim_json["data"]["claimed"], true);
+
+            let stale_owner_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/tasks/report")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": intruder_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "status": "running",
+                        "summary": "stale owner report"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let stale_owner_resp = router.clone().oneshot(stale_owner_req).await.unwrap();
+
+            let second_claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let second_claim_resp = router.clone().oneshot(second_claim_req).await.unwrap();
+            let second_claim_body = axum::body::to_bytes(second_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("second claim body");
+            let second_claim_json: serde_json::Value =
+                serde_json::from_slice(&second_claim_body).expect("second claim json");
+
+            let heartbeat_active_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let heartbeat_active_resp = router.clone().oneshot(heartbeat_active_req).await.unwrap();
+            let heartbeat_active_body =
+                axum::body::to_bytes(heartbeat_active_resp.into_body(), usize::MAX)
+                    .await
+                    .expect("heartbeat active body");
+            let heartbeat_active_json: serde_json::Value =
+                serde_json::from_slice(&heartbeat_active_body).expect("heartbeat active json");
+
+            repo.touch_a2a_compat_task_lease(
+                &session_id,
+                &owner_id,
+                Utc::now() - Duration::minutes(2),
+                1,
+            )
+            .expect("expire owner lease for heartbeat reclaim test");
+
+            let heartbeat_expired_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let heartbeat_expired_resp =
+                router.clone().oneshot(heartbeat_expired_req).await.unwrap();
+            let heartbeat_expired_body =
+                axum::body::to_bytes(heartbeat_expired_resp.into_body(), usize::MAX)
+                    .await
+                    .expect("heartbeat expired body");
+            let heartbeat_expired_json: serde_json::Value =
+                serde_json::from_slice(&heartbeat_expired_body).expect("heartbeat expired json");
+
+            let reclaim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let reclaim_resp = router.clone().oneshot(reclaim_req).await.unwrap();
+            let reclaim_body = axum::body::to_bytes(reclaim_resp.into_body(), usize::MAX)
+                .await
+                .expect("reclaim body");
+            let reclaim_json: serde_json::Value =
+                serde_json::from_slice(&reclaim_body).expect("reclaim json");
+
+            let complete_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "status": "succeeded",
+                        "summary": "matrix complete"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+
+            let duplicate_complete_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": owner_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "status": "succeeded",
+                        "summary": "duplicate matrix complete"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let duplicate_complete_resp = router
+                .clone()
+                .oneshot(duplicate_complete_req)
+                .await
+                .unwrap();
+            let duplicate_complete_status = duplicate_complete_resp.status().as_u16();
+            let duplicate_complete_body =
+                axum::body::to_bytes(duplicate_complete_resp.into_body(), usize::MAX)
+                    .await
+                    .expect("duplicate complete body");
+            let duplicate_complete_json: serde_json::Value =
+                serde_json::from_slice(&duplicate_complete_body).expect("duplicate complete json");
+
+            serde_json::json!({
+                "stale_owner_status": stale_owner_resp.status().as_u16(),
+                "second_claimed": second_claim_json["data"]["claimed"],
+                "second_claim_retry_after_present": second_claim_json["data"]["retry_after_ms"].as_u64().unwrap_or(0) > 0,
+                "heartbeat_active_available_work_count": heartbeat_active_json["data"]["available_work_count"],
+                "heartbeat_expired_available_work_count": heartbeat_expired_json["data"]["available_work_count"],
+                "reclaim_claimed": reclaim_json["data"]["claimed"],
+                "complete_status": complete_resp.status().as_u16(),
+                "duplicate_complete_status": duplicate_complete_status,
+                "duplicate_complete_error": duplicate_complete_json["error"]["message"]
+            })
+        }
+
+        let first = run_matrix_case("run1").await;
+        let second = run_matrix_case("run2").await;
+
+        assert_eq!(first, second);
+        assert_eq!(first["stale_owner_status"], StatusCode::NOT_FOUND.as_u16());
+        assert_eq!(first["second_claimed"], false);
+        assert_eq!(first["second_claim_retry_after_present"], true);
+        assert_eq!(first["heartbeat_active_available_work_count"], 0);
+        assert_eq!(first["heartbeat_expired_available_work_count"], 1);
+        assert_eq!(first["reclaim_claimed"], true);
+        assert_eq!(first["complete_status"], StatusCode::OK.as_u16());
+        assert_eq!(
+            first["duplicate_complete_status"],
+            StatusCode::CONFLICT.as_u16()
+        );
+    }
+
+    #[cfg(all(
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
     ))]
