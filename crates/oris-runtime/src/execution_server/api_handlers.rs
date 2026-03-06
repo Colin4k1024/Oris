@@ -1277,6 +1277,7 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
             "/a2a/tasks/distribute",
             post(evolution_a2a_tasks_distribute),
         )
+        .route("/a2a/task/claim", post(evolution_a2a_tasks_claim))
         .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim))
         .route("/a2a/tasks/report", post(evolution_a2a_tasks_report))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
@@ -7104,6 +7105,91 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_task_claim_endpoint_reuses_lease_conflict_semantics() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-task-claim-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-task-claim-agent",
+                    "task_id": "compat-task-claim-1",
+                    "task_summary": "compat task claim endpoint",
+                    "dispatch_id": "dispatch-compat-task-claim-1",
+                    "summary": "compat task claim dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-task-claim-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(claim_json["data"]["task"]["task_id"], "compat-task-claim-1");
+
+        let conflict_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let conflict_claim_resp = router.clone().oneshot(conflict_claim_req).await.unwrap();
+        assert_eq!(conflict_claim_resp.status(), StatusCode::OK);
+        let conflict_claim_body = axum::body::to_bytes(conflict_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("conflict claim body");
+        let conflict_claim_json: serde_json::Value =
+            serde_json::from_slice(&conflict_claim_body).expect("conflict claim json");
+        assert_eq!(conflict_claim_json["data"]["claimed"], false);
+        assert!(
+            conflict_claim_json["data"]["retry_after_ms"]
+                .as_u64()
+                .expect("retry_after_ms should be present")
+                > 0
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_fetch_validation_errors_include_a2a_error_code_details() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
 
@@ -7196,6 +7282,20 @@ mod tests {
             .unwrap();
         let fetch_resp = router.oneshot(fetch_req).await.unwrap();
         assert_eq!(fetch_resp.status(), StatusCode::NOT_FOUND);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[cfg(all(
