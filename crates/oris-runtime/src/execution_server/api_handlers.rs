@@ -1228,6 +1228,13 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     #[cfg(feature = "agent-contract-experimental")]
     let router = router
         .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
+        .route("/a2a/hello", post(evolution_a2a_hello))
+        .route(
+            "/a2a/tasks/distribute",
+            post(evolution_a2a_tasks_distribute),
+        )
+        .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim))
+        .route("/a2a/tasks/report", post(evolution_a2a_tasks_report))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
         .route(
             "/evolution/a2a/tasks/distribute",
@@ -6651,6 +6658,154 @@ mod tests {
             json["data"]["negotiated_protocol"]["version"],
             crate::agent_contract::A2A_PROTOCOL_VERSION_V1
         );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_namespace_facade_alias_routes_map_to_existing_compat_handlers() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-facade-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-facade-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-facade-task-1",
+                    "task_summary": "compat facade task",
+                    "dispatch_id": "dispatch-compat-facade-1",
+                    "summary": "compat facade dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        assert_eq!(distribute_json["data"]["state"], "Dispatched");
+        let session_id = distribute_json["data"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-facade-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(
+            claim_json["data"]["task"]["task_id"],
+            "compat-facade-task-1"
+        );
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-facade-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-facade-task-1",
+                    "status": "succeeded",
+                    "summary": "compat facade task completed",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "used_capsule": true,
+                    "capsule_id": "compat-facade-capsule-1",
+                    "reasoning_steps_avoided": 2,
+                    "fallback_reason": null,
+                    "task_class_id": "compat.facade",
+                    "task_label": "Compat facade task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+
+        let snapshot_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v1/evolution/a2a/sessions/{session_id}?sender_id=compat-facade-agent&protocol_version={}",
+                crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let snapshot_resp = router.clone().oneshot(snapshot_req).await.unwrap();
+        assert_eq!(snapshot_resp.status(), StatusCode::OK);
+        let snapshot_body = axum::body::to_bytes(snapshot_resp.into_body(), usize::MAX)
+            .await
+            .expect("snapshot body");
+        let snapshot_json: serde_json::Value =
+            serde_json::from_slice(&snapshot_body).expect("snapshot json");
+        assert_eq!(snapshot_json["data"]["state"], "Completed");
+    }
+
+    #[cfg(not(feature = "evolution-network-experimental"))]
+    #[tokio::test]
+    async fn evolution_a2a_namespace_facade_routes_remain_feature_gated_when_disabled() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "feature-gate-check-agent",
+                    "role": "Planner",
+                    "capability_level": "A2",
+                    "supported_protocols": [
+                        { "name": "oris.a2a", "version": "1.0.0" }
+                    ],
+                    "advertised_capabilities": ["Coordination"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[cfg(all(
