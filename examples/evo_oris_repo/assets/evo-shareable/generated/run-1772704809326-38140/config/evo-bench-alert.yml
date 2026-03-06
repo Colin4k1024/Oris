@@ -1,0 +1,6 @@
+# generated-by=evo-benchmark
+# run_id=run-1772704809326-38140
+# gene_id=1718fe8daa55b223670a242d7acb6d640fb6dbba0c7fa19df7b2040a53f4f9e4
+# capsule_id=0ff52819f9bf215ae1aef8fb35089a9bbe9b114da0eb2f08c142a141767918f6
+alert: EvoBenchReplayHitRate
+expr: oris_evolution_replay_success_total > 0

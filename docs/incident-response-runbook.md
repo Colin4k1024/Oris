@@ -142,12 +142,12 @@ Symptoms:
 
 Actions:
 
-1. Confirm compatibility workers are actively calling `/evolution/a2a/tasks/claim`.
+1. Confirm compatibility workers are actively calling `/a2a/tasks/claim`.
 2. Check audit logs for repeated `a2a.compat.claim` or `a2a.compat.report` failures.
 3. Compare queue depth with `oris_a2a_task_claim_latency_ms` p95 to distinguish worker starvation from API slowness.
 4. Verify worker clocks and lease duration assumptions; skewed clocks can trigger artificial lease reclaim churn.
 5. Restart only unhealthy compatibility workers first; avoid broad manual lease resets unless queue safety is validated.
-6. If `oris_a2a_report_to_capture_latency_ms` is high due to capture/replay failures, route critical flows to native `/v1/evolution/a2a/sessions/*` until mitigation is in place.
+6. If `oris_a2a_report_to_capture_latency_ms` is high due to capture/replay failures, route critical flows to native `/v1/evolution/a2a/sessions/*` only when evolution-network experimental routes are intentionally enabled.
 
 ### Failed deploy after schema change
 
@@ -208,7 +208,7 @@ Before declaring the incident mitigated:
    - worker `poll`
    - worker `ack`
 6. If compatibility A2A traffic is enabled, run one compatibility smoke flow:
-   - `/a2a/hello` (or legacy alias `/evolution/a2a/hello`)
+   - `/a2a/hello` (`/evolution/a2a/hello` only when evolution-network experimental routes are enabled)
    - `/a2a/fetch`
    - `/a2a/task/claim` and `/a2a/task/complete`
    - `/a2a/work/claim` and `/a2a/work/complete`

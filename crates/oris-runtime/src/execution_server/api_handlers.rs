@@ -2078,7 +2078,7 @@ impl ExecutionApiState {
 }
 
 pub fn build_router(state: ExecutionApiState) -> Router {
-    let secured = with_mcp_routes(with_evolution_routes(
+    let secured = with_mcp_routes(with_evolution_routes(with_a2a_routes(
         Router::new()
             .route("/v1/audit/logs", get(list_audit_logs))
             .route(
@@ -2123,7 +2123,7 @@ pub fn build_router(state: ExecutionApiState) -> Router {
                 "/v1/interrupts/:interrupt_id/reject",
                 post(reject_interrupt),
             ),
-    ))
+    )))
     .layer(from_fn_with_state(state.clone(), auth_middleware))
     .layer(from_fn(request_log_middleware))
     .layer(from_fn_with_state(state.clone(), audit_middleware))
@@ -2136,15 +2136,12 @@ pub fn build_router(state: ExecutionApiState) -> Router {
         .merge(secured)
 }
 
-#[cfg(feature = "evolution-network-experimental")]
-fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
-    let router = router
-        .route("/v1/evolution/publish", post(evolution_publish))
-        .route("/v1/evolution/fetch", post(evolution_fetch))
-        .route("/v1/evolution/revoke", post(evolution_revoke));
-    #[cfg(feature = "agent-contract-experimental")]
-    let router = router
-        .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
+    router
         .route("/a2a/hello", post(evolution_a2a_hello_compat))
         .route("/a2a/fetch", post(evolution_a2a_fetch_compat))
         .route(
@@ -2164,6 +2161,31 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
         .route("/a2a/heartbeat", post(evolution_a2a_heartbeat_compat))
         .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim_compat))
         .route("/a2a/tasks/report", post(evolution_a2a_tasks_report_compat))
+}
+
+#[cfg(not(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+)))]
+fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
+    router
+}
+
+#[cfg(all(
+    feature = "evolution-network-experimental",
+    any(
+        not(feature = "a2a-production"),
+        feature = "full-evolution-experimental"
+    )
+))]
+fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
+    let router = router
+        .route("/v1/evolution/publish", post(evolution_publish))
+        .route("/v1/evolution/fetch", post(evolution_fetch))
+        .route("/v1/evolution/revoke", post(evolution_revoke));
+    #[cfg(feature = "agent-contract-experimental")]
+    let router = router
+        .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
         .route(
             "/evolution/a2a/tasks/distribute",
@@ -2212,7 +2234,13 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     router
 }
 
-#[cfg(not(feature = "evolution-network-experimental"))]
+#[cfg(not(all(
+    feature = "evolution-network-experimental",
+    any(
+        not(feature = "a2a-production"),
+        feature = "full-evolution-experimental"
+    )
+)))]
 fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
     router
 }
@@ -3805,12 +3833,12 @@ async fn ensure_a2a_authorized_action(
             rid,
         );
         return Err(
-            ApiError::forbidden("a2a handshake required before calling evolution routes")
+            ApiError::forbidden("a2a handshake required before calling /a2a routes")
                 .with_request_id(rid.to_string())
                 .with_details(serde_json::json!({
                     "sender_id": sender_id,
                     "required_capability": format!("{capability:?}"),
-                    "handshake_endpoint": "/v1/evolution/a2a/handshake",
+                    "handshake_endpoint": "/a2a/hello",
                 })),
         );
     };
@@ -3836,7 +3864,7 @@ async fn ensure_a2a_authorized_action(
                 .with_request_id(rid.to_string())
                 .with_details(serde_json::json!({
                     "sender_id": sender_id,
-                    "handshake_endpoint": "/v1/evolution/a2a/handshake",
+                    "handshake_endpoint": "/a2a/hello",
                 })),
         );
     }
@@ -7940,6 +7968,56 @@ mod tests {
         serde_json::from_slice(&body).expect("lifecycle json")
     }
 
+    #[cfg(all(
+        feature = "a2a-production",
+        not(feature = "full-evolution-experimental")
+    ))]
+    #[tokio::test]
+    async fn a2a_production_route_boundary_hides_evolution_network_routes() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "stable-a2a-agent",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "ReplayFeedback"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let publish_resp = router.clone().oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::NOT_FOUND);
+
+        let legacy_hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let legacy_hello_resp = router.clone().oneshot(legacy_hello_req).await.unwrap();
+        assert_eq!(legacy_hello_resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[cfg(feature = "evolution-network-experimental")]
     #[tokio::test]
     async fn evolution_publish_fetch_and_revoke_routes_work() {
@@ -8103,7 +8181,7 @@ mod tests {
             serde_json::from_slice(&publish_body).expect("publish json");
         assert_eq!(
             publish_json["error"]["message"],
-            "a2a handshake required before calling evolution routes"
+            "a2a handshake required before calling /a2a routes"
         );
     }
 

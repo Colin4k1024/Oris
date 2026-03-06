@@ -107,9 +107,10 @@ AgentTask
 
 需要明确两点：
 
-1. 如果你只需要 `oris_runtime::evolution` 这一层 API，可只启用 `evolution-experimental`。
-2. 仓库内现成示例与联调烟测依赖的是 `full-evolution-experimental`，因为它还会暴露 governor、agent contract、economics、spec 和 network 的实验 facade。
-3. 如果你要让 replay 事件可直接关联到当前执行，优先使用 `replay_or_fallback_for_run`；旧的 `replay_or_fallback` 会自动生成 replay run id。
+1. 如果你只需要生产级 `/a2a/*` 兼容面，请启用 `a2a-production`（不暴露 evolution-network 的 publish/fetch/revoke 路由）。
+2. 如果你只需要 `oris_runtime::evolution` 这一层 API，可只启用 `evolution-experimental`。
+3. 仓库内现成示例与联调烟测依赖的是 `full-evolution-experimental`，因为它还会暴露 governor、agent contract、economics、spec 和 network 的实验 facade。
+4. 如果你要让 replay 事件可直接关联到当前执行，优先使用 `replay_or_fallback_for_run`；旧的 `replay_or_fallback` 会自动生成 replay run id。
 
 当前尚未形成可直接投产的自治闭环，仍缺少常驻调度、自动 issue intake、自动分支/发布编排等能力。
 
@@ -131,6 +132,7 @@ AgentTask
 - `docs/kernel-api.md`
 - `docs/production-operations-guide.md`
 - `docs/incident-response-runbook.md`
+- `docs/evolution-boundary.md`
 - `docs/evokernel/README.md`
 - `docs/evokernel/devloop.md`
 

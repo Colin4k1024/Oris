@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 anyhow = "1.0.81"
 axum = "0.7"
-oris-execution-server = { path = "../../crates/oris-execution-server", features = ["sqlite-persistence", "execution-server", "mcp-experimental"] }
+oris-execution-server = { path = "../../crates/oris-execution-server", features = ["sqlite-persistence", "execution-server", "a2a-production", "mcp-experimental"] }
 oris-runtime = { path = "../../crates/oris-runtime", features = ["sqlite-persistence"] }
 serde_json = "1.0"
 tokio = { version = "1.36.0", features = ["full"] }

@@ -241,6 +241,12 @@ execution-server = [
     "oris-execution-runtime/execution-server",
 ]
 mcp-experimental = ["execution-server"]
+# Stable /a2a compatibility boundary for production execution flows.
+a2a-production = [
+    "execution-server",
+    "agent-contract-experimental",
+    "evolution-network-experimental",
+]
 evokernel-facade = ["dep:oris-evokernel"]
 evolution-experimental = ["evokernel-facade"]
 governor-experimental = ["evokernel-facade"]

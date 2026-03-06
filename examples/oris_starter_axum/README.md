@@ -12,6 +12,7 @@ Dependency split:
 - Running Oris runtime inside an Axum HTTP service.
 - SQLite-backed durable execution and idempotency.
 - Operator-facing endpoints for run/list/inspect/resume/replay/cancel.
+- Stable `/a2a/*` compatibility surface for production worker/session flows.
 - Basic health endpoint, Prometheus `/metrics`, and tracing setup.
 
 ## Run
@@ -73,6 +74,24 @@ Scrape metrics:
 ```bash
 curl -s http://127.0.0.1:8080/metrics
 ```
+
+## Stable /a2a production boundary
+
+This starter enables `a2a-production` by default. The stable compatibility surface is:
+
+- `/a2a/hello`
+- `/a2a/fetch`
+- `/a2a/tasks/distribute`
+- `/a2a/tasks/claim`
+- `/a2a/tasks/report`
+- `/a2a/task/claim`
+- `/a2a/task/complete`
+- `/a2a/work/claim`
+- `/a2a/work/complete`
+- `/a2a/heartbeat`
+
+Experimental evolution-network endpoints such as `/v1/evolution/publish` and `/evolution/a2a/*`
+remain hidden unless `full-evolution-experimental` is explicitly enabled.
 
 ## MCP capability discovery smoke test (experimental bootstrap slice)
 
