@@ -159,6 +159,8 @@ pub struct BootstrapReport {
     pub capsules_added: usize,
 }
 
+const REPORTED_EXPERIENCE_RETENTION_LIMIT: usize = 3;
+
 impl ValidationReport {
     pub fn to_snapshot(&self, profile: &str) -> ValidationSnapshot {
         ValidationSnapshot {
@@ -1283,6 +1285,13 @@ impl EvolutionNetworkNode {
             &EvolutionEnvelope::publish(request.sender_id.clone(), request.assets.clone()),
             None,
         )
+    }
+
+    pub fn ensure_builtin_experience_assets(
+        &self,
+        sender_id: impl Into<String>,
+    ) -> Result<ImportOutcome, EvoKernelError> {
+        ensure_builtin_experience_assets_in_store(self.store.as_ref(), sender_id.into())
     }
 
     pub fn record_reported_experience(
@@ -2848,6 +2857,186 @@ fn import_remote_envelope_into_store(
     })
 }
 
+fn built_in_experience_genes() -> Vec<Gene> {
+    vec![
+        Gene {
+            id: "builtin-experience-docs-rewrite-v1".into(),
+            signals: vec!["docs.rewrite".into(), "docs".into(), "rewrite".into()],
+            strategy: vec![
+                "asset_origin=builtin".into(),
+                "task_class=docs.rewrite".into(),
+                "task_label=Docs rewrite".into(),
+                "template_id=builtin-docs-rewrite-v1".into(),
+                "summary=baseline docs rewrite experience".into(),
+            ],
+            validation: vec!["builtin-template".into(), "origin=builtin".into()],
+            state: AssetState::Promoted,
+        },
+        Gene {
+            id: "builtin-experience-ci-fix-v1".into(),
+            signals: vec![
+                "ci.fix".into(),
+                "ci".into(),
+                "test".into(),
+                "failure".into(),
+            ],
+            strategy: vec![
+                "asset_origin=builtin".into(),
+                "task_class=ci.fix".into(),
+                "task_label=CI fix".into(),
+                "template_id=builtin-ci-fix-v1".into(),
+                "summary=baseline ci stabilization experience".into(),
+            ],
+            validation: vec!["builtin-template".into(), "origin=builtin".into()],
+            state: AssetState::Promoted,
+        },
+    ]
+}
+
+fn ensure_builtin_experience_assets_in_store(
+    store: &dyn EvolutionStore,
+    sender_id: String,
+) -> Result<ImportOutcome, EvoKernelError> {
+    let projection = projection_snapshot(store)?;
+    let known_gene_ids = projection
+        .genes
+        .into_iter()
+        .map(|gene| gene.id)
+        .collect::<BTreeSet<_>>();
+    let sender_id = normalized_sender_id(&sender_id);
+    let mut imported_asset_ids = Vec::new();
+
+    for gene in built_in_experience_genes() {
+        if known_gene_ids.contains(&gene.id) {
+            continue;
+        }
+
+        store
+            .append_event(EvolutionEvent::RemoteAssetImported {
+                source: CandidateSource::Local,
+                asset_ids: vec![gene.id.clone()],
+                sender_id: sender_id.clone(),
+            })
+            .map_err(store_err)?;
+        store
+            .append_event(EvolutionEvent::GeneProjected { gene: gene.clone() })
+            .map_err(store_err)?;
+        store
+            .append_event(EvolutionEvent::PromotionEvaluated {
+                gene_id: gene.id.clone(),
+                state: AssetState::Promoted,
+                reason: "built-in experience asset promoted for cold-start compatibility".into(),
+            })
+            .map_err(store_err)?;
+        store
+            .append_event(EvolutionEvent::GenePromoted {
+                gene_id: gene.id.clone(),
+            })
+            .map_err(store_err)?;
+        imported_asset_ids.push(gene.id.clone());
+    }
+
+    Ok(ImportOutcome {
+        imported_asset_ids,
+        accepted: true,
+    })
+}
+
+fn strategy_metadata_value(strategy: &[String], key: &str) -> Option<String> {
+    strategy.iter().find_map(|entry| {
+        let (entry_key, entry_value) = entry.split_once('=')?;
+        if entry_key.trim().eq_ignore_ascii_case(key) {
+            let normalized = entry_value.trim();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized.to_string())
+            }
+        } else {
+            None
+        }
+    })
+}
+
+fn ensure_strategy_metadata(strategy: &mut Vec<String>, key: &str, value: &str) {
+    let normalized = value.trim();
+    if normalized.is_empty() || strategy_metadata_value(strategy, key).is_some() {
+        return;
+    }
+    strategy.push(format!("{key}={normalized}"));
+}
+
+fn enforce_reported_experience_retention(
+    store: &dyn EvolutionStore,
+    task_class: &str,
+    keep_latest: usize,
+) -> Result<(), EvoKernelError> {
+    let task_class = task_class.trim();
+    if task_class.is_empty() || keep_latest == 0 {
+        return Ok(());
+    }
+
+    let (_, projection) = scan_projection(store)?;
+    let mut candidates = projection
+        .genes
+        .iter()
+        .filter(|gene| gene.state == AssetState::Promoted)
+        .filter_map(|gene| {
+            let origin = strategy_metadata_value(&gene.strategy, "asset_origin")?;
+            if !origin.eq_ignore_ascii_case("reported_experience") {
+                return None;
+            }
+            let gene_task_class = strategy_metadata_value(&gene.strategy, "task_class")?;
+            if !gene_task_class.eq_ignore_ascii_case(task_class) {
+                return None;
+            }
+            let updated_at = projection
+                .last_updated_at
+                .get(&gene.id)
+                .cloned()
+                .unwrap_or_default();
+            Some((gene.id.clone(), updated_at))
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() <= keep_latest {
+        return Ok(());
+    }
+
+    candidates.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+    let stale_gene_ids = candidates
+        .into_iter()
+        .skip(keep_latest)
+        .map(|(gene_id, _)| gene_id)
+        .collect::<BTreeSet<_>>();
+    if stale_gene_ids.is_empty() {
+        return Ok(());
+    }
+
+    let reason =
+        format!("reported experience retention limit exceeded for task_class={task_class}");
+    for gene_id in &stale_gene_ids {
+        store
+            .append_event(EvolutionEvent::GeneRevoked {
+                gene_id: gene_id.clone(),
+                reason: reason.clone(),
+            })
+            .map_err(store_err)?;
+    }
+
+    let stale_capsule_ids = projection
+        .capsules
+        .iter()
+        .filter(|capsule| stale_gene_ids.contains(&capsule.gene_id))
+        .map(|capsule| capsule.id.clone())
+        .collect::<BTreeSet<_>>();
+    for capsule_id in stale_capsule_ids {
+        store
+            .append_event(EvolutionEvent::CapsuleQuarantined { capsule_id })
+            .map_err(store_err)?;
+    }
+    Ok(())
+}
+
 fn record_reported_experience_in_store(
     store: &dyn EvolutionStore,
     sender_id: String,
@@ -2894,6 +3083,19 @@ fn record_reported_experience_in_store(
     if normalized_strategy.is_empty() {
         normalized_strategy.push("reported local replay experience".into());
     }
+    let task_class_id = strategy_metadata_value(&normalized_strategy, "task_class")
+        .or_else(|| normalized_signals.first().cloned())
+        .unwrap_or_else(|| "reported-experience".into());
+    let task_label = strategy_metadata_value(&normalized_strategy, "task_label")
+        .or_else(|| normalized_signals.first().cloned())
+        .unwrap_or_else(|| task_class_id.clone());
+    ensure_strategy_metadata(
+        &mut normalized_strategy,
+        "asset_origin",
+        "reported_experience",
+    );
+    ensure_strategy_metadata(&mut normalized_strategy, "task_class", &task_class_id);
+    ensure_strategy_metadata(&mut normalized_strategy, "task_label", &task_label);
 
     let mut unique_validation = BTreeSet::new();
     let mut normalized_validation = Vec::new();
@@ -2941,6 +3143,11 @@ fn record_reported_experience_in_store(
             gene_id: gene.id.clone(),
         })
         .map_err(store_err)?;
+    enforce_reported_experience_retention(
+        store,
+        &task_class_id,
+        REPORTED_EXPERIENCE_RETENTION_LIMIT,
+    )?;
 
     Ok(ImportOutcome {
         imported_asset_ids: vec![gene.id],
@@ -5180,5 +5387,147 @@ index 0000000..1111111
         assert_eq!(signal.available_evu, 0);
         assert!(signal.publish_success_rate < 0.5);
         assert!(signal.validator_accuracy < 0.5);
+    }
+
+    #[test]
+    fn ensure_builtin_experience_assets_is_idempotent_and_fetchable() {
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evokernel-builtin-experience-store-{}",
+            next_id("t")
+        ));
+        if store_root.exists() {
+            fs::remove_dir_all(&store_root).unwrap();
+        }
+        let store: Arc<dyn EvolutionStore> =
+            Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
+        let node = EvolutionNetworkNode::new(store.clone());
+
+        let first = node
+            .ensure_builtin_experience_assets("runtime-bootstrap")
+            .unwrap();
+        assert_eq!(first.imported_asset_ids.len(), 2);
+
+        let second = node
+            .ensure_builtin_experience_assets("runtime-bootstrap")
+            .unwrap();
+        assert!(second.imported_asset_ids.is_empty());
+
+        let fetch = node
+            .fetch_assets(
+                "execution-api",
+                &FetchQuery {
+                    sender_id: "compat-agent".into(),
+                    signals: vec!["docs.rewrite".into()],
+                },
+            )
+            .unwrap();
+
+        let mut has_builtin_docs = false;
+        for asset in fetch.assets {
+            if let NetworkAsset::Gene { gene } = asset {
+                if strategy_metadata_value(&gene.strategy, "asset_origin").as_deref()
+                    == Some("builtin")
+                    && strategy_metadata_value(&gene.strategy, "task_class").as_deref()
+                        == Some("docs.rewrite")
+                    && gene.state == AssetState::Promoted
+                {
+                    has_builtin_docs = true;
+                    break;
+                }
+            }
+        }
+        assert!(has_builtin_docs);
+    }
+
+    #[test]
+    fn reported_experience_retention_keeps_latest_three_and_preserves_builtin_assets() {
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evokernel-reported-retention-store-{}",
+            next_id("t")
+        ));
+        if store_root.exists() {
+            fs::remove_dir_all(&store_root).unwrap();
+        }
+        let store: Arc<dyn EvolutionStore> =
+            Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
+        let node = EvolutionNetworkNode::new(store.clone());
+
+        node.ensure_builtin_experience_assets("runtime-bootstrap")
+            .unwrap();
+
+        for idx in 0..4 {
+            node.record_reported_experience(
+                "reporter-a",
+                format!("reported-docs-rewrite-v{}", idx + 1),
+                vec!["docs.rewrite".into(), format!("task-{}", idx + 1)],
+                vec![
+                    "task_class=docs.rewrite".into(),
+                    format!("task_label=Docs rewrite v{}", idx + 1),
+                    format!("summary=reported replay {}", idx + 1),
+                ],
+                vec!["a2a.tasks.report".into()],
+            )
+            .unwrap();
+        }
+
+        let (_, projection) = store.scan_projection().unwrap();
+        let reported_promoted = projection
+            .genes
+            .iter()
+            .filter(|gene| {
+                gene.state == AssetState::Promoted
+                    && strategy_metadata_value(&gene.strategy, "asset_origin").as_deref()
+                        == Some("reported_experience")
+                    && strategy_metadata_value(&gene.strategy, "task_class").as_deref()
+                        == Some("docs.rewrite")
+            })
+            .count();
+        let reported_revoked = projection
+            .genes
+            .iter()
+            .filter(|gene| {
+                gene.state == AssetState::Revoked
+                    && strategy_metadata_value(&gene.strategy, "asset_origin").as_deref()
+                        == Some("reported_experience")
+                    && strategy_metadata_value(&gene.strategy, "task_class").as_deref()
+                        == Some("docs.rewrite")
+            })
+            .count();
+        let builtin_promoted = projection
+            .genes
+            .iter()
+            .filter(|gene| {
+                gene.state == AssetState::Promoted
+                    && strategy_metadata_value(&gene.strategy, "asset_origin").as_deref()
+                        == Some("builtin")
+            })
+            .count();
+
+        assert_eq!(reported_promoted, 3);
+        assert_eq!(reported_revoked, 1);
+        assert_eq!(builtin_promoted, 2);
+
+        let fetch = node
+            .fetch_assets(
+                "execution-api",
+                &FetchQuery {
+                    sender_id: "consumer-b".into(),
+                    signals: vec!["docs.rewrite".into()],
+                },
+            )
+            .unwrap();
+        let docs_genes = fetch
+            .assets
+            .into_iter()
+            .filter_map(|asset| match asset {
+                NetworkAsset::Gene { gene } => Some(gene),
+                _ => None,
+            })
+            .filter(|gene| {
+                strategy_metadata_value(&gene.strategy, "task_class").as_deref()
+                    == Some("docs.rewrite")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(docs_genes.len(), 4);
     }
 }

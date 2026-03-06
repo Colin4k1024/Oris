@@ -1790,6 +1790,7 @@ impl SqliteRuntimeRepository {
         protocol_version: &str,
         now: DateTime<Utc>,
         lease_duration_ms: u64,
+        requested_task_id: Option<&str>,
     ) -> Result<A2aCompatClaimOutcome, KernelError> {
         let mut conn = self
             .conn
@@ -1806,6 +1807,7 @@ impl SqliteRuntimeRepository {
                  FROM runtime_a2a_compat_tasks
                  WHERE sender_id = ?1
                    AND protocol_version = ?2
+                   AND (?4 IS NULL OR task_id = ?4)
                    AND (
                      claimed_by_sender_id IS NULL
                      OR lease_expires_at_ms IS NULL
@@ -1813,7 +1815,7 @@ impl SqliteRuntimeRepository {
                    )
                  ORDER BY enqueued_at_ms ASC, session_id ASC
                  LIMIT 1",
-                params![sender_id, protocol_version, now_ms],
+                params![sender_id, protocol_version, now_ms, requested_task_id],
                 map_row_to_a2a_compat_task,
             )
             .optional()
@@ -1836,6 +1838,7 @@ impl SqliteRuntimeRepository {
                      WHERE session_id = ?1
                        AND sender_id = ?5
                        AND protocol_version = ?6
+                       AND (?7 IS NULL OR task_id = ?7)
                        AND (
                          claimed_by_sender_id IS NULL
                          OR lease_expires_at_ms IS NULL
@@ -1847,7 +1850,8 @@ impl SqliteRuntimeRepository {
                         lease_expires_at_ms,
                         now_ms,
                         sender_id,
-                        protocol_version
+                        protocol_version,
+                        requested_task_id
                     ],
                 )
                 .map_err(|e| KernelError::Driver(format!("update claim a2a compat task: {}", e)))?;
@@ -1872,9 +1876,10 @@ impl SqliteRuntimeRepository {
                  FROM runtime_a2a_compat_tasks
                  WHERE sender_id = ?1
                    AND protocol_version = ?2
+                   AND (?4 IS NULL OR task_id = ?4)
                    AND claimed_by_sender_id IS NOT NULL
                    AND lease_expires_at_ms > ?3",
-                params![sender_id, protocol_version, now_ms],
+                params![sender_id, protocol_version, now_ms, requested_task_id],
                 |row| row.get::<_, Option<i64>>(0),
             )
             .map_err(|e| KernelError::Driver(format!("query claim retry_after a2a compat: {}", e)))?
@@ -3235,7 +3240,7 @@ mod tests {
         );
 
         let first = repo
-            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000)
+            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000, None)
             .expect("first claim");
         assert!(first.task.is_some());
         assert_eq!(
@@ -3250,6 +3255,7 @@ mod tests {
                 "1.0.0",
                 now + Duration::milliseconds(100),
                 1_000,
+                None,
             )
             .expect("second claim");
         assert!(second.task.is_none());
@@ -3261,6 +3267,7 @@ mod tests {
                 "1.0.0",
                 now + Duration::milliseconds(1_200),
                 1_000,
+                None,
             )
             .expect("reclaimed claim");
         assert!(reclaimed.task.is_some());
@@ -3295,6 +3302,7 @@ mod tests {
                 "1.0.0",
                 now + Duration::milliseconds(1_300),
                 1_000,
+                None,
             )
             .expect("claim after remove");
         assert!(after_remove.task.is_none());
@@ -3390,12 +3398,70 @@ mod tests {
         }
 
         let claim = repo
-            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000)
+            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000, None)
             .expect("claim with deterministic order");
         assert_eq!(
             claim.task.as_ref().map(|task| task.session_id.as_str()),
             Some("session-a")
         );
+    }
+
+    #[test]
+    fn claim_a2a_compat_task_honors_requested_task_id_filter() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite runtime repo");
+        let now = Utc::now();
+
+        for (offset, task_id) in [(0_i64, "task-a"), (1_i64, "task-b")] {
+            repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+                session_id: format!("session-{task_id}"),
+                sender_id: "sender-a".to_string(),
+                protocol_version: "1.0.0".to_string(),
+                task_id: task_id.to_string(),
+                task_summary: format!("summary-{task_id}"),
+                dispatch_id: format!("dispatch-{task_id}"),
+                claimed_by_sender_id: None,
+                lease_expires_at: None,
+                enqueued_at: now + Duration::milliseconds(offset),
+                updated_at: now + Duration::milliseconds(offset),
+            })
+            .expect("upsert a2a compat task");
+        }
+
+        let claim_specific = repo
+            .claim_a2a_compat_task("sender-a", "1.0.0", now, 2_000, Some("task-b"))
+            .expect("claim specific task");
+        assert_eq!(
+            claim_specific
+                .task
+                .as_ref()
+                .map(|task| task.task_id.as_str()),
+            Some("task-b")
+        );
+        assert!(claim_specific.retry_after_ms.is_none());
+
+        let claim_specific_again = repo
+            .claim_a2a_compat_task(
+                "sender-a",
+                "1.0.0",
+                now + Duration::milliseconds(100),
+                2_000,
+                Some("task-b"),
+            )
+            .expect("claim specific task again");
+        assert!(claim_specific_again.task.is_none());
+        assert!(claim_specific_again.retry_after_ms.unwrap_or(0) > 0);
+
+        let claim_missing_specific = repo
+            .claim_a2a_compat_task(
+                "sender-a",
+                "1.0.0",
+                now + Duration::milliseconds(200),
+                2_000,
+                Some("task-missing"),
+            )
+            .expect("claim missing specific task");
+        assert!(claim_missing_specific.task.is_none());
+        assert!(claim_missing_specific.retry_after_ms.is_none());
     }
 
     #[test]
@@ -3423,7 +3489,7 @@ mod tests {
         assert!(!touched_unclaimed);
 
         let claim = repo
-            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000)
+            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000, None)
             .expect("claim lease task");
         assert!(claim.task.is_some());
 

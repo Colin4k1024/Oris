@@ -66,7 +66,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_key = std::env::var("ORIS_API_AUTH_API_KEY").ok();
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    let compiled = build_compiled(&db_path)?;
+    let db_path_for_graph = db_path.clone();
+    let compiled = tokio::task::spawn_blocking(move || {
+        build_compiled(&db_path_for_graph).map_err(|err| err.to_string())
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("build compiled graph join failed: {}", e)))?
+    .map_err(|e| std::io::Error::other(format!("build compiled graph failed: {}", e)))?;
     let mut state = if api_key_id.is_some() && api_key.is_some() {
         ExecutionApiState::with_sqlite_idempotency(compiled, &db_path)
             .with_static_auth(bearer_token.clone(), None)

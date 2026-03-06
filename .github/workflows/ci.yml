@@ -145,6 +145,11 @@ jobs:
         with:
           command: build
           args: --verbose --all --release --all-features
+      - name: Run A2A compatibility strict regression suite
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --features "full-evolution-experimental execution-server sqlite-persistence" execution_server::api_handlers::tests::evolution_a2a_ -- --nocapture --test-threads=1
       - name: Run Test
         uses: actions-rs/cargo@v1
         with:
@@ -361,6 +366,14 @@ jobs:
           toolchain: stable
           profile: minimal
           override: true
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run evolver compatibility e2e gate
+        shell: bash
+        run: |
+          bash scripts/run_evolver_compat_e2e.sh
       - name: Login to crates.io
         uses: actions-rs/cargo@v1
         with:
