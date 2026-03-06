@@ -179,6 +179,15 @@ This phase is intentionally **research-oriented**; priorities may shift based on
 - [Public API (stable)](../README.md#public-api-stable) — `oris_runtime::graph`, `oris_runtime::agent`, `oris_runtime::tools`.
 - Code: `crates/oris-runtime/src/graph/` (execution, persistence, interrupts), `crates/oris-runtime/src/agent/`, [durable_agent_job](../crates/oris-runtime/examples/durable_agent_job.rs) example.
 
+### RFC Closeout (March 6, 2026)
+
+This section captures the execution decisions for roadmap RFC issues `#106`-`#109`:
+
+- `#106` (short-term): `/a2a` compatibility alignment was executed via `#110`-`#119` and released in `oris-runtime v0.16.0`. Remaining short-term topics (deterministic scheduler hardening, MCP support path, and evolution stabilization) stay in backlog and are not declared complete by this RFC closeout.
+- `#107` (mid-term): Layer 3 DSL and multi-language SDK remain directional priorities after Phase 1 kernel hardening; no direct runtime-surface change is bundled in this RFC closeout.
+- `#108` (long-term): distributed/federated execution and ecosystem strategy remain long-horizon planning guidance; this closeout records direction, not implementation delivery.
+- `#109` (MCP): MCP is retained as a future implementation theme. This RFC closeout records prioritization intent only and does not claim an official MCP server implementation in the current release.
+
 ---
 
 ## 7. Current baseline and gap map (as of February 17, 2026)
