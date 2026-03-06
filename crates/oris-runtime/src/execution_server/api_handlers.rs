@@ -513,6 +513,100 @@ pub struct A2aCompatTaskCompleteRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatWorkClaimRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatWorkAssignment {
+    assignment_id: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatWorkClaimResponse {
+    claimed: bool,
+    assignment: Option<A2aCompatWorkAssignment>,
+    retry_after_ms: Option<u64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatWorkCompleteRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    assignment_id: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    status: Option<A2aCompatReportStatus>,
+    #[serde(default)]
+    success: Option<bool>,
+    summary: Option<String>,
+    #[serde(default)]
+    retryable: Option<bool>,
+    #[serde(default)]
+    retry_after_ms: Option<u64>,
+    #[serde(default)]
+    failure_code: Option<A2aErrorCode>,
+    #[serde(default)]
+    failure_details: Option<String>,
+    #[serde(default)]
+    used_capsule: Option<bool>,
+    #[serde(default)]
+    capsule_id: Option<String>,
+    #[serde(default)]
+    reasoning_steps_avoided: Option<u64>,
+    #[serde(default)]
+    fallback_reason: Option<String>,
+    #[serde(default)]
+    task_class_id: Option<String>,
+    #[serde(default)]
+    task_label: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatWorkCompleteResponse {
+    assignment_id: String,
+    task_id: String,
+    state: A2aTaskSessionState,
+    terminal_state: Option<A2aTaskLifecycleState>,
+    summary: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatClaimRequest {
     sender_id: Option<String>,
     #[serde(default)]
@@ -1318,6 +1412,8 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
         )
         .route("/a2a/task/claim", post(evolution_a2a_tasks_claim))
         .route("/a2a/task/complete", post(evolution_a2a_task_complete))
+        .route("/a2a/work/claim", post(evolution_a2a_work_claim))
+        .route("/a2a/work/complete", post(evolution_a2a_work_complete))
         .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim))
         .route("/a2a/tasks/report", post(evolution_a2a_tasks_report))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
@@ -3229,6 +3325,276 @@ pub async fn evolution_a2a_task_complete(
         }),
     )
     .await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn resolve_active_work_assignment_task_id(
+    state: &ExecutionApiState,
+    assignment_id: &str,
+    sender_id: &str,
+    protocol_version: &str,
+    rid: &str,
+) -> Result<String, ApiError> {
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let _ = rid;
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        let task = repo
+            .get_a2a_compat_task(assignment_id)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?
+            .ok_or_else(|| {
+                ApiError::conflict("a2a work assignment is not active")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id,
+                        "reason": "already_completed_or_unknown"
+                    }))
+            })?;
+        if task.sender_id != sender_id {
+            return Err(ApiError::forbidden("a2a work assignment sender mismatch")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id,
+                    "expected_sender_id": task.sender_id,
+                    "actual_sender_id": sender_id
+                })));
+        }
+        if task.protocol_version != protocol_version {
+            return Err(
+                ApiError::bad_request("a2a work assignment protocol version mismatch")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id,
+                        "expected_protocol_version": task.protocol_version,
+                        "actual_protocol_version": protocol_version
+                    })),
+            );
+        }
+        match task.claimed_by_sender_id.as_deref() {
+            Some(claimed_by) if claimed_by == sender_id => {}
+            Some(claimed_by) => {
+                return Err(
+                    ApiError::forbidden("a2a work assignment is owned by another claimer")
+                        .with_request_id(rid.to_string())
+                        .with_details(serde_json::json!({
+                            "assignment_id": assignment_id,
+                            "claimed_by": claimed_by,
+                            "reporter": sender_id
+                        })),
+                );
+            }
+            None => {
+                return Err(
+                    ApiError::conflict("a2a work assignment has not been claimed")
+                        .with_request_id(rid.to_string())
+                        .with_details(serde_json::json!({
+                            "assignment_id": assignment_id
+                        })),
+                );
+            }
+        }
+        if task
+            .lease_expires_at
+            .map(|expires_at| expires_at <= Utc::now())
+            .unwrap_or(false)
+        {
+            return Err(ApiError::conflict("a2a work assignment lease expired")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id
+                })));
+        }
+        return Ok(task.task_id);
+    }
+
+    let now_ms = lifecycle_timestamp_ms(Utc::now());
+    let queue = state.a2a_compat_task_queue.read().await;
+    let entry = queue
+        .iter()
+        .find(|entry| entry.session_id == assignment_id)
+        .ok_or_else(|| {
+            ApiError::conflict("a2a work assignment is not active")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id,
+                    "reason": "already_completed_or_unknown"
+                }))
+        })?;
+    if entry.owner_sender_id != sender_id {
+        return Err(ApiError::forbidden("a2a work assignment sender mismatch")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "assignment_id": assignment_id,
+                "expected_sender_id": entry.owner_sender_id,
+                "actual_sender_id": sender_id
+            })));
+    }
+    if entry.protocol_version != protocol_version {
+        return Err(
+            ApiError::bad_request("a2a work assignment protocol version mismatch")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id,
+                    "expected_protocol_version": entry.protocol_version,
+                    "actual_protocol_version": protocol_version
+                })),
+        );
+    }
+    match entry.claimed_by.as_deref() {
+        Some(claimed_by) if claimed_by == sender_id => {}
+        Some(claimed_by) => {
+            return Err(
+                ApiError::forbidden("a2a work assignment is owned by another claimer")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id,
+                        "claimed_by": claimed_by,
+                        "reporter": sender_id
+                    })),
+            );
+        }
+        None => {
+            return Err(
+                ApiError::conflict("a2a work assignment has not been claimed")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id
+                    })),
+            );
+        }
+    }
+    if entry
+        .lease_expires_at_ms
+        .map(|expires_at_ms| expires_at_ms <= now_ms)
+        .unwrap_or(false)
+    {
+        return Err(ApiError::conflict("a2a work assignment lease expired")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "assignment_id": assignment_id
+            })));
+    }
+    Ok(entry.task_id.clone())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_claim(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatWorkClaimRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkClaimResponse>>, ApiError> {
+    let claim = evolution_a2a_tasks_claim(
+        state,
+        headers,
+        Json(A2aCompatClaimRequest {
+            sender_id: req.sender_id.or(req.worker_id),
+            node_id: req.node_id,
+            protocol_version: req.protocol_version,
+        }),
+    )
+    .await?;
+    let envelope = claim.0;
+    let data = envelope.data;
+    Ok(Json(ApiEnvelope {
+        meta: envelope.meta,
+        request_id: envelope.request_id,
+        data: A2aCompatWorkClaimResponse {
+            claimed: data.claimed,
+            assignment: data.task.map(|task| A2aCompatWorkAssignment {
+                assignment_id: task.session_id,
+                task_id: task.task_id,
+                task_summary: task.task_summary,
+                dispatch_id: task.dispatch_id,
+            }),
+            retry_after_ms: data.retry_after_ms,
+        },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_complete(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatWorkCompleteRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkCompleteResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_thread_id(&req.assignment_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    let sender_id = resolve_compat_sender_id(
+        req.sender_id.clone().or(req.worker_id.clone()),
+        req.node_id.clone(),
+        &rid,
+    )?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+    let task_id = resolve_active_work_assignment_task_id(
+        &state,
+        &req.assignment_id,
+        &sender_id,
+        &protocol_version,
+        &rid,
+    )
+    .await?;
+    if let Some(explicit_task_id) = req.task_id.as_deref() {
+        validate_thread_id(explicit_task_id).map_err(|e| e.with_request_id(rid.clone()))?;
+        if explicit_task_id != task_id {
+            return Err(
+                ApiError::bad_request("task_id does not match assignment_id")
+                    .with_request_id(rid.clone())
+                    .with_details(serde_json::json!({
+                        "assignment_id": req.assignment_id,
+                        "expected_task_id": task_id,
+                        "actual_task_id": explicit_task_id
+                    })),
+            );
+        }
+    }
+    let assignment_id = req.assignment_id.clone();
+    let completion = evolution_a2a_task_complete(
+        State(state),
+        headers,
+        Json(A2aCompatTaskCompleteRequest {
+            sender_id: Some(sender_id),
+            node_id: None,
+            protocol_version: Some(protocol_version),
+            task_id,
+            status: req.status,
+            success: req.success,
+            summary: req.summary,
+            retryable: req.retryable,
+            retry_after_ms: req.retry_after_ms,
+            failure_code: req.failure_code,
+            failure_details: req.failure_details,
+            used_capsule: req.used_capsule,
+            capsule_id: req.capsule_id,
+            reasoning_steps_avoided: req.reasoning_steps_avoided,
+            fallback_reason: req.fallback_reason,
+            task_class_id: req.task_class_id,
+            task_label: req.task_label,
+        }),
+    )
+    .await?;
+    let envelope = completion.0;
+    let data = envelope.data;
+    Ok(Json(ApiEnvelope {
+        meta: envelope.meta,
+        request_id: envelope.request_id,
+        data: A2aCompatWorkCompleteResponse {
+            assignment_id,
+            task_id: data.task_id,
+            state: data.state,
+            terminal_state: data.terminal_state,
+            summary: data.summary,
+        },
+    }))
 }
 
 #[cfg(all(
@@ -7427,6 +7793,212 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_work_assignment_lifecycle_blocks_double_complete() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-work-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-work-task-1",
+                    "task_summary": "compat work task",
+                    "dispatch_id": "dispatch-compat-work-1",
+                    "summary": "compat work dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-work-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::OK);
+        let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("work claim body");
+        let work_claim_json: serde_json::Value =
+            serde_json::from_slice(&work_claim_body).expect("work claim json");
+        assert_eq!(work_claim_json["data"]["claimed"], true);
+        let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("assignment id")
+            .to_string();
+        assert_eq!(
+            work_claim_json["data"]["assignment"]["task_id"],
+            "compat-work-task-1"
+        );
+
+        let work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-work-agent",
+                    "assignment_id": assignment_id,
+                    "task_id": "compat-work-task-1",
+                    "success": true,
+                    "summary": "compat work complete succeeded",
+                    "used_capsule": true,
+                    "capsule_id": "compat-work-capsule-1",
+                    "reasoning_steps_avoided": 2,
+                    "task_class_id": "compat.work",
+                    "task_label": "Compat work task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
+        assert_eq!(work_complete_resp.status(), StatusCode::OK);
+        let work_complete_body = axum::body::to_bytes(work_complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("work complete body");
+        let work_complete_json: serde_json::Value =
+            serde_json::from_slice(&work_complete_body).expect("work complete json");
+        assert_eq!(work_complete_json["data"]["assignment_id"], assignment_id);
+        assert_eq!(work_complete_json["data"]["state"], "Completed");
+        assert_eq!(work_complete_json["data"]["terminal_state"], "Succeeded");
+
+        let duplicate_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-work-agent",
+                    "assignment_id": assignment_id,
+                    "success": true,
+                    "summary": "duplicate complete should fail"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let duplicate_complete_resp = router
+            .clone()
+            .oneshot(duplicate_complete_req)
+            .await
+            .unwrap();
+        assert_eq!(duplicate_complete_resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_work_complete_enforces_assignment_ownership() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let owner_handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-work-owner",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(owner_handshake["data"]["accepted"], true);
+        let other_handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-work-other",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(other_handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-owner",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-work-owner-task-1",
+                    "task_summary": "compat work owner task",
+                    "dispatch_id": "dispatch-compat-work-owner-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-owner",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::OK);
+        let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("work claim body");
+        let work_claim_json: serde_json::Value =
+            serde_json::from_slice(&work_claim_body).expect("work claim json");
+        let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("assignment id");
+
+        let intruder_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-other",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "assignment_id": assignment_id,
+                    "success": true,
+                    "summary": "intruder should be denied"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let intruder_complete_resp = router.clone().oneshot(intruder_complete_req).await.unwrap();
+        assert_eq!(intruder_complete_resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_fetch_validation_errors_include_a2a_error_code_details() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
 
@@ -7548,6 +8120,35 @@ mod tests {
             .unwrap();
         let complete_resp = router.oneshot(complete_req).await.unwrap();
         assert_eq!(complete_resp.status(), StatusCode::NOT_FOUND);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::NOT_FOUND);
+
+        let work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent",
+                    "assignment_id": "feature-gate-assignment-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_complete_resp = router.oneshot(work_complete_req).await.unwrap();
+        assert_eq!(work_complete_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[cfg(all(
