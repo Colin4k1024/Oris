@@ -17,8 +17,13 @@
 - cargo fmt --all -- --check
 - cargo build --verbose --all --release --all-features
 - cargo test --release --all-features
-- cargo publish -p oris-runtime --all-features --dry-run
-- cargo publish -p oris-runtime --all-features
+- cargo publish -p oris-runtime --all-features --dry-run (failed: crates.io replaced by `aliyun`)
+- cargo publish -p oris-runtime --all-features --dry-run --registry crates-io (failed: packaged build resolved stale crates.io dependency APIs)
+
+## Release Status
+
+- Status: blocked before publish
+- Crate published: no
 
 ## Links
 
