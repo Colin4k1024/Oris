@@ -9753,6 +9753,268 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_compat_e2e_fetch_claim_complete_and_heartbeat_supports_route_variants() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        for (idx, hello_path, distribute_path) in [
+            (
+                1usize,
+                "/evolution/a2a/hello",
+                "/evolution/a2a/tasks/distribute",
+            ),
+            (2usize, "/a2a/hello", "/a2a/tasks/distribute"),
+        ] {
+            let sender_id = format!("compat-e2e-agent-{idx}");
+            let task_claim_task_id = format!("compat-e2e-task-claim-{idx}");
+            let work_claim_task_id = format!("compat-e2e-work-claim-{idx}");
+
+            let handshake = handshake_agent_with_caps_and_protocols(
+                &router,
+                hello_path,
+                &sender_id,
+                "A4",
+                &[
+                    "Coordination",
+                    "SupervisedDevloop",
+                    "ReplayFeedback",
+                    "EvolutionFetch",
+                ],
+                &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+            )
+            .await;
+            assert_eq!(handshake["data"]["accepted"], true);
+
+            let distribute_first_req = Request::builder()
+                .method(Method::POST)
+                .uri(distribute_path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_claim_task_id.clone(),
+                        "task_summary": "compat e2e task claim flow",
+                        "dispatch_id": format!("dispatch-compat-e2e-claim-{idx}"),
+                        "summary": "queued for task claim flow"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_first_resp = router.clone().oneshot(distribute_first_req).await.unwrap();
+            assert_eq!(distribute_first_resp.status(), StatusCode::OK);
+
+            let distribute_second_req = Request::builder()
+                .method(Method::POST)
+                .uri(distribute_path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": work_claim_task_id.clone(),
+                        "task_summary": "compat e2e work claim flow",
+                        "dispatch_id": format!("dispatch-compat-e2e-work-{idx}"),
+                        "summary": "queued for work claim flow"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_second_resp =
+                router.clone().oneshot(distribute_second_req).await.unwrap();
+            assert_eq!(distribute_second_resp.status(), StatusCode::OK);
+
+            let fetch_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/fetch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "include_tasks": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+            assert_eq!(fetch_resp.status(), StatusCode::OK);
+            let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+                .await
+                .expect("fetch body");
+            let fetch_json: serde_json::Value =
+                serde_json::from_slice(&fetch_body).expect("fetch json");
+            let fetched_tasks = fetch_json["data"]["tasks"]
+                .as_array()
+                .expect("tasks array")
+                .iter()
+                .filter_map(|task| task["task_id"].as_str())
+                .map(ToString::to_string)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(fetched_tasks.contains(&task_claim_task_id));
+            assert!(fetched_tasks.contains(&work_claim_task_id));
+
+            let task_claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let task_claim_resp = router.clone().oneshot(task_claim_req).await.unwrap();
+            assert_eq!(task_claim_resp.status(), StatusCode::OK);
+            let task_claim_body = axum::body::to_bytes(task_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("task claim body");
+            let task_claim_json: serde_json::Value =
+                serde_json::from_slice(&task_claim_body).expect("task claim json");
+            assert_eq!(task_claim_json["data"]["claimed"], true);
+            let claimed_task_id = task_claim_json["data"]["task"]["task_id"]
+                .as_str()
+                .expect("claimed task id")
+                .to_string();
+            assert!(claimed_task_id == task_claim_task_id || claimed_task_id == work_claim_task_id);
+
+            let task_complete_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": claimed_task_id.clone(),
+                        "status": "succeeded",
+                        "summary": "compat e2e task complete"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let task_complete_resp = router.clone().oneshot(task_complete_req).await.unwrap();
+            assert_eq!(task_complete_resp.status(), StatusCode::OK);
+            let task_complete_body =
+                axum::body::to_bytes(task_complete_resp.into_body(), usize::MAX)
+                    .await
+                    .expect("task complete body");
+            let task_complete_json: serde_json::Value =
+                serde_json::from_slice(&task_complete_body).expect("task complete json");
+            assert_eq!(task_complete_json["data"]["state"], "Completed");
+            assert_eq!(task_complete_json["data"]["terminal_state"], "Succeeded");
+
+            let work_claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/work/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+            assert_eq!(work_claim_resp.status(), StatusCode::OK);
+            let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("work claim body");
+            let work_claim_json: serde_json::Value =
+                serde_json::from_slice(&work_claim_body).expect("work claim json");
+            assert_eq!(work_claim_json["data"]["claimed"], true);
+            let work_claimed_task_id = work_claim_json["data"]["assignment"]["task_id"]
+                .as_str()
+                .expect("work claimed task id")
+                .to_string();
+            assert_ne!(work_claimed_task_id, claimed_task_id);
+            let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+                .as_str()
+                .expect("assignment id")
+                .to_string();
+
+            let work_complete_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/work/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "assignment_id": assignment_id,
+                        "task_id": work_claimed_task_id,
+                        "status": "succeeded",
+                        "summary": "compat e2e work complete"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
+            assert_eq!(work_complete_resp.status(), StatusCode::OK);
+            let work_complete_body =
+                axum::body::to_bytes(work_complete_resp.into_body(), usize::MAX)
+                    .await
+                    .expect("work complete body");
+            let work_complete_json: serde_json::Value =
+                serde_json::from_slice(&work_complete_body).expect("work complete json");
+            assert_eq!(work_complete_json["data"]["state"], "Completed");
+            assert_eq!(work_complete_json["data"]["terminal_state"], "Succeeded");
+
+            let heartbeat_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "metadata": {
+                            "worker_mode": "compat-e2e"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let heartbeat_resp = router.clone().oneshot(heartbeat_req).await.unwrap();
+            assert_eq!(heartbeat_resp.status(), StatusCode::OK);
+            let heartbeat_body = axum::body::to_bytes(heartbeat_resp.into_body(), usize::MAX)
+                .await
+                .expect("heartbeat body");
+            let heartbeat_json: serde_json::Value =
+                serde_json::from_slice(&heartbeat_body).expect("heartbeat json");
+            assert_eq!(heartbeat_json["data"]["acknowledged"], true);
+            assert_eq!(heartbeat_json["data"]["metadata_accepted"], true);
+
+            let final_claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let final_claim_resp = router.clone().oneshot(final_claim_req).await.unwrap();
+            assert_eq!(final_claim_resp.status(), StatusCode::OK);
+            let final_claim_body = axum::body::to_bytes(final_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("final claim body");
+            let final_claim_json: serde_json::Value =
+                serde_json::from_slice(&final_claim_body).expect("final claim json");
+            assert_eq!(final_claim_json["data"]["claimed"], false);
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_compat_validation_errors_include_a2a_error_code_details() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let claim_req = Request::builder()
