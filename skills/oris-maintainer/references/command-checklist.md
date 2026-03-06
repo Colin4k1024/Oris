@@ -13,8 +13,11 @@ Run these before selecting work:
 ```bash
 git status --short --branch
 gh auth status
+python3 scripts/sync_issues_roadmap_status.py --dry-run
 gh issue list --state open --limit 20
 ```
+
+If the dry-run reports changed rows (for example new roadmap rows without `issue_number`), run the same command without `--dry-run` before selecting the active issue.
 
 ## 2. Issue Selection
 

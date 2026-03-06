@@ -179,3 +179,21 @@ bash scripts/import_issues_from_csv.sh --repo Colin4k1024/Oris --create-mileston
 ```bash
 bash scripts/import_issues_from_csv.sh --repo Colin4k1024/Oris --dry-run --create-milestones --create-labels
 ```
+
+导入后建议立刻做一次状态对账与编号回填（默认会在 `issue_number` 为空时按标题精确匹配回填）：
+
+```bash
+python3 scripts/sync_issues_roadmap_status.py --repo Colin4k1024/Oris
+```
+
+仅预览不落盘：
+
+```bash
+python3 scripts/sync_issues_roadmap_status.py --repo Colin4k1024/Oris --dry-run
+```
+
+如果只想同步某个路线（例如 EvoMap）：
+
+```bash
+python3 scripts/sync_issues_roadmap_status.py --repo Colin4k1024/Oris --track evomap-alignment --dry-run
+```

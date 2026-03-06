@@ -1,6 +1,7 @@
 pub mod coordinator;
 pub mod evidence;
 pub mod github_adapter;
+pub mod issue_selection;
 pub mod release_gate;
 pub mod runtime_client;
 pub mod state;
