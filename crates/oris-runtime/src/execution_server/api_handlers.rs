@@ -607,6 +607,48 @@ pub struct A2aCompatWorkCompleteResponse {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatHeartbeatRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatAvailableWorkItem {
+    assignment_id: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatHeartbeatResponse {
+    acknowledged: bool,
+    worker_id: String,
+    available_work_count: usize,
+    available_work: Vec<A2aCompatAvailableWorkItem>,
+    metadata_accepted: bool,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatClaimRequest {
     sender_id: Option<String>,
     #[serde(default)]
@@ -1414,6 +1456,7 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
         .route("/a2a/task/complete", post(evolution_a2a_task_complete))
         .route("/a2a/work/claim", post(evolution_a2a_work_claim))
         .route("/a2a/work/complete", post(evolution_a2a_work_complete))
+        .route("/a2a/heartbeat", post(evolution_a2a_heartbeat))
         .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim))
         .route("/a2a/tasks/report", post(evolution_a2a_tasks_report))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
@@ -3593,6 +3636,59 @@ pub async fn evolution_a2a_work_complete(
             state: data.state,
             terminal_state: data.terminal_state,
             summary: data.summary,
+        },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_heartbeat(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatHeartbeatRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatHeartbeatResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = resolve_compat_sender_id(
+        req.sender_id.clone().or(req.worker_id.clone()),
+        req.node_id.clone(),
+        &rid,
+    )?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_authorized_action(
+        &state,
+        &sender_id,
+        A2aCapability::Coordination,
+        A2aPrivilegeAction::TaskSessionStart,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let available_work = list_a2a_fetch_tasks(&state, &sender_id, &protocol_version, &rid)
+        .await?
+        .into_iter()
+        .filter(|task| task.claimable)
+        .map(|task| A2aCompatAvailableWorkItem {
+            assignment_id: task.session_id,
+            task_id: task.task_id,
+            task_summary: task.task_summary,
+            dispatch_id: task.dispatch_id,
+        })
+        .collect::<Vec<_>>();
+    let available_work_count = available_work.len();
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: A2aCompatHeartbeatResponse {
+            acknowledged: true,
+            worker_id: sender_id,
+            available_work_count,
+            available_work,
+            metadata_accepted: req.metadata.is_some(),
         },
     }))
 }
@@ -7999,6 +8095,128 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_heartbeat_reports_deterministic_available_work_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-heartbeat-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        for (task_id, dispatch_id) in [
+            ("compat-heartbeat-task-1", "dispatch-heartbeat-1"),
+            ("compat-heartbeat-task-2", "dispatch-heartbeat-2"),
+        ] {
+            let distribute_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/tasks/distribute")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": "compat-heartbeat-agent",
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "task_summary": format!("summary for {task_id}"),
+                        "dispatch_id": dispatch_id
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+            assert_eq!(distribute_resp.status(), StatusCode::OK);
+        }
+
+        let first_heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-heartbeat-agent",
+                    "metadata": {
+                        "worker_mode": "pull",
+                        "version": "test"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_heartbeat_resp = router.clone().oneshot(first_heartbeat_req).await.unwrap();
+        assert_eq!(first_heartbeat_resp.status(), StatusCode::OK);
+        let first_heartbeat_body =
+            axum::body::to_bytes(first_heartbeat_resp.into_body(), usize::MAX)
+                .await
+                .expect("first heartbeat body");
+        let first_heartbeat_json: serde_json::Value =
+            serde_json::from_slice(&first_heartbeat_body).expect("first heartbeat json");
+        assert_eq!(first_heartbeat_json["data"]["acknowledged"], true);
+        assert_eq!(
+            first_heartbeat_json["data"]["worker_id"],
+            "compat-heartbeat-agent"
+        );
+        assert_eq!(first_heartbeat_json["data"]["metadata_accepted"], true);
+        assert_eq!(first_heartbeat_json["data"]["available_work_count"], 2);
+        assert_eq!(
+            first_heartbeat_json["data"]["available_work"][0]["task_id"],
+            "compat-heartbeat-task-1"
+        );
+        assert_eq!(
+            first_heartbeat_json["data"]["available_work"][1]["task_id"],
+            "compat-heartbeat-task-2"
+        );
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-heartbeat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let second_heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-heartbeat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_heartbeat_resp = router.clone().oneshot(second_heartbeat_req).await.unwrap();
+        assert_eq!(second_heartbeat_resp.status(), StatusCode::OK);
+        let second_heartbeat_body =
+            axum::body::to_bytes(second_heartbeat_resp.into_body(), usize::MAX)
+                .await
+                .expect("second heartbeat body");
+        let second_heartbeat_json: serde_json::Value =
+            serde_json::from_slice(&second_heartbeat_body).expect("second heartbeat json");
+        assert_eq!(second_heartbeat_json["data"]["available_work_count"], 1);
+        assert_eq!(
+            second_heartbeat_json["data"]["available_work"][0]["task_id"],
+            "compat-heartbeat-task-2"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_fetch_validation_errors_include_a2a_error_code_details() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
 
@@ -8149,6 +8367,20 @@ mod tests {
             .unwrap();
         let work_complete_resp = router.oneshot(work_complete_req).await.unwrap();
         assert_eq!(work_complete_resp.status(), StatusCode::NOT_FOUND);
+
+        let heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_resp = router.oneshot(heartbeat_req).await.unwrap();
+        assert_eq!(heartbeat_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[cfg(all(
