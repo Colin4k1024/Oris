@@ -33,6 +33,10 @@ Optional environment variables:
 - `ORIS_API_AUTH_BEARER_TOKEN` (optional; when set, requests must send `Authorization: Bearer <token>`)
 - `ORIS_API_AUTH_API_KEY` (optional; when set, requests may send `x-api-key: <key>`)
 - `ORIS_API_AUTH_API_KEY_ID` (optional; when set with `ORIS_API_AUTH_API_KEY`, requests should send `x-api-key-id` + `x-api-key`)
+- `ORIS_MCP_BOOTSTRAP_ENABLED` (default: `false`; set `true`/`1` to enable MCP capability discovery)
+- `ORIS_MCP_TRANSPORT` (default: `http`; allowed: `http`, `stdio`)
+- `ORIS_MCP_SERVER_NAME` (default: `oris-runtime-mcp`)
+- `ORIS_MCP_SERVER_VERSION` (default: crate version)
 
 Startup now performs backend health checks and exits non-zero on invalid backend config (for example invalid DSN or missing required schema).
 
@@ -68,6 +72,26 @@ Scrape metrics:
 
 ```bash
 curl -s http://127.0.0.1:8080/metrics
+```
+
+## MCP capability discovery smoke test (experimental bootstrap slice)
+
+Enable MCP bootstrap:
+
+```bash
+ORIS_MCP_BOOTSTRAP_ENABLED=true cargo run -p oris_starter_axum
+```
+
+Inspect bootstrap status:
+
+```bash
+curl -s http://127.0.0.1:8080/v1/mcp/bootstrap
+```
+
+Discover MCP capability mappings:
+
+```bash
+curl -s http://127.0.0.1:8080/v1/mcp/capabilities
 ```
 
 ## Where to go next

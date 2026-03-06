@@ -177,16 +177,17 @@ This phase is intentionally **research-oriented**; priorities may shift based on
 - [README](../README.md) — product summary and quick start.
 - [Durable execution: crash recovery and replay](durable-execution.md) — resume from latest, replay from checkpoint_id, operator API.
 - [Public API (stable)](../README.md#public-api-stable) — `oris_runtime::graph`, `oris_runtime::agent`, `oris_runtime::tools`.
+- [MCP bootstrap slice](mcp-bootstrap.md) — feature-gated bootstrap + capability discovery surface and follow-up slices.
 - Code: `crates/oris-runtime/src/graph/` (execution, persistence, interrupts), `crates/oris-runtime/src/agent/`, [durable_agent_job](../crates/oris-runtime/examples/durable_agent_job.rs) example.
 
 ### RFC Closeout (March 6, 2026)
 
 This section captures the execution decisions for roadmap RFC issues `#106`-`#109`:
 
-- `#106` (short-term): `/a2a` compatibility alignment was executed via `#110`-`#119` and released in `oris-runtime v0.16.0`. Remaining short-term topics (deterministic scheduler hardening, MCP support path, and evolution stabilization) stay in backlog and are not declared complete by this RFC closeout.
+- `#106` (short-term): `/a2a` compatibility alignment was executed via `#110`-`#119` and released in `oris-runtime v0.16.0`. Follow-on short-term topics were executed incrementally (`#121`-`#123`) for deterministic scheduler hardening and MCP bootstrap discovery; evolution stabilization remains open in `#124`.
 - `#107` (mid-term): Layer 3 DSL and multi-language SDK remain directional priorities after Phase 1 kernel hardening; no direct runtime-surface change is bundled in this RFC closeout.
 - `#108` (long-term): distributed/federated execution and ecosystem strategy remain long-horizon planning guidance; this closeout records direction, not implementation delivery.
-- `#109` (MCP): MCP is retained as a future implementation theme. This RFC closeout records prioritization intent only and does not claim an official MCP server implementation in the current release.
+- `#109` (MCP): this closeout now tracks a delivered first slice (`#123`): feature-gated MCP bootstrap + capability discovery with Oris capability registry mapping. Full MCP protocol lifecycle remains a follow-up sequence (see `docs/mcp-bootstrap.md`).
 
 ---
 

@@ -6,6 +6,8 @@ pub mod benchmark_suite;
 mod graph_bridge;
 
 pub use api_handlers::{build_router, ApiRole, ExecutionApiState};
+#[cfg(feature = "mcp-experimental")]
+pub use api_handlers::{McpBootstrapConfig, McpCapabilityMapping, McpTransportKind};
 #[cfg(feature = "sqlite-persistence")]
 pub use benchmark_suite::{
     canonical_runtime_benchmark_baseline_path, run_runtime_benchmark_suite,

@@ -1,6 +1,6 @@
 [package]
 name = "oris-runtime"
-version = "0.18.1"
+version = "0.19.0"
 edition = "2021"
 rust-version = "1.80"
 publish = true
@@ -240,6 +240,7 @@ execution-server = [
     "oris-kernel/execution-server",
     "oris-execution-runtime/execution-server",
 ]
+mcp-experimental = ["execution-server"]
 evokernel-facade = ["dep:oris-evokernel"]
 evolution-experimental = ["evokernel-facade"]
 governor-experimental = ["evokernel-facade"]

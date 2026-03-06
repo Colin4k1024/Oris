@@ -191,6 +191,128 @@ pub struct StaticApiKeyConfig {
     pub role: ApiRole,
 }
 
+#[cfg(feature = "mcp-experimental")]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum McpTransportKind {
+    #[serde(rename = "http")]
+    Http,
+    #[serde(rename = "stdio")]
+    Stdio,
+}
+
+#[cfg(feature = "mcp-experimental")]
+impl McpTransportKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Stdio => "stdio",
+        }
+    }
+
+    fn from_env_value(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "http" | "http-json" | "http_json" | "sse" => Some(Self::Http),
+            "stdio" => Some(Self::Stdio),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "mcp-experimental")]
+impl Default for McpTransportKind {
+    fn default() -> Self {
+        Self::Http
+    }
+}
+
+#[cfg(feature = "mcp-experimental")]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpBootstrapConfig {
+    pub enabled: bool,
+    pub transport: McpTransportKind,
+    pub server_name: String,
+    pub server_version: String,
+}
+
+#[cfg(feature = "mcp-experimental")]
+impl Default for McpBootstrapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            transport: McpTransportKind::default(),
+            server_name: "oris-runtime-mcp".to_string(),
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "mcp-experimental")]
+impl McpBootstrapConfig {
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+        if let Ok(raw) = std::env::var("ORIS_MCP_BOOTSTRAP_ENABLED") {
+            cfg.enabled = parse_env_bool(raw.as_str());
+        }
+        if let Ok(raw) = std::env::var("ORIS_MCP_TRANSPORT") {
+            if let Some(transport) = McpTransportKind::from_env_value(raw.as_str()) {
+                cfg.transport = transport;
+            }
+        }
+        if let Ok(raw) = std::env::var("ORIS_MCP_SERVER_NAME") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                cfg.server_name = trimmed.to_string();
+            }
+        }
+        if let Ok(raw) = std::env::var("ORIS_MCP_SERVER_VERSION") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                cfg.server_version = trimmed.to_string();
+            }
+        }
+        cfg
+    }
+}
+
+#[cfg(feature = "mcp-experimental")]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpCapabilityMapping {
+    pub tool_name: String,
+    pub description: String,
+    pub oris_http_method: String,
+    pub oris_route: String,
+    pub contract_version: String,
+    pub input_schema: Value,
+}
+
+#[cfg(feature = "mcp-experimental")]
+fn parse_env_bool(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+#[cfg(feature = "mcp-experimental")]
+fn default_mcp_capability_registry() -> Vec<McpCapabilityMapping> {
+    vec![McpCapabilityMapping {
+        tool_name: "oris.runtime.jobs.run".to_string(),
+        description: "Submit a durable execution run through the existing Oris runtime jobs API."
+            .to_string(),
+        oris_http_method: "POST".to_string(),
+        oris_route: "/v1/jobs/run".to_string(),
+        contract_version: "mcp-bootstrap-v0".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "thread_id": { "type": "string" },
+                "input": { "type": "string" },
+                "idempotency_key": { "type": "string" }
+            }
+        }),
+    }]
+}
+
 #[cfg(all(
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
@@ -1727,6 +1849,10 @@ pub struct ExecutionApiState {
     ))]
     a2a_compat_task_queue: Arc<RwLock<VecDeque<A2aCompatQueueEntry>>>,
     pub auth: ExecutionApiAuthConfig,
+    #[cfg(feature = "mcp-experimental")]
+    pub mcp_bootstrap: McpBootstrapConfig,
+    #[cfg(feature = "mcp-experimental")]
+    pub mcp_capability_registry: Arc<Vec<McpCapabilityMapping>>,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
     #[cfg(feature = "sqlite-persistence")]
@@ -1772,6 +1898,10 @@ impl ExecutionApiState {
             ))]
             a2a_compat_task_queue: Arc::new(RwLock::new(VecDeque::new())),
             auth: ExecutionApiAuthConfig::default(),
+            #[cfg(feature = "mcp-experimental")]
+            mcp_bootstrap: McpBootstrapConfig::default(),
+            #[cfg(feature = "mcp-experimental")]
+            mcp_capability_registry: Arc::new(default_mcp_capability_registry()),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
             #[cfg(feature = "sqlite-persistence")]
@@ -1924,10 +2054,31 @@ impl ExecutionApiState {
         }
         self
     }
+
+    #[cfg(feature = "mcp-experimental")]
+    pub fn with_mcp_bootstrap(mut self, config: McpBootstrapConfig) -> Self {
+        self.mcp_bootstrap = config;
+        self
+    }
+
+    #[cfg(feature = "mcp-experimental")]
+    pub fn with_mcp_bootstrap_from_env(mut self) -> Self {
+        self.mcp_bootstrap = McpBootstrapConfig::from_env();
+        self
+    }
+
+    #[cfg(feature = "mcp-experimental")]
+    pub fn with_mcp_capability_registry(
+        mut self,
+        capability_registry: Vec<McpCapabilityMapping>,
+    ) -> Self {
+        self.mcp_capability_registry = Arc::new(capability_registry);
+        self
+    }
 }
 
 pub fn build_router(state: ExecutionApiState) -> Router {
-    let secured = with_evolution_routes(
+    let secured = with_mcp_routes(with_evolution_routes(
         Router::new()
             .route("/v1/audit/logs", get(list_audit_logs))
             .route(
@@ -1972,7 +2123,7 @@ pub fn build_router(state: ExecutionApiState) -> Router {
                 "/v1/interrupts/:interrupt_id/reject",
                 post(reject_interrupt),
             ),
-    )
+    ))
     .layer(from_fn_with_state(state.clone(), auth_middleware))
     .layer(from_fn(request_log_middleware))
     .layer(from_fn_with_state(state.clone(), audit_middleware))
@@ -2064,6 +2215,80 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
 #[cfg(not(feature = "evolution-network-experimental"))]
 fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
     router
+}
+
+#[cfg(feature = "mcp-experimental")]
+fn with_mcp_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
+    router
+        .route("/v1/mcp/bootstrap", get(mcp_bootstrap_status))
+        .route("/v1/mcp/capabilities", get(mcp_capability_discovery))
+}
+
+#[cfg(not(feature = "mcp-experimental"))]
+fn with_mcp_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
+    router
+}
+
+#[cfg(feature = "mcp-experimental")]
+#[derive(Clone, Debug, serde::Serialize)]
+struct McpBootstrapStatusResponse {
+    enabled: bool,
+    transport: McpTransportKind,
+    server_name: String,
+    server_version: String,
+    capability_count: usize,
+}
+
+#[cfg(feature = "mcp-experimental")]
+#[derive(Clone, Debug, serde::Serialize)]
+struct McpCapabilityDiscoveryResponse {
+    server_name: String,
+    server_version: String,
+    transport: McpTransportKind,
+    capabilities: Vec<McpCapabilityMapping>,
+}
+
+#[cfg(feature = "mcp-experimental")]
+async fn mcp_bootstrap_status(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<McpBootstrapStatusResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: McpBootstrapStatusResponse {
+            enabled: state.mcp_bootstrap.enabled,
+            transport: state.mcp_bootstrap.transport.clone(),
+            server_name: state.mcp_bootstrap.server_name.clone(),
+            server_version: state.mcp_bootstrap.server_version.clone(),
+            capability_count: state.mcp_capability_registry.len(),
+        },
+    }))
+}
+
+#[cfg(feature = "mcp-experimental")]
+async fn mcp_capability_discovery(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<McpCapabilityDiscoveryResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    if !state.mcp_bootstrap.enabled {
+        return Err(ApiError::not_found(
+            "mcp capability discovery is disabled by bootstrap config",
+        )
+        .with_request_id(rid));
+    }
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: McpCapabilityDiscoveryResponse {
+            server_name: state.mcp_bootstrap.server_name.clone(),
+            server_version: state.mcp_bootstrap.server_version.clone(),
+            transport: state.mcp_bootstrap.transport.clone(),
+            capabilities: state.mcp_capability_registry.as_ref().clone(),
+        },
+    }))
 }
 
 async fn healthz_endpoint(
@@ -13784,6 +14009,98 @@ mod tests {
         assert_eq!(health_json["evolution"]["status"], "ok");
         #[cfg(not(feature = "evolution-network-experimental"))]
         assert!(health_json["evolution"].is_null());
+    }
+
+    #[cfg(feature = "mcp-experimental")]
+    #[tokio::test]
+    async fn mcp_bootstrap_status_defaults_disabled_and_gates_capability_discovery() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let bootstrap_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/mcp/bootstrap")
+            .body(Body::empty())
+            .unwrap();
+        let bootstrap_resp = router.clone().oneshot(bootstrap_req).await.unwrap();
+        assert_eq!(bootstrap_resp.status(), StatusCode::OK);
+        let bootstrap_body = axum::body::to_bytes(bootstrap_resp.into_body(), usize::MAX)
+            .await
+            .expect("bootstrap body");
+        let bootstrap_json: serde_json::Value =
+            serde_json::from_slice(&bootstrap_body).expect("bootstrap json");
+        assert_eq!(bootstrap_json["data"]["enabled"], false);
+        assert_eq!(bootstrap_json["data"]["transport"], "http");
+        assert_eq!(bootstrap_json["data"]["server_name"], "oris-runtime-mcp");
+        assert_eq!(bootstrap_json["data"]["capability_count"], 1);
+
+        let capabilities_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/mcp/capabilities")
+            .body(Body::empty())
+            .unwrap();
+        let capabilities_resp = router.clone().oneshot(capabilities_req).await.unwrap();
+        assert_eq!(capabilities_resp.status(), StatusCode::NOT_FOUND);
+        let capabilities_body = axum::body::to_bytes(capabilities_resp.into_body(), usize::MAX)
+            .await
+            .expect("capabilities body");
+        let capabilities_json: serde_json::Value =
+            serde_json::from_slice(&capabilities_body).expect("capabilities json");
+        assert_eq!(
+            capabilities_json["error"]["message"],
+            "mcp capability discovery is disabled by bootstrap config"
+        );
+    }
+
+    #[cfg(feature = "mcp-experimental")]
+    #[tokio::test]
+    async fn mcp_capability_discovery_returns_registry_when_enabled() {
+        let custom_capability = super::McpCapabilityMapping {
+            tool_name: "oris.runtime.jobs.inspect".to_string(),
+            description: "Inspect a durable execution job.".to_string(),
+            oris_http_method: "GET".to_string(),
+            oris_route: "/v1/jobs/{thread_id}".to_string(),
+            contract_version: "mcp-bootstrap-v0".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["thread_id"],
+                "properties": {
+                    "thread_id": { "type": "string" }
+                }
+            }),
+        };
+
+        let mut bootstrap = super::McpBootstrapConfig::default();
+        bootstrap.enabled = true;
+        bootstrap.transport = super::McpTransportKind::Stdio;
+        bootstrap.server_name = "oris-test-mcp".to_string();
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await)
+                .with_mcp_bootstrap(bootstrap.clone())
+                .with_mcp_capability_registry(vec![custom_capability]),
+        );
+
+        let capabilities_req = Request::builder()
+            .method(Method::GET)
+            .uri("/v1/mcp/capabilities")
+            .body(Body::empty())
+            .unwrap();
+        let capabilities_resp = router.clone().oneshot(capabilities_req).await.unwrap();
+        assert_eq!(capabilities_resp.status(), StatusCode::OK);
+        let capabilities_body = axum::body::to_bytes(capabilities_resp.into_body(), usize::MAX)
+            .await
+            .expect("capabilities body");
+        let capabilities_json: serde_json::Value =
+            serde_json::from_slice(&capabilities_body).expect("capabilities json");
+        assert_eq!(capabilities_json["data"]["server_name"], "oris-test-mcp");
+        assert_eq!(capabilities_json["data"]["transport"], "stdio");
+        assert_eq!(
+            capabilities_json["data"]["capabilities"][0]["tool_name"],
+            "oris.runtime.jobs.inspect"
+        );
+        assert_eq!(
+            capabilities_json["data"]["capabilities"][0]["oris_route"],
+            "/v1/jobs/{thread_id}"
+        );
     }
 
     #[cfg(all(

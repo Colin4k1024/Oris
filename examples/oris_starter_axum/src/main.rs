@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::routing::get;
 use axum::{Json, Router};
-use oris_execution_server::{build_router, ExecutionApiState};
+use oris_execution_server::{build_router, ExecutionApiState, McpBootstrapConfig};
 use oris_runtime::execution_runtime::{RuntimeStorageBackend, RuntimeStorageConfig};
 use oris_runtime::graph::{function_node, MessagesState, SqliteSaver, StateGraph, END, START};
 use oris_runtime::schemas::messages::Message;
@@ -71,6 +71,15 @@ async fn main() -> Result<()> {
     if let (Some(key_id), Some(secret)) = (api_key_id.clone(), api_key.clone()) {
         state = state.with_persisted_api_key_record(key_id, secret, true);
     }
+    let mcp_bootstrap = McpBootstrapConfig::from_env();
+    if mcp_bootstrap.enabled {
+        tracing::info!(
+            "mcp bootstrap enabled (transport={}, server={})",
+            mcp_bootstrap.transport.as_str(),
+            mcp_bootstrap.server_name.as_str()
+        );
+    }
+    state = state.with_mcp_bootstrap(mcp_bootstrap);
 
     let app = Router::new()
         .route("/healthz", get(healthz))
