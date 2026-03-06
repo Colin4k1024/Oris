@@ -474,6 +474,45 @@ pub struct A2aCompatReportResponse {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatTaskCompleteRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    task_id: String,
+    #[serde(default)]
+    status: Option<A2aCompatReportStatus>,
+    #[serde(default)]
+    success: Option<bool>,
+    summary: Option<String>,
+    #[serde(default)]
+    retryable: Option<bool>,
+    #[serde(default)]
+    retry_after_ms: Option<u64>,
+    #[serde(default)]
+    failure_code: Option<A2aErrorCode>,
+    #[serde(default)]
+    failure_details: Option<String>,
+    #[serde(default)]
+    used_capsule: Option<bool>,
+    #[serde(default)]
+    capsule_id: Option<String>,
+    #[serde(default)]
+    reasoning_steps_avoided: Option<u64>,
+    #[serde(default)]
+    fallback_reason: Option<String>,
+    #[serde(default)]
+    task_class_id: Option<String>,
+    #[serde(default)]
+    task_label: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatClaimRequest {
     sender_id: Option<String>,
     #[serde(default)]
@@ -1278,6 +1317,7 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
             post(evolution_a2a_tasks_distribute),
         )
         .route("/a2a/task/claim", post(evolution_a2a_tasks_claim))
+        .route("/a2a/task/complete", post(evolution_a2a_task_complete))
         .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim))
         .route("/a2a/tasks/report", post(evolution_a2a_tasks_report))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
@@ -3120,6 +3160,75 @@ async fn find_a2a_session_id_for_task(
                 None
             }
         })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn resolve_compat_task_complete_status(
+    req: &A2aCompatTaskCompleteRequest,
+) -> A2aCompatReportStatus {
+    if let Some(status) = req.status.clone() {
+        return status;
+    }
+    match req.success {
+        Some(false) => A2aCompatReportStatus::Failed,
+        Some(true) | None => A2aCompatReportStatus::Succeeded,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn default_task_complete_summary(status: &A2aCompatReportStatus) -> &'static str {
+    match status {
+        A2aCompatReportStatus::Succeeded => "a2a task completed",
+        A2aCompatReportStatus::Failed => "a2a task failed",
+        A2aCompatReportStatus::Cancelled => "a2a task cancelled",
+        A2aCompatReportStatus::Running => "a2a task in progress",
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_task_complete(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatTaskCompleteRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
+    let status = resolve_compat_task_complete_status(&req);
+    let summary = req
+        .summary
+        .clone()
+        .unwrap_or_else(|| default_task_complete_summary(&status).to_string());
+    evolution_a2a_tasks_report(
+        state,
+        headers,
+        Json(A2aCompatReportRequest {
+            sender_id: req.sender_id,
+            node_id: req.node_id,
+            protocol_version: req.protocol_version,
+            task_id: req.task_id,
+            status,
+            summary,
+            progress_pct: None,
+            retryable: req.retryable,
+            retry_after_ms: req.retry_after_ms,
+            failure_code: req.failure_code,
+            failure_details: req.failure_details,
+            used_capsule: req.used_capsule,
+            capsule_id: req.capsule_id,
+            reasoning_steps_avoided: req.reasoning_steps_avoided,
+            fallback_reason: req.fallback_reason,
+            task_class_id: req.task_class_id,
+            task_label: req.task_label,
+        }),
+    )
+    .await
 }
 
 #[cfg(all(
@@ -7190,6 +7299,134 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_task_complete_endpoint_maps_terminal_state_and_clears_claimability() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-task-complete-agent",
+            "A4",
+            &[
+                "Coordination",
+                "SupervisedDevloop",
+                "ReplayFeedback",
+                "EvolutionFetch",
+            ],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-complete-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-task-complete-1",
+                    "task_summary": "compat task complete endpoint",
+                    "dispatch_id": "dispatch-compat-task-complete-1",
+                    "summary": "compat task complete dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-complete-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-task-complete-agent",
+                    "task_id": "compat-task-complete-1",
+                    "success": true,
+                    "summary": "compat task complete endpoint succeeded",
+                    "used_capsule": true,
+                    "capsule_id": "compat-task-complete-capsule-1",
+                    "reasoning_steps_avoided": 3,
+                    "task_class_id": "compat.task.complete",
+                    "task_label": "Compat task complete endpoint"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+
+        let post_complete_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-complete-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let post_complete_claim_resp = router
+            .clone()
+            .oneshot(post_complete_claim_req)
+            .await
+            .unwrap();
+        assert_eq!(post_complete_claim_resp.status(), StatusCode::OK);
+        let post_complete_claim_body =
+            axum::body::to_bytes(post_complete_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("post-complete claim body");
+        let post_complete_claim_json: serde_json::Value =
+            serde_json::from_slice(&post_complete_claim_body).expect("post-complete claim json");
+        assert_eq!(post_complete_claim_json["data"]["claimed"], false);
+        assert!(post_complete_claim_json["data"]["task"].is_null());
+
+        let lifecycle_json = fetch_lifecycle_events(
+            &router,
+            "compat-task-complete-1",
+            "compat-task-complete-agent",
+        )
+        .await;
+        let states = lifecycle_json["data"]["events"]
+            .as_array()
+            .expect("lifecycle events")
+            .iter()
+            .filter_map(|event| event["state"].as_str())
+            .collect::<Vec<_>>();
+        assert!(states.contains(&"Succeeded"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_fetch_validation_errors_include_a2a_error_code_details() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
 
@@ -7296,6 +7533,21 @@ mod tests {
             .unwrap();
         let claim_resp = router.oneshot(claim_req).await.unwrap();
         assert_eq!(claim_resp.status(), StatusCode::NOT_FOUND);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent",
+                    "task_id": "feature-gate-task-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[cfg(all(
