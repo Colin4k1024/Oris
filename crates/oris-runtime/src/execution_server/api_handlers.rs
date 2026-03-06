@@ -1184,6 +1184,12 @@ struct RuntimeMetricsInner {
     a2a_report_to_capture_latency_ms_sum: f64,
     a2a_report_to_capture_latency_ms_count: u64,
     a2a_report_to_capture_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_fetch_total: u64,
+    a2a_task_claim_total: u64,
+    a2a_task_complete_total: u64,
+    a2a_work_claim_total: u64,
+    a2a_work_complete_total: u64,
+    a2a_heartbeat_total: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1208,6 +1214,12 @@ struct RuntimeMetricsSnapshot {
     a2a_report_to_capture_latency_ms_sum: f64,
     a2a_report_to_capture_latency_ms_count: u64,
     a2a_report_to_capture_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_fetch_total: u64,
+    a2a_task_claim_total: u64,
+    a2a_task_complete_total: u64,
+    a2a_work_claim_total: u64,
+    a2a_work_complete_total: u64,
+    a2a_heartbeat_total: u64,
 }
 
 impl Default for RuntimeMetrics {
@@ -1234,12 +1246,54 @@ impl Default for RuntimeMetrics {
                 a2a_report_to_capture_latency_ms_sum: 0.0,
                 a2a_report_to_capture_latency_ms_count: 0,
                 a2a_report_to_capture_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_fetch_total: 0,
+                a2a_task_claim_total: 0,
+                a2a_task_complete_total: 0,
+                a2a_work_claim_total: 0,
+                a2a_work_complete_total: 0,
+                a2a_heartbeat_total: 0,
             })),
         }
     }
 }
 
 impl RuntimeMetrics {
+    fn record_a2a_fetch(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_fetch_total += 1;
+        }
+    }
+
+    fn record_a2a_task_claim(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_task_claim_total += 1;
+        }
+    }
+
+    fn record_a2a_task_complete(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_task_complete_total += 1;
+        }
+    }
+
+    fn record_a2a_work_claim(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_work_claim_total += 1;
+        }
+    }
+
+    fn record_a2a_work_complete(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_work_complete_total += 1;
+        }
+    }
+
+    fn record_a2a_heartbeat(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_heartbeat_total += 1;
+        }
+    }
+
     fn record_lease_operation(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.lease_operations_total += 1;
@@ -1339,6 +1393,12 @@ impl RuntimeMetrics {
                     .a2a_report_to_capture_latency_ms_count,
                 a2a_report_to_capture_latency_ms_buckets: inner
                     .a2a_report_to_capture_latency_ms_buckets,
+                a2a_fetch_total: inner.a2a_fetch_total,
+                a2a_task_claim_total: inner.a2a_task_claim_total,
+                a2a_task_complete_total: inner.a2a_task_complete_total,
+                a2a_work_claim_total: inner.a2a_work_claim_total,
+                a2a_work_complete_total: inner.a2a_work_complete_total,
+                a2a_heartbeat_total: inner.a2a_heartbeat_total,
             }
         } else {
             RuntimeMetricsSnapshot {
@@ -1362,6 +1422,12 @@ impl RuntimeMetrics {
                 a2a_report_to_capture_latency_ms_sum: 0.0,
                 a2a_report_to_capture_latency_ms_count: 0,
                 a2a_report_to_capture_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_fetch_total: 0,
+                a2a_task_claim_total: 0,
+                a2a_task_complete_total: 0,
+                a2a_work_claim_total: 0,
+                a2a_work_complete_total: 0,
+                a2a_heartbeat_total: 0,
             }
         }
     }
@@ -1481,6 +1547,50 @@ impl RuntimeMetrics {
             snapshot.a2a_report_to_capture_latency_ms_count,
             snapshot.a2a_report_to_capture_latency_ms_sum,
         );
+        out.push_str(
+            "# HELP oris_a2a_fetch_total Total compatibility /a2a/fetch requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_fetch_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_fetch_total {}\n",
+            snapshot.a2a_fetch_total
+        ));
+        out.push_str("# HELP oris_a2a_task_claim_total Total compatibility /a2a/task(s)/claim requests served.\n");
+        out.push_str("# TYPE oris_a2a_task_claim_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_task_claim_total {}\n",
+            snapshot.a2a_task_claim_total
+        ));
+        out.push_str(
+            "# HELP oris_a2a_task_complete_total Total compatibility /a2a/task/complete requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_task_complete_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_task_complete_total {}\n",
+            snapshot.a2a_task_complete_total
+        ));
+        out.push_str(
+            "# HELP oris_a2a_work_claim_total Total compatibility /a2a/work/claim requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_work_claim_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_work_claim_total {}\n",
+            snapshot.a2a_work_claim_total
+        ));
+        out.push_str("# HELP oris_a2a_work_complete_total Total compatibility /a2a/work/complete requests served.\n");
+        out.push_str("# TYPE oris_a2a_work_complete_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_work_complete_total {}\n",
+            snapshot.a2a_work_complete_total
+        ));
+        out.push_str(
+            "# HELP oris_a2a_heartbeat_total Total compatibility /a2a/heartbeat requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_heartbeat_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_heartbeat_total {}\n",
+            snapshot.a2a_heartbeat_total
+        ));
         out
     }
 }
@@ -3700,6 +3810,7 @@ pub async fn evolution_a2a_fetch_compat(
 ) -> Result<Json<ApiEnvelope<A2aCompatFetchResponse>>, ApiError> {
     let rid = request_id(&headers);
     let req = parse_gep_envelope_or_plain(raw, Some("fetch"), &rid)?;
+    state.runtime_metrics.record_a2a_fetch();
     evolution_a2a_fetch(state, headers, Json(req)).await
 }
 
@@ -3728,6 +3839,7 @@ pub async fn evolution_a2a_tasks_claim_compat(
 ) -> Result<Json<ApiEnvelope<A2aCompatClaimResponse>>, ApiError> {
     let rid = request_id(&headers);
     let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_task_claim();
     evolution_a2a_tasks_claim(state, headers, Json(req)).await
 }
 
@@ -3756,6 +3868,7 @@ pub async fn evolution_a2a_task_complete_compat(
 ) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
     let rid = request_id(&headers);
     let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_task_complete();
     evolution_a2a_task_complete(state, headers, Json(req)).await
 }
 
@@ -3770,6 +3883,7 @@ pub async fn evolution_a2a_work_claim_compat(
 ) -> Result<Json<ApiEnvelope<A2aCompatWorkClaimResponse>>, ApiError> {
     let rid = request_id(&headers);
     let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_work_claim();
     evolution_a2a_work_claim(state, headers, Json(req)).await
 }
 
@@ -3784,6 +3898,7 @@ pub async fn evolution_a2a_work_complete_compat(
 ) -> Result<Json<ApiEnvelope<A2aCompatWorkCompleteResponse>>, ApiError> {
     let rid = request_id(&headers);
     let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_work_complete();
     evolution_a2a_work_complete(state, headers, Json(req)).await
 }
 
@@ -3798,6 +3913,7 @@ pub async fn evolution_a2a_heartbeat_compat(
 ) -> Result<Json<ApiEnvelope<A2aCompatHeartbeatResponse>>, ApiError> {
     let rid = request_id(&headers);
     let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_heartbeat();
     evolution_a2a_heartbeat(state, headers, Json(req)).await
 }
 
@@ -11309,7 +11425,7 @@ mod tests {
                             "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
                         }
                     ],
-                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback"]
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback", "EvolutionFetch"]
                 })
                 .to_string(),
             ))
@@ -11424,6 +11540,244 @@ mod tests {
                 && log.result == "success"
                 && log.request_id == "req-a2a-compat-report-complete"
         }));
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn audit_logs_capture_a2a_compat_fetch_work_heartbeat_actions_with_actor() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_compat_node_secret_with_role("compat-audit-secret", ApiRole::Operator);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+        let node_id = "a2a-compat-node-audit";
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("x-request-id", "req-a2a-compat2-hello")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "a2a-compat-audit-agent-2",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback", "EvolutionFetch"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+
+        for (task_id, dispatch_id, request_id) in [
+            (
+                "a2a-compat-audit-task-2a",
+                "dispatch-a2a-compat-audit-2a",
+                "req-a2a-compat2-distribute-1",
+            ),
+            (
+                "a2a-compat-audit-task-2b",
+                "dispatch-a2a-compat-audit-2b",
+                "req-a2a-compat2-distribute-2",
+            ),
+        ] {
+            let distribute_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/tasks/distribute")
+                .header("x-request-id", request_id)
+                .header("authorization", "Bearer compat-audit-secret")
+                .header("x-node-id", node_id)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": "a2a-compat-audit-agent-2",
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "task_summary": "compat audit task",
+                        "dispatch_id": dispatch_id,
+                        "summary": "compat dispatch"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+            assert_eq!(distribute_resp.status(), StatusCode::OK);
+        }
+
+        let fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("x-request-id", "req-a2a-compat2-fetch")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+        let fetch_status = fetch_resp.status();
+        let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("compat fetch body");
+        assert_eq!(
+            fetch_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&fetch_body)
+        );
+
+        let task_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("x-request-id", "req-a2a-compat2-task-claim")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let task_claim_resp = router.clone().oneshot(task_claim_req).await.unwrap();
+        assert_eq!(task_claim_resp.status(), StatusCode::OK);
+        let task_claim_body = axum::body::to_bytes(task_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("task claim body");
+        let task_claim_json: serde_json::Value =
+            serde_json::from_slice(&task_claim_body).expect("task claim json");
+        let task_id = task_claim_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+
+        let task_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("x-request-id", "req-a2a-compat2-task-complete")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": task_id,
+                    "status": "succeeded",
+                    "summary": "compat task complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let task_complete_resp = router.clone().oneshot(task_complete_req).await.unwrap();
+        assert_eq!(task_complete_resp.status(), StatusCode::OK);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("x-request-id", "req-a2a-compat2-work-claim")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::OK);
+        let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("work claim body");
+        let work_claim_json: serde_json::Value =
+            serde_json::from_slice(&work_claim_body).expect("work claim json");
+        let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("assignment id")
+            .to_string();
+
+        let work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("x-request-id", "req-a2a-compat2-work-complete")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "assignment_id": assignment_id,
+                    "status": "succeeded",
+                    "summary": "compat work complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
+        assert_eq!(work_complete_resp.status(), StatusCode::OK);
+
+        let heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("x-request-id", "req-a2a-compat2-heartbeat")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_resp = router.clone().oneshot(heartbeat_req).await.unwrap();
+        assert_eq!(heartbeat_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(500).expect("list audit logs");
+        for (request_id, action) in [
+            ("req-a2a-compat2-hello", "a2a.compat.hello"),
+            ("req-a2a-compat2-fetch", "a2a.compat.fetch"),
+            ("req-a2a-compat2-task-claim", "a2a.compat.claim"),
+            ("req-a2a-compat2-task-complete", "a2a.compat.report"),
+            ("req-a2a-compat2-work-claim", "a2a.compat.work.claim"),
+            ("req-a2a-compat2-work-complete", "a2a.compat.work.complete"),
+            ("req-a2a-compat2-heartbeat", "a2a.compat.heartbeat"),
+        ] {
+            assert!(logs.iter().any(|log| {
+                log.request_id == request_id
+                    && log.action == action
+                    && log.result == "success"
+                    && log.actor_type == "node_secret"
+                    && log.actor_role.as_deref() == Some("operator")
+                    && log.actor_id.as_deref() == Some(node_id)
+            }));
+        }
     }
 
     #[cfg(feature = "sqlite-persistence")]
@@ -12667,7 +13021,12 @@ mod tests {
             "/evolution/a2a/hello",
             "metrics-compat-agent",
             "A4",
-            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[
+                "Coordination",
+                "SupervisedDevloop",
+                "ReplayFeedback",
+                "EvolutionFetch",
+            ],
             &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
         )
         .await;
@@ -12775,6 +13134,179 @@ mod tests {
         let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
         assert_eq!(complete_resp.status(), StatusCode::OK);
 
+        let compat_distribute_task_2_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "metrics-compat-task-2",
+                    "task_summary": "metrics compat task 2",
+                    "dispatch_id": "dispatch-metrics-compat-2",
+                    "summary": "metrics compat distribute 2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_distribute_task_2_resp = router
+            .clone()
+            .oneshot(compat_distribute_task_2_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_distribute_task_2_resp.status(), StatusCode::OK);
+
+        let compat_distribute_task_3_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "metrics-compat-task-3",
+                    "task_summary": "metrics compat task 3",
+                    "dispatch_id": "dispatch-metrics-compat-3",
+                    "summary": "metrics compat distribute 3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_distribute_task_3_resp = router
+            .clone()
+            .oneshot(compat_distribute_task_3_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_distribute_task_3_resp.status(), StatusCode::OK);
+
+        let compat_fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_fetch_resp = router.clone().oneshot(compat_fetch_req).await.unwrap();
+        assert_eq!(compat_fetch_resp.status(), StatusCode::OK);
+
+        let compat_task_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_task_claim_resp = router.clone().oneshot(compat_task_claim_req).await.unwrap();
+        assert_eq!(compat_task_claim_resp.status(), StatusCode::OK);
+        let compat_task_claim_body =
+            axum::body::to_bytes(compat_task_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("compat task claim body");
+        let compat_task_claim_json: serde_json::Value =
+            serde_json::from_slice(&compat_task_claim_body).expect("compat task claim json");
+        assert_eq!(compat_task_claim_json["data"]["claimed"], true);
+        let compat_task_id = compat_task_claim_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("compat task id")
+            .to_string();
+
+        let compat_task_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": compat_task_id,
+                    "status": "succeeded",
+                    "summary": "metrics compat task complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_task_complete_resp = router
+            .clone()
+            .oneshot(compat_task_complete_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_task_complete_resp.status(), StatusCode::OK);
+
+        let compat_work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_work_claim_resp = router.clone().oneshot(compat_work_claim_req).await.unwrap();
+        assert_eq!(compat_work_claim_resp.status(), StatusCode::OK);
+        let compat_work_claim_body =
+            axum::body::to_bytes(compat_work_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("compat work claim body");
+        let compat_work_claim_json: serde_json::Value =
+            serde_json::from_slice(&compat_work_claim_body).expect("compat work claim json");
+        assert_eq!(compat_work_claim_json["data"]["claimed"], true);
+        let compat_assignment_id = compat_work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("compat assignment id")
+            .to_string();
+
+        let compat_work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "assignment_id": compat_assignment_id,
+                    "status": "succeeded",
+                    "summary": "metrics compat work complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_work_complete_resp = router
+            .clone()
+            .oneshot(compat_work_complete_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_work_complete_resp.status(), StatusCode::OK);
+
+        let compat_heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_heartbeat_resp = router.clone().oneshot(compat_heartbeat_req).await.unwrap();
+        assert_eq!(compat_heartbeat_resp.status(), StatusCode::OK);
+
         let metrics_req = Request::builder()
             .method(Method::GET)
             .uri("/metrics")
@@ -12789,8 +13321,14 @@ mod tests {
 
         assert!(metrics_text.contains("# HELP oris_a2a_task_queue_depth"));
         assert!(metrics_text.contains("oris_a2a_task_lease_expired_total 1"));
-        assert!(metrics_text.contains("oris_a2a_task_claim_latency_ms_count 2"));
-        assert!(metrics_text.contains("oris_a2a_report_to_capture_latency_ms_count 1"));
+        assert!(metrics_text.contains("oris_a2a_task_claim_latency_ms_count 4"));
+        assert!(metrics_text.contains("oris_a2a_report_to_capture_latency_ms_count 3"));
+        assert!(metrics_text.contains("oris_a2a_fetch_total 1"));
+        assert!(metrics_text.contains("oris_a2a_task_claim_total 1"));
+        assert!(metrics_text.contains("oris_a2a_task_complete_total 1"));
+        assert!(metrics_text.contains("oris_a2a_work_claim_total 1"));
+        assert!(metrics_text.contains("oris_a2a_work_complete_total 1"));
+        assert!(metrics_text.contains("oris_a2a_heartbeat_total 1"));
     }
 
     #[cfg(feature = "evolution-network-experimental")]
@@ -12861,6 +13399,12 @@ mod tests {
             "oris_a2a_task_claim_latency_ms_bucket",
             "oris_a2a_task_lease_expired_total",
             "oris_a2a_report_to_capture_latency_ms_bucket",
+            "oris_a2a_fetch_total",
+            "oris_a2a_task_claim_total",
+            "oris_a2a_task_complete_total",
+            "oris_a2a_work_claim_total",
+            "oris_a2a_work_complete_total",
+            "oris_a2a_heartbeat_total",
         ];
 
         for metric in required_metrics {
@@ -12884,6 +13428,9 @@ mod tests {
             "oris_a2a_task_queue_depth",
             "oris_a2a_task_claim_latency_ms_count",
             "oris_a2a_task_lease_expired_total",
+            "oris_a2a_task_complete_total",
+            "oris_a2a_work_complete_total",
+            "oris_a2a_heartbeat_total",
         ];
         for metric in alert_metrics {
             assert!(
