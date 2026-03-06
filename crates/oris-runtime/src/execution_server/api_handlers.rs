@@ -18,6 +18,7 @@ use oris_execution_runtime::{
     ExecutionCheckpointView, ExecutionGraphBridge, ExecutionGraphBridgeErrorKind,
     KernelObservability,
 };
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -32,7 +33,7 @@ use crate::agent_contract::{
     A2aTaskSessionCompletionRequest, A2aTaskSessionCompletionResponse,
     A2aTaskSessionDispatchRequest, A2aTaskSessionProgressItem, A2aTaskSessionProgressRequest,
     A2aTaskSessionResult, A2aTaskSessionSnapshot, A2aTaskSessionStartRequest, A2aTaskSessionState,
-    AgentCapabilityLevel, ReplayFeedback, ReplayPlannerDirective,
+    AgentCapabilityLevel, AgentRole, ReplayFeedback, ReplayPlannerDirective,
     A2A_TASK_SESSION_PROTOCOL_VERSION,
 };
 #[cfg(feature = "evolution-network-experimental")]
@@ -314,6 +315,275 @@ const A2A_TASK_EVENT_HISTORY_LIMIT: usize = 256;
     feature = "evolution-network-experimental"
 ))]
 const A2A_COMPAT_CLAIM_LEASE_MS: u64 = 60_000;
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const GEP_A2A_PROTOCOL_NAME: &str = "gep-a2a";
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const GEP_A2A_PROTOCOL_VERSION: &str = "1.0.0";
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct GepA2aEnvelope<T> {
+    protocol: String,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    message_type: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
+    #[serde(default)]
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    payload: Option<T>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+trait GepA2aEnvelopeCompatible {
+    fn sender_id_mut(&mut self) -> &mut Option<String>;
+    fn node_id_mut(&mut self) -> &mut Option<String>;
+    fn protocol_version_mut(&mut self) -> &mut Option<String>;
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn parse_gep_envelope_or_plain<T>(
+    raw: Value,
+    expected_message_type: Option<&str>,
+    rid: &str,
+) -> Result<T, ApiError>
+where
+    T: DeserializeOwned + GepA2aEnvelopeCompatible,
+{
+    let maybe_obj = raw.as_object();
+    let is_envelope = maybe_obj
+        .map(|obj| obj.contains_key("protocol") && obj.contains_key("payload"))
+        .unwrap_or(false);
+    if !is_envelope {
+        return serde_json::from_value(raw).map_err(|e| {
+            ApiError::bad_request(format!("invalid compatibility payload: {e}"))
+                .with_request_id(rid.to_string())
+        });
+    }
+
+    let envelope: GepA2aEnvelope<Value> = serde_json::from_value(raw).map_err(|e| {
+        ApiError::bad_request(format!("invalid gep-a2a envelope: {e}"))
+            .with_request_id(rid.to_string())
+    })?;
+    if envelope.protocol != GEP_A2A_PROTOCOL_NAME {
+        return Err(ApiError::bad_request("unsupported compatibility protocol")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "expected_protocol": GEP_A2A_PROTOCOL_NAME,
+                "actual_protocol": envelope.protocol
+            })));
+    }
+    let envelope_protocol_version = envelope
+        .protocol_version
+        .clone()
+        .unwrap_or_else(|| GEP_A2A_PROTOCOL_VERSION.to_string());
+    if envelope_protocol_version != GEP_A2A_PROTOCOL_VERSION {
+        return Err(
+            ApiError::bad_request("unsupported compatibility protocol version")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "expected_protocol_version": GEP_A2A_PROTOCOL_VERSION,
+                    "actual_protocol_version": envelope_protocol_version
+                })),
+        );
+    }
+    if let Some(expected_type) = expected_message_type {
+        if envelope.message_type.as_deref() != Some(expected_type) {
+            return Err(ApiError::bad_request("unexpected gep-a2a message_type")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "expected_message_type": expected_type,
+                    "actual_message_type": envelope.message_type
+                })));
+        }
+    }
+
+    let payload = envelope.payload.ok_or_else(|| {
+        ApiError::bad_request("gep-a2a envelope payload is required")
+            .with_request_id(rid.to_string())
+    })?;
+    let mut req: T = serde_json::from_value(payload).map_err(|e| {
+        ApiError::bad_request(format!("invalid gep-a2a envelope payload: {e}"))
+            .with_request_id(rid.to_string())
+    })?;
+    let sender = envelope.sender_id.or(envelope.node_id);
+    if req
+        .sender_id_mut()
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        *req.sender_id_mut() = sender.clone();
+    }
+    if req
+        .node_id_mut()
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        *req.node_id_mut() = sender;
+    }
+    if req.protocol_version_mut().is_none() {
+        *req.protocol_version_mut() = Some(envelope_protocol_version);
+    }
+    Ok(req)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn parse_gep_hello_or_plain(raw: Value, rid: &str) -> Result<A2aHandshakeRequest, ApiError> {
+    let maybe_obj = raw.as_object();
+    let is_envelope = maybe_obj
+        .map(|obj| obj.contains_key("protocol") && obj.contains_key("payload"))
+        .unwrap_or(false);
+    if !is_envelope {
+        return serde_json::from_value(raw).map_err(|e| {
+            ApiError::bad_request(format!("invalid hello payload: {e}"))
+                .with_request_id(rid.to_string())
+        });
+    }
+
+    let envelope: GepA2aEnvelope<Value> = serde_json::from_value(raw).map_err(|e| {
+        ApiError::bad_request(format!("invalid gep-a2a hello envelope: {e}"))
+            .with_request_id(rid.to_string())
+    })?;
+    if envelope.protocol != GEP_A2A_PROTOCOL_NAME {
+        return Err(ApiError::bad_request("unsupported compatibility protocol")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "expected_protocol": GEP_A2A_PROTOCOL_NAME,
+                "actual_protocol": envelope.protocol
+            })));
+    }
+    let envelope_protocol_version = envelope
+        .protocol_version
+        .clone()
+        .unwrap_or_else(|| GEP_A2A_PROTOCOL_VERSION.to_string());
+    if envelope_protocol_version != GEP_A2A_PROTOCOL_VERSION {
+        return Err(
+            ApiError::bad_request("unsupported compatibility protocol version")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "expected_protocol_version": GEP_A2A_PROTOCOL_VERSION,
+                    "actual_protocol_version": envelope_protocol_version
+                })),
+        );
+    }
+    if envelope.message_type.as_deref() != Some("hello") {
+        return Err(ApiError::bad_request("unexpected gep-a2a message_type")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "expected_message_type": "hello",
+                "actual_message_type": envelope.message_type
+            })));
+    }
+    let sender_id = envelope.sender_id.or(envelope.node_id).ok_or_else(|| {
+        ApiError::bad_request("sender_id must be present in gep-a2a hello envelope")
+            .with_request_id(rid.to_string())
+    })?;
+    let payload = envelope.payload.unwrap_or_else(|| serde_json::json!({}));
+    let capabilities_from_payload = payload
+        .get("capabilities")
+        .and_then(|value| value.as_object())
+        .map(|caps| {
+            let mut mapped = Vec::new();
+            if caps
+                .get("coordination")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::Coordination);
+            }
+            if caps
+                .get("supervised_devloop")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::SupervisedDevloop);
+            }
+            if caps
+                .get("replay_feedback")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::ReplayFeedback);
+            }
+            if caps
+                .get("evolution_fetch")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::EvolutionFetch);
+            }
+            if caps
+                .get("evolution_publish")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::EvolutionPublish);
+            }
+            if caps
+                .get("evolution_revoke")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::EvolutionRevoke);
+            }
+            mapped
+        })
+        .unwrap_or_default();
+    let advertised_capabilities = if capabilities_from_payload.is_empty() {
+        vec![
+            A2aCapability::Coordination,
+            A2aCapability::SupervisedDevloop,
+            A2aCapability::ReplayFeedback,
+            A2aCapability::EvolutionFetch,
+        ]
+    } else {
+        capabilities_from_payload
+    };
+
+    Ok(A2aHandshakeRequest {
+        agent_id: sender_id,
+        role: AgentRole::Planner,
+        capability_level: AgentCapabilityLevel::A4,
+        supported_protocols: vec![
+            A2aProtocol {
+                name: crate::agent_contract::A2A_PROTOCOL_NAME.to_string(),
+                version: crate::agent_contract::A2A_PROTOCOL_VERSION_V1.to_string(),
+            },
+            A2aProtocol {
+                name: crate::agent_contract::A2A_PROTOCOL_NAME.to_string(),
+                version: crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION.to_string(),
+            },
+        ],
+        advertised_capabilities,
+    })
+}
 
 #[cfg(all(
     feature = "agent-contract-experimental",
@@ -642,6 +912,150 @@ pub struct A2aCompatHeartbeatResponse {
     available_work_count: usize,
     available_work: Vec<A2aCompatAvailableWorkItem>,
     metadata_accepted: bool,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatDistributeRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatFetchRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatClaimRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatReportRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatTaskCompleteRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatWorkClaimRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatWorkCompleteRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatHeartbeatRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
 }
 
 #[cfg(all(
@@ -1446,19 +1860,25 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     #[cfg(feature = "agent-contract-experimental")]
     let router = router
         .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
-        .route("/a2a/hello", post(evolution_a2a_hello))
-        .route("/a2a/fetch", post(evolution_a2a_fetch))
+        .route("/a2a/hello", post(evolution_a2a_hello_compat))
+        .route("/a2a/fetch", post(evolution_a2a_fetch_compat))
         .route(
             "/a2a/tasks/distribute",
-            post(evolution_a2a_tasks_distribute),
+            post(evolution_a2a_tasks_distribute_compat),
         )
-        .route("/a2a/task/claim", post(evolution_a2a_tasks_claim))
-        .route("/a2a/task/complete", post(evolution_a2a_task_complete))
-        .route("/a2a/work/claim", post(evolution_a2a_work_claim))
-        .route("/a2a/work/complete", post(evolution_a2a_work_complete))
-        .route("/a2a/heartbeat", post(evolution_a2a_heartbeat))
-        .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim))
-        .route("/a2a/tasks/report", post(evolution_a2a_tasks_report))
+        .route("/a2a/task/claim", post(evolution_a2a_tasks_claim_compat))
+        .route(
+            "/a2a/task/complete",
+            post(evolution_a2a_task_complete_compat),
+        )
+        .route("/a2a/work/claim", post(evolution_a2a_work_claim_compat))
+        .route(
+            "/a2a/work/complete",
+            post(evolution_a2a_work_complete_compat),
+        )
+        .route("/a2a/heartbeat", post(evolution_a2a_heartbeat_compat))
+        .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim_compat))
+        .route("/a2a/tasks/report", post(evolution_a2a_tasks_report_compat))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
         .route(
             "/evolution/a2a/tasks/distribute",
@@ -3141,6 +3561,132 @@ pub async fn evolution_a2a_hello(
     req: Json<A2aHandshakeRequest>,
 ) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
     evolution_a2a_handshake(state, headers, req).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_hello_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_hello_or_plain(raw, &rid)?;
+    evolution_a2a_hello(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_fetch_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatFetchResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, Some("fetch"), &rid)?;
+    evolution_a2a_fetch(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_distribute_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatDistributeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_tasks_distribute(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_claim_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatClaimResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_tasks_claim(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_report_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_tasks_report(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_task_complete_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_task_complete(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_claim_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkClaimResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_work_claim(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_complete_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkCompleteResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_work_complete(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_heartbeat_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatHeartbeatResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_heartbeat(state, headers, Json(req)).await
 }
 
 #[cfg(all(
@@ -7676,6 +8222,199 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_gep_envelope_translation_maps_hello_and_fetch_requests() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "hello",
+                    "message_id": "msg-gep-hello-1",
+                    "sender_id": "gep-envelope-agent",
+                    "timestamp": "2026-03-06T00:00:00Z",
+                    "payload": {
+                        "capabilities": {
+                            "coordination": true,
+                            "supervised_devloop": true,
+                            "replay_feedback": true,
+                            "evolution_fetch": true
+                        }
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+        let hello_body = axum::body::to_bytes(hello_resp.into_body(), usize::MAX)
+            .await
+            .expect("hello body");
+        let hello_json: serde_json::Value =
+            serde_json::from_slice(&hello_body).expect("hello json");
+        assert_eq!(hello_json["data"]["accepted"], true);
+        assert_eq!(
+            hello_json["data"]["negotiated_protocol"]["version"],
+            crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+        );
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "gep-envelope-agent",
+                    "task_id": "gep-envelope-task-1",
+                    "task_summary": "gep envelope task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "fetch",
+                    "message_id": "msg-gep-fetch-1",
+                    "sender_id": "gep-envelope-agent",
+                    "timestamp": "2026-03-06T00:00:05Z",
+                    "payload": {
+                        "signals": ["compat", "gep"],
+                        "include_tasks": true
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+        assert_eq!(fetch_resp.status(), StatusCode::OK);
+        let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("fetch body");
+        let fetch_json: serde_json::Value =
+            serde_json::from_slice(&fetch_body).expect("fetch json");
+        assert_eq!(
+            fetch_json["data"]["tasks"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            fetch_json["data"]["tasks"][0]["task_id"],
+            "gep-envelope-task-1"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_gep_envelope_translation_maps_task_claim_and_complete_requests() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "gep-task-flow-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "gep-task-flow-agent",
+                    "task_id": "gep-task-flow-1",
+                    "task_summary": "gep task flow"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "fetch",
+                    "message_id": "msg-gep-claim-1",
+                    "sender_id": "gep-task-flow-agent",
+                    "timestamp": "2026-03-06T00:01:00Z",
+                    "payload": {}
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "report",
+                    "message_id": "msg-gep-complete-1",
+                    "sender_id": "gep-task-flow-agent",
+                    "timestamp": "2026-03-06T00:01:30Z",
+                    "payload": {
+                        "task_id": "gep-task-flow-1",
+                        "success": true,
+                        "summary": "gep envelope complete succeeded",
+                        "used_capsule": true,
+                        "capsule_id": "gep-task-flow-capsule-1",
+                        "reasoning_steps_avoided": 1
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_task_claim_endpoint_reuses_lease_conflict_semantics() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let handshake = handshake_agent_with_caps_and_protocols(
@@ -8257,7 +8996,11 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let unsupported_protocol_resp = router.oneshot(unsupported_protocol_req).await.unwrap();
+        let unsupported_protocol_resp = router
+            .clone()
+            .oneshot(unsupported_protocol_req)
+            .await
+            .unwrap();
         assert_eq!(unsupported_protocol_resp.status(), StatusCode::BAD_REQUEST);
         let unsupported_protocol_body =
             axum::body::to_bytes(unsupported_protocol_resp.into_body(), usize::MAX)
@@ -8269,6 +9012,30 @@ mod tests {
             unsupported_protocol_json["error"]["details"]["a2a_error_code"],
             serde_json::json!("UnsupportedProtocol")
         );
+
+        let wrong_message_type_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "hello",
+                    "sender_id": "compat-fetch-validation-agent",
+                    "payload": {
+                        "include_tasks": true
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let wrong_message_type_resp = router
+            .clone()
+            .oneshot(wrong_message_type_req)
+            .await
+            .unwrap();
+        assert_eq!(wrong_message_type_resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[cfg(not(feature = "evolution-network-experimental"))]
