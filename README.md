@@ -256,6 +256,8 @@ cargo add oris-runtime
 cargo add oris-runtime --features postgres
 # With SQLite persistence (production-ready checkpoints):
 cargo add oris-runtime --features sqlite-persistence
+# With stable /a2a production compatibility routes:
+cargo add oris-runtime --features a2a-production
 # With the checked-in Evo experimental surface:
 cargo add oris-runtime --features full-evolution-experimental
 # With Ollama (local):
@@ -294,6 +296,7 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 
 The self-evolution stack is still experimental and intentionally feature-gated.
 
+- Use `a2a-production` for the production compatibility `/a2a/*` runtime boundary without enabling evolution-network publish/fetch/revoke APIs.
 - Use `evolution-experimental` when you only need `oris_runtime::evolution`.
 - Use `full-evolution-experimental` when you want the end-to-end facade used by the checked-in example (`evolution`, `governor`, `evolution_network`, `economics`, `spec_contract`, and `agent_contract`).
 

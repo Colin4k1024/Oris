@@ -1,6 +1,6 @@
 [package]
 name = "oris-runtime"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 rust-version = "1.80"
 publish = true
@@ -241,6 +241,12 @@ execution-server = [
     "oris-execution-runtime/execution-server",
 ]
 mcp-experimental = ["execution-server"]
+# Stable /a2a compatibility boundary for production execution flows.
+a2a-production = [
+    "execution-server",
+    "agent-contract-experimental",
+    "evolution-network-experimental",
+]
 evokernel-facade = ["dep:oris-evokernel"]
 evolution-experimental = ["evokernel-facade"]
 governor-experimental = ["evokernel-facade"]
