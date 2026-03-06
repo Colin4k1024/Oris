@@ -208,11 +208,12 @@ Before declaring the incident mitigated:
    - worker `poll`
    - worker `ack`
 6. If compatibility A2A traffic is enabled, run one compatibility smoke flow:
-   - `/evolution/a2a/hello`
-   - `/evolution/a2a/tasks/distribute`
-   - `/evolution/a2a/tasks/claim`
-   - `/evolution/a2a/tasks/report`
-   - command template reference: `docs/evokernel/network.md` -> `End-to-End Compatibility Operation Runbook (distribute -> claim -> report)`
+   - `/a2a/hello` (or legacy alias `/evolution/a2a/hello`)
+   - `/a2a/fetch`
+   - `/a2a/task/claim` and `/a2a/task/complete`
+   - `/a2a/work/claim` and `/a2a/work/complete`
+   - `/a2a/heartbeat`
+   - command template reference: `docs/evokernel/network.md` -> `End-to-End Compatibility Operation Runbook (fetch -> task/work claim -> complete -> heartbeat)`
 
 ## 7. Post-Incident Checklist
 

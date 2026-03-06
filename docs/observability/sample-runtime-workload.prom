@@ -84,3 +84,21 @@ oris_a2a_report_to_capture_latency_ms_bucket{le="1000"} 1
 oris_a2a_report_to_capture_latency_ms_bucket{le="+Inf"} 1
 oris_a2a_report_to_capture_latency_ms_sum 0.420000
 oris_a2a_report_to_capture_latency_ms_count 1
+# HELP oris_a2a_fetch_total Total compatibility /a2a/fetch requests served.
+# TYPE oris_a2a_fetch_total counter
+oris_a2a_fetch_total 3
+# HELP oris_a2a_task_claim_total Total compatibility /a2a/task(s)/claim requests served.
+# TYPE oris_a2a_task_claim_total counter
+oris_a2a_task_claim_total 2
+# HELP oris_a2a_task_complete_total Total compatibility /a2a/task/complete requests served.
+# TYPE oris_a2a_task_complete_total counter
+oris_a2a_task_complete_total 1
+# HELP oris_a2a_work_claim_total Total compatibility /a2a/work/claim requests served.
+# TYPE oris_a2a_work_claim_total counter
+oris_a2a_work_claim_total 1
+# HELP oris_a2a_work_complete_total Total compatibility /a2a/work/complete requests served.
+# TYPE oris_a2a_work_complete_total counter
+oris_a2a_work_complete_total 1
+# HELP oris_a2a_heartbeat_total Total compatibility /a2a/heartbeat requests served.
+# TYPE oris_a2a_heartbeat_total counter
+oris_a2a_heartbeat_total 4

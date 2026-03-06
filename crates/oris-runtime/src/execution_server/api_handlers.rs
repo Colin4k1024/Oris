@@ -18,6 +18,7 @@ use oris_execution_runtime::{
     ExecutionCheckpointView, ExecutionGraphBridge, ExecutionGraphBridgeErrorKind,
     KernelObservability,
 };
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -32,7 +33,7 @@ use crate::agent_contract::{
     A2aTaskSessionCompletionRequest, A2aTaskSessionCompletionResponse,
     A2aTaskSessionDispatchRequest, A2aTaskSessionProgressItem, A2aTaskSessionProgressRequest,
     A2aTaskSessionResult, A2aTaskSessionSnapshot, A2aTaskSessionStartRequest, A2aTaskSessionState,
-    AgentCapabilityLevel, ReplayFeedback, ReplayPlannerDirective,
+    AgentCapabilityLevel, AgentRole, ReplayFeedback, ReplayPlannerDirective,
     A2A_TASK_SESSION_PROTOCOL_VERSION,
 };
 #[cfg(feature = "evolution-network-experimental")]
@@ -178,6 +179,8 @@ pub struct ExecutionApiAuthConfig {
     pub bearer_role: ApiRole,
     pub api_key_hash: Option<String>,
     pub api_key_role: ApiRole,
+    pub compat_node_secret_hash: Option<String>,
+    pub compat_node_secret_role: ApiRole,
     pub keyed_api_keys: HashMap<String, StaticApiKeyConfig>,
 }
 
@@ -314,6 +317,275 @@ const A2A_TASK_EVENT_HISTORY_LIMIT: usize = 256;
     feature = "evolution-network-experimental"
 ))]
 const A2A_COMPAT_CLAIM_LEASE_MS: u64 = 60_000;
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const GEP_A2A_PROTOCOL_NAME: &str = "gep-a2a";
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const GEP_A2A_PROTOCOL_VERSION: &str = "1.0.0";
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct GepA2aEnvelope<T> {
+    protocol: String,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    message_type: Option<String>,
+    #[serde(default)]
+    message_id: Option<String>,
+    #[serde(default)]
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    timestamp: Option<String>,
+    payload: Option<T>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+trait GepA2aEnvelopeCompatible {
+    fn sender_id_mut(&mut self) -> &mut Option<String>;
+    fn node_id_mut(&mut self) -> &mut Option<String>;
+    fn protocol_version_mut(&mut self) -> &mut Option<String>;
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn parse_gep_envelope_or_plain<T>(
+    raw: Value,
+    expected_message_type: Option<&str>,
+    rid: &str,
+) -> Result<T, ApiError>
+where
+    T: DeserializeOwned + GepA2aEnvelopeCompatible,
+{
+    let maybe_obj = raw.as_object();
+    let is_envelope = maybe_obj
+        .map(|obj| obj.contains_key("protocol") && obj.contains_key("payload"))
+        .unwrap_or(false);
+    if !is_envelope {
+        return serde_json::from_value(raw).map_err(|e| {
+            ApiError::bad_request(format!("invalid compatibility payload: {e}"))
+                .with_request_id(rid.to_string())
+        });
+    }
+
+    let envelope: GepA2aEnvelope<Value> = serde_json::from_value(raw).map_err(|e| {
+        ApiError::bad_request(format!("invalid gep-a2a envelope: {e}"))
+            .with_request_id(rid.to_string())
+    })?;
+    if envelope.protocol != GEP_A2A_PROTOCOL_NAME {
+        return Err(ApiError::bad_request("unsupported compatibility protocol")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "expected_protocol": GEP_A2A_PROTOCOL_NAME,
+                "actual_protocol": envelope.protocol
+            })));
+    }
+    let envelope_protocol_version = envelope
+        .protocol_version
+        .clone()
+        .unwrap_or_else(|| GEP_A2A_PROTOCOL_VERSION.to_string());
+    if envelope_protocol_version != GEP_A2A_PROTOCOL_VERSION {
+        return Err(
+            ApiError::bad_request("unsupported compatibility protocol version")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "expected_protocol_version": GEP_A2A_PROTOCOL_VERSION,
+                    "actual_protocol_version": envelope_protocol_version
+                })),
+        );
+    }
+    if let Some(expected_type) = expected_message_type {
+        if envelope.message_type.as_deref() != Some(expected_type) {
+            return Err(ApiError::bad_request("unexpected gep-a2a message_type")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "expected_message_type": expected_type,
+                    "actual_message_type": envelope.message_type
+                })));
+        }
+    }
+
+    let payload = envelope.payload.ok_or_else(|| {
+        ApiError::bad_request("gep-a2a envelope payload is required")
+            .with_request_id(rid.to_string())
+    })?;
+    let mut req: T = serde_json::from_value(payload).map_err(|e| {
+        ApiError::bad_request(format!("invalid gep-a2a envelope payload: {e}"))
+            .with_request_id(rid.to_string())
+    })?;
+    let sender = envelope.sender_id.or(envelope.node_id);
+    if req
+        .sender_id_mut()
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        *req.sender_id_mut() = sender.clone();
+    }
+    if req
+        .node_id_mut()
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        *req.node_id_mut() = sender;
+    }
+    if req.protocol_version_mut().is_none() {
+        *req.protocol_version_mut() = Some(envelope_protocol_version);
+    }
+    Ok(req)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn parse_gep_hello_or_plain(raw: Value, rid: &str) -> Result<A2aHandshakeRequest, ApiError> {
+    let maybe_obj = raw.as_object();
+    let is_envelope = maybe_obj
+        .map(|obj| obj.contains_key("protocol") && obj.contains_key("payload"))
+        .unwrap_or(false);
+    if !is_envelope {
+        return serde_json::from_value(raw).map_err(|e| {
+            ApiError::bad_request(format!("invalid hello payload: {e}"))
+                .with_request_id(rid.to_string())
+        });
+    }
+
+    let envelope: GepA2aEnvelope<Value> = serde_json::from_value(raw).map_err(|e| {
+        ApiError::bad_request(format!("invalid gep-a2a hello envelope: {e}"))
+            .with_request_id(rid.to_string())
+    })?;
+    if envelope.protocol != GEP_A2A_PROTOCOL_NAME {
+        return Err(ApiError::bad_request("unsupported compatibility protocol")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "expected_protocol": GEP_A2A_PROTOCOL_NAME,
+                "actual_protocol": envelope.protocol
+            })));
+    }
+    let envelope_protocol_version = envelope
+        .protocol_version
+        .clone()
+        .unwrap_or_else(|| GEP_A2A_PROTOCOL_VERSION.to_string());
+    if envelope_protocol_version != GEP_A2A_PROTOCOL_VERSION {
+        return Err(
+            ApiError::bad_request("unsupported compatibility protocol version")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "expected_protocol_version": GEP_A2A_PROTOCOL_VERSION,
+                    "actual_protocol_version": envelope_protocol_version
+                })),
+        );
+    }
+    if envelope.message_type.as_deref() != Some("hello") {
+        return Err(ApiError::bad_request("unexpected gep-a2a message_type")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "expected_message_type": "hello",
+                "actual_message_type": envelope.message_type
+            })));
+    }
+    let sender_id = envelope.sender_id.or(envelope.node_id).ok_or_else(|| {
+        ApiError::bad_request("sender_id must be present in gep-a2a hello envelope")
+            .with_request_id(rid.to_string())
+    })?;
+    let payload = envelope.payload.unwrap_or_else(|| serde_json::json!({}));
+    let capabilities_from_payload = payload
+        .get("capabilities")
+        .and_then(|value| value.as_object())
+        .map(|caps| {
+            let mut mapped = Vec::new();
+            if caps
+                .get("coordination")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::Coordination);
+            }
+            if caps
+                .get("supervised_devloop")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::SupervisedDevloop);
+            }
+            if caps
+                .get("replay_feedback")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::ReplayFeedback);
+            }
+            if caps
+                .get("evolution_fetch")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::EvolutionFetch);
+            }
+            if caps
+                .get("evolution_publish")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::EvolutionPublish);
+            }
+            if caps
+                .get("evolution_revoke")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                mapped.push(A2aCapability::EvolutionRevoke);
+            }
+            mapped
+        })
+        .unwrap_or_default();
+    let advertised_capabilities = if capabilities_from_payload.is_empty() {
+        vec![
+            A2aCapability::Coordination,
+            A2aCapability::SupervisedDevloop,
+            A2aCapability::ReplayFeedback,
+            A2aCapability::EvolutionFetch,
+        ]
+    } else {
+        capabilities_from_payload
+    };
+
+    Ok(A2aHandshakeRequest {
+        agent_id: sender_id,
+        role: AgentRole::Planner,
+        capability_level: AgentCapabilityLevel::A4,
+        supported_protocols: vec![
+            A2aProtocol {
+                name: crate::agent_contract::A2A_PROTOCOL_NAME.to_string(),
+                version: crate::agent_contract::A2A_PROTOCOL_VERSION_V1.to_string(),
+            },
+            A2aProtocol {
+                name: crate::agent_contract::A2A_PROTOCOL_NAME.to_string(),
+                version: crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION.to_string(),
+            },
+        ],
+        advertised_capabilities,
+    })
+}
 
 #[cfg(all(
     feature = "agent-contract-experimental",
@@ -474,6 +746,325 @@ pub struct A2aCompatReportResponse {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatTaskCompleteRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    task_id: String,
+    #[serde(default)]
+    status: Option<A2aCompatReportStatus>,
+    #[serde(default)]
+    success: Option<bool>,
+    summary: Option<String>,
+    #[serde(default)]
+    retryable: Option<bool>,
+    #[serde(default)]
+    retry_after_ms: Option<u64>,
+    #[serde(default)]
+    failure_code: Option<A2aErrorCode>,
+    #[serde(default)]
+    failure_details: Option<String>,
+    #[serde(default)]
+    used_capsule: Option<bool>,
+    #[serde(default)]
+    capsule_id: Option<String>,
+    #[serde(default)]
+    reasoning_steps_avoided: Option<u64>,
+    #[serde(default)]
+    fallback_reason: Option<String>,
+    #[serde(default)]
+    task_class_id: Option<String>,
+    #[serde(default)]
+    task_label: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatWorkClaimRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatWorkAssignment {
+    assignment_id: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatWorkClaimResponse {
+    claimed: bool,
+    assignment: Option<A2aCompatWorkAssignment>,
+    retry_after_ms: Option<u64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatWorkCompleteRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    assignment_id: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    status: Option<A2aCompatReportStatus>,
+    #[serde(default)]
+    success: Option<bool>,
+    summary: Option<String>,
+    #[serde(default)]
+    retryable: Option<bool>,
+    #[serde(default)]
+    retry_after_ms: Option<u64>,
+    #[serde(default)]
+    failure_code: Option<A2aErrorCode>,
+    #[serde(default)]
+    failure_details: Option<String>,
+    #[serde(default)]
+    used_capsule: Option<bool>,
+    #[serde(default)]
+    capsule_id: Option<String>,
+    #[serde(default)]
+    reasoning_steps_avoided: Option<u64>,
+    #[serde(default)]
+    fallback_reason: Option<String>,
+    #[serde(default)]
+    task_class_id: Option<String>,
+    #[serde(default)]
+    task_label: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatWorkCompleteResponse {
+    assignment_id: String,
+    task_id: String,
+    state: A2aTaskSessionState,
+    terminal_state: Option<A2aTaskLifecycleState>,
+    summary: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatHeartbeatRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    worker_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatAvailableWorkItem {
+    assignment_id: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatHeartbeatResponse {
+    acknowledged: bool,
+    worker_id: String,
+    available_work_count: usize,
+    available_work: Vec<A2aCompatAvailableWorkItem>,
+    metadata_accepted: bool,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatDistributeRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatFetchRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatClaimRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatReportRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatTaskCompleteRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatWorkClaimRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatWorkCompleteRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl GepA2aEnvelopeCompatible for A2aCompatHeartbeatRequest {
+    fn sender_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.sender_id
+    }
+
+    fn node_id_mut(&mut self) -> &mut Option<String> {
+        &mut self.node_id
+    }
+
+    fn protocol_version_mut(&mut self) -> &mut Option<String> {
+        &mut self.protocol_version
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatClaimRequest {
     sender_id: Option<String>,
     #[serde(default)]
@@ -503,6 +1094,49 @@ pub struct A2aCompatClaimResponse {
     claimed: bool,
     task: Option<A2aCompatClaimTask>,
     retry_after_ms: Option<u64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct A2aCompatFetchRequest {
+    sender_id: Option<String>,
+    #[serde(default)]
+    node_id: Option<String>,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    signals: Vec<String>,
+    #[serde(default)]
+    include_tasks: bool,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatFetchTask {
+    session_id: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+    claimable: bool,
+    lease_expires_at_ms: Option<u64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatFetchResponse {
+    sender_id: String,
+    assets: Vec<crate::evolution_network::NetworkAsset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tasks: Option<Vec<A2aCompatFetchTask>>,
 }
 
 #[cfg(all(
@@ -550,6 +1184,12 @@ struct RuntimeMetricsInner {
     a2a_report_to_capture_latency_ms_sum: f64,
     a2a_report_to_capture_latency_ms_count: u64,
     a2a_report_to_capture_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_fetch_total: u64,
+    a2a_task_claim_total: u64,
+    a2a_task_complete_total: u64,
+    a2a_work_claim_total: u64,
+    a2a_work_complete_total: u64,
+    a2a_heartbeat_total: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -574,6 +1214,12 @@ struct RuntimeMetricsSnapshot {
     a2a_report_to_capture_latency_ms_sum: f64,
     a2a_report_to_capture_latency_ms_count: u64,
     a2a_report_to_capture_latency_ms_buckets: [u64; METRIC_BUCKETS_MS.len()],
+    a2a_fetch_total: u64,
+    a2a_task_claim_total: u64,
+    a2a_task_complete_total: u64,
+    a2a_work_claim_total: u64,
+    a2a_work_complete_total: u64,
+    a2a_heartbeat_total: u64,
 }
 
 impl Default for RuntimeMetrics {
@@ -600,12 +1246,54 @@ impl Default for RuntimeMetrics {
                 a2a_report_to_capture_latency_ms_sum: 0.0,
                 a2a_report_to_capture_latency_ms_count: 0,
                 a2a_report_to_capture_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_fetch_total: 0,
+                a2a_task_claim_total: 0,
+                a2a_task_complete_total: 0,
+                a2a_work_claim_total: 0,
+                a2a_work_complete_total: 0,
+                a2a_heartbeat_total: 0,
             })),
         }
     }
 }
 
 impl RuntimeMetrics {
+    fn record_a2a_fetch(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_fetch_total += 1;
+        }
+    }
+
+    fn record_a2a_task_claim(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_task_claim_total += 1;
+        }
+    }
+
+    fn record_a2a_task_complete(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_task_complete_total += 1;
+        }
+    }
+
+    fn record_a2a_work_claim(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_work_claim_total += 1;
+        }
+    }
+
+    fn record_a2a_work_complete(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_work_complete_total += 1;
+        }
+    }
+
+    fn record_a2a_heartbeat(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.a2a_heartbeat_total += 1;
+        }
+    }
+
     fn record_lease_operation(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.lease_operations_total += 1;
@@ -705,6 +1393,12 @@ impl RuntimeMetrics {
                     .a2a_report_to_capture_latency_ms_count,
                 a2a_report_to_capture_latency_ms_buckets: inner
                     .a2a_report_to_capture_latency_ms_buckets,
+                a2a_fetch_total: inner.a2a_fetch_total,
+                a2a_task_claim_total: inner.a2a_task_claim_total,
+                a2a_task_complete_total: inner.a2a_task_complete_total,
+                a2a_work_claim_total: inner.a2a_work_claim_total,
+                a2a_work_complete_total: inner.a2a_work_complete_total,
+                a2a_heartbeat_total: inner.a2a_heartbeat_total,
             }
         } else {
             RuntimeMetricsSnapshot {
@@ -728,6 +1422,12 @@ impl RuntimeMetrics {
                 a2a_report_to_capture_latency_ms_sum: 0.0,
                 a2a_report_to_capture_latency_ms_count: 0,
                 a2a_report_to_capture_latency_ms_buckets: [0; METRIC_BUCKETS_MS.len()],
+                a2a_fetch_total: 0,
+                a2a_task_claim_total: 0,
+                a2a_task_complete_total: 0,
+                a2a_work_claim_total: 0,
+                a2a_work_complete_total: 0,
+                a2a_heartbeat_total: 0,
             }
         }
     }
@@ -847,6 +1547,50 @@ impl RuntimeMetrics {
             snapshot.a2a_report_to_capture_latency_ms_count,
             snapshot.a2a_report_to_capture_latency_ms_sum,
         );
+        out.push_str(
+            "# HELP oris_a2a_fetch_total Total compatibility /a2a/fetch requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_fetch_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_fetch_total {}\n",
+            snapshot.a2a_fetch_total
+        ));
+        out.push_str("# HELP oris_a2a_task_claim_total Total compatibility /a2a/task(s)/claim requests served.\n");
+        out.push_str("# TYPE oris_a2a_task_claim_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_task_claim_total {}\n",
+            snapshot.a2a_task_claim_total
+        ));
+        out.push_str(
+            "# HELP oris_a2a_task_complete_total Total compatibility /a2a/task/complete requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_task_complete_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_task_complete_total {}\n",
+            snapshot.a2a_task_complete_total
+        ));
+        out.push_str(
+            "# HELP oris_a2a_work_claim_total Total compatibility /a2a/work/claim requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_work_claim_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_work_claim_total {}\n",
+            snapshot.a2a_work_claim_total
+        ));
+        out.push_str("# HELP oris_a2a_work_complete_total Total compatibility /a2a/work/complete requests served.\n");
+        out.push_str("# TYPE oris_a2a_work_complete_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_work_complete_total {}\n",
+            snapshot.a2a_work_complete_total
+        ));
+        out.push_str(
+            "# HELP oris_a2a_heartbeat_total Total compatibility /a2a/heartbeat requests served.\n",
+        );
+        out.push_str("# TYPE oris_a2a_heartbeat_total counter\n");
+        out.push_str(&format!(
+            "oris_a2a_heartbeat_total {}\n",
+            snapshot.a2a_heartbeat_total
+        ));
         out
     }
 }
@@ -922,6 +1666,8 @@ impl ExecutionApiAuthConfig {
             bearer_role: ApiRole::Admin,
             api_key_hash: Self::normalize_hashed_secret(api_key),
             api_key_role: ApiRole::Admin,
+            compat_node_secret_hash: None,
+            compat_node_secret_role: ApiRole::Operator,
             keyed_api_keys: HashMap::new(),
         }
     }
@@ -945,6 +1691,7 @@ impl ExecutionApiAuthConfig {
     fn is_enabled(&self) -> bool {
         self.bearer_token.is_some()
             || self.api_key_hash.is_some()
+            || self.compat_node_secret_hash.is_some()
             || !self.keyed_api_keys.is_empty()
     }
 }
@@ -1093,6 +1840,24 @@ impl ExecutionApiState {
         self
     }
 
+    pub fn with_compat_node_secret(mut self, secret: impl Into<String>) -> Self {
+        self.auth.compat_node_secret_hash =
+            ExecutionApiAuthConfig::normalize_hashed_secret(Some(secret.into()));
+        self.auth.compat_node_secret_role = ApiRole::Operator;
+        self
+    }
+
+    pub fn with_compat_node_secret_with_role(
+        mut self,
+        secret: impl Into<String>,
+        role: ApiRole,
+    ) -> Self {
+        self.auth.compat_node_secret_hash =
+            ExecutionApiAuthConfig::normalize_hashed_secret(Some(secret.into()));
+        self.auth.compat_node_secret_role = role;
+        self
+    }
+
     pub fn with_static_api_key(mut self, key: impl Into<String>) -> Self {
         self.auth.api_key_hash = ExecutionApiAuthConfig::normalize_hashed_secret(Some(key.into()));
         self.auth.api_key_role = ApiRole::Admin;
@@ -1228,6 +1993,25 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     #[cfg(feature = "agent-contract-experimental")]
     let router = router
         .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
+        .route("/a2a/hello", post(evolution_a2a_hello_compat))
+        .route("/a2a/fetch", post(evolution_a2a_fetch_compat))
+        .route(
+            "/a2a/tasks/distribute",
+            post(evolution_a2a_tasks_distribute_compat),
+        )
+        .route("/a2a/task/claim", post(evolution_a2a_tasks_claim_compat))
+        .route(
+            "/a2a/task/complete",
+            post(evolution_a2a_task_complete_compat),
+        )
+        .route("/a2a/work/claim", post(evolution_a2a_work_claim_compat))
+        .route(
+            "/a2a/work/complete",
+            post(evolution_a2a_work_complete_compat),
+        )
+        .route("/a2a/heartbeat", post(evolution_a2a_heartbeat_compat))
+        .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim_compat))
+        .route("/a2a/tasks/report", post(evolution_a2a_tasks_report_compat))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
         .route(
             "/evolution/a2a/tasks/distribute",
@@ -1612,6 +2396,22 @@ fn api_key_id_from_headers(headers: &HeaderMap) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
+fn compat_node_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-node-id")
+        .or_else(|| headers.get("x-sender-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+fn is_a2a_compat_path(path: &str) -> bool {
+    path.starts_with("/a2a/")
+        || path.starts_with("/evolution/a2a/")
+        || path.starts_with("/v1/evolution/a2a/")
+}
+
 fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Option<AuthContext> {
     if auth
         .bearer_token
@@ -1624,6 +2424,20 @@ fn authenticate_static(headers: &HeaderMap, auth: &ExecutionApiAuthConfig) -> Op
             actor_type: "bearer".to_string(),
             actor_id: None,
             role: auth.bearer_role.clone(),
+        });
+    }
+
+    if auth
+        .compat_node_secret_hash
+        .as_deref()
+        .zip(bearer_token_from_headers(headers))
+        .map(|(expected_hash, actual)| expected_hash == ExecutionApiAuthConfig::secret_hash(actual))
+        .unwrap_or(false)
+    {
+        return Some(AuthContext {
+            actor_type: "node_secret".to_string(),
+            actor_id: compat_node_id_from_headers(headers),
+            role: auth.compat_node_secret_role.clone(),
         });
     }
 
@@ -1747,6 +2561,51 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
         .collect::<Vec<_>>();
     if seg.is_empty() {
         return None;
+    }
+    if seg[0] == "a2a" {
+        return match seg.as_slice() {
+            ["a2a", "hello"] => Some(AuditTarget {
+                action: "a2a.compat.hello",
+                resource_type: "sender",
+                resource_id: None,
+            }),
+            ["a2a", "fetch"] => Some(AuditTarget {
+                action: "a2a.compat.fetch",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "tasks", "distribute"] => Some(AuditTarget {
+                action: "a2a.compat.distribute",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "tasks", "claim"] | ["a2a", "task", "claim"] => Some(AuditTarget {
+                action: "a2a.compat.claim",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "tasks", "report"] | ["a2a", "task", "complete"] => Some(AuditTarget {
+                action: "a2a.compat.report",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "work", "claim"] => Some(AuditTarget {
+                action: "a2a.compat.work.claim",
+                resource_type: "assignment",
+                resource_id: None,
+            }),
+            ["a2a", "work", "complete"] => Some(AuditTarget {
+                action: "a2a.compat.work.complete",
+                resource_type: "assignment",
+                resource_id: None,
+            }),
+            ["a2a", "heartbeat"] => Some(AuditTarget {
+                action: "a2a.compat.heartbeat",
+                resource_type: "worker",
+                resource_id: None,
+            }),
+            _ => None,
+        };
     }
     if seg[0] == "evolution" {
         return match seg.as_slice() {
@@ -1952,12 +2811,14 @@ fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> b
     let is_audit = path.starts_with("/v1/audit");
     let is_attempts = path.starts_with("/v1/attempts");
     let is_dlq = path.starts_with("/v1/dlq");
+    let is_a2a_compat = is_a2a_compat_path(path);
     match role {
         ApiRole::Operator => {
             is_jobs_or_interrupts
                 || (is_audit && *method == axum::http::Method::GET)
                 || (is_attempts && *method == axum::http::Method::GET)
                 || is_dlq
+                || is_a2a_compat
         }
         ApiRole::Worker => {
             // Worker role can only call worker control/data-plane endpoints.
@@ -1971,6 +2832,9 @@ fn supported_auth_methods(state: &ExecutionApiState) -> Vec<&'static str> {
     let mut methods = Vec::new();
     if state.auth.bearer_token.is_some() {
         methods.push("bearer");
+    }
+    if state.auth.compat_node_secret_hash.is_some() {
+        methods.push("bearer(node_secret)");
     }
     if state.auth.api_key_hash.is_some() {
         methods.push("x-api-key");
@@ -1990,13 +2854,22 @@ async fn auth_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> axum::response::Response {
-    let auth_enabled = state.auth.is_enabled() || has_runtime_repo_api_keys(&state);
-    if !auth_enabled {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let has_runtime_repo_keys = has_runtime_repo_api_keys(&state);
+    let compat_node_secret_only = state.auth.compat_node_secret_hash.is_some()
+        && state.auth.bearer_token.is_none()
+        && state.auth.api_key_hash.is_none()
+        && state.auth.keyed_api_keys.is_empty()
+        && !has_runtime_repo_keys;
+    if compat_node_secret_only && !is_a2a_compat_path(&path) {
         return next.run(request).await;
     }
 
-    let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    let auth_enabled = state.auth.is_enabled() || has_runtime_repo_keys;
+    if !auth_enabled {
+        return next.run(request).await;
+    }
 
     let auth = resolve_auth_context(&headers, &state);
     let Some(auth) = auth else {
@@ -2916,6 +3789,273 @@ pub async fn evolution_a2a_hello(
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+pub async fn evolution_a2a_hello_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_hello_or_plain(raw, &rid)?;
+    evolution_a2a_hello(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_fetch_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatFetchResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, Some("fetch"), &rid)?;
+    state.runtime_metrics.record_a2a_fetch();
+    evolution_a2a_fetch(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_distribute_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatDistributeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_tasks_distribute(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_claim_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatClaimResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_task_claim();
+    evolution_a2a_tasks_claim(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_tasks_report_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    evolution_a2a_tasks_report(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_task_complete_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_task_complete();
+    evolution_a2a_task_complete(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_claim_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkClaimResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_work_claim();
+    evolution_a2a_work_claim(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_complete_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkCompleteResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_work_complete();
+    evolution_a2a_work_complete(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_heartbeat_compat(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<A2aCompatHeartbeatResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    state.runtime_metrics.record_a2a_heartbeat();
+    evolution_a2a_heartbeat(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn build_a2a_fetch_task(
+    session_id: String,
+    task_id: String,
+    task_summary: String,
+    dispatch_id: String,
+    claimed_by: Option<&str>,
+    lease_expires_at_ms: Option<u64>,
+    now_ms: u64,
+) -> A2aCompatFetchTask {
+    let claimable =
+        claimed_by.is_none() || lease_expires_at_ms.map(|ms| ms <= now_ms).unwrap_or(true);
+    A2aCompatFetchTask {
+        session_id,
+        task_id,
+        task_summary,
+        dispatch_id,
+        claimable,
+        lease_expires_at_ms,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn list_a2a_fetch_tasks(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    protocol_version: &str,
+    rid: &str,
+) -> Result<Vec<A2aCompatFetchTask>, ApiError> {
+    let now_ms = lifecycle_timestamp_ms(Utc::now());
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let _ = rid;
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        let tasks = repo
+            .list_a2a_compat_tasks(sender_id, protocol_version)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?;
+        return Ok(tasks
+            .into_iter()
+            .map(|task| {
+                let lease_expires_at_ms = task
+                    .lease_expires_at
+                    .map(|expires_at| expires_at.timestamp_millis().max(0) as u64);
+                build_a2a_fetch_task(
+                    task.session_id,
+                    task.task_id,
+                    task.task_summary,
+                    task.dispatch_id,
+                    task.claimed_by_sender_id.as_deref(),
+                    lease_expires_at_ms,
+                    now_ms,
+                )
+            })
+            .collect());
+    }
+
+    let queue = state.a2a_compat_task_queue.read().await;
+    Ok(queue
+        .iter()
+        .filter(|entry| {
+            entry.owner_sender_id == sender_id && entry.protocol_version == protocol_version
+        })
+        .map(|entry| {
+            build_a2a_fetch_task(
+                entry.session_id.clone(),
+                entry.task_id.clone(),
+                entry.task_summary.clone(),
+                entry.dispatch_id.clone(),
+                entry.claimed_by.as_deref(),
+                entry.lease_expires_at_ms,
+                now_ms,
+            )
+        })
+        .collect())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_fetch(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatFetchRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatFetchResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = resolve_compat_sender_id(req.sender_id.clone(), req.node_id.clone(), &rid)?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_authorized_action(
+        &state,
+        &sender_id,
+        A2aCapability::EvolutionFetch,
+        A2aPrivilegeAction::EvolutionFetch,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let fetch = state
+        .evolution_node
+        .fetch_assets(
+            "execution-api",
+            &FetchQuery {
+                sender_id: sender_id.clone(),
+                signals: req.signals,
+            },
+        )
+        .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+
+    let tasks = if req.include_tasks {
+        Some(list_a2a_fetch_tasks(&state, &sender_id, &protocol_version, &rid).await?)
+    } else {
+        None
+    };
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: A2aCompatFetchResponse {
+            sender_id: fetch.sender_id,
+            assets: fetch.assets,
+            tasks,
+        },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 async fn find_a2a_session_id_for_task(
     state: &ExecutionApiState,
     sender_id: &str,
@@ -2933,6 +4073,398 @@ async fn find_a2a_session_id_for_task(
                 None
             }
         })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn resolve_compat_task_complete_status(
+    req: &A2aCompatTaskCompleteRequest,
+) -> A2aCompatReportStatus {
+    if let Some(status) = req.status.clone() {
+        return status;
+    }
+    match req.success {
+        Some(false) => A2aCompatReportStatus::Failed,
+        Some(true) | None => A2aCompatReportStatus::Succeeded,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn default_task_complete_summary(status: &A2aCompatReportStatus) -> &'static str {
+    match status {
+        A2aCompatReportStatus::Succeeded => "a2a task completed",
+        A2aCompatReportStatus::Failed => "a2a task failed",
+        A2aCompatReportStatus::Cancelled => "a2a task cancelled",
+        A2aCompatReportStatus::Running => "a2a task in progress",
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_task_complete(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatTaskCompleteRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatReportResponse>>, ApiError> {
+    let status = resolve_compat_task_complete_status(&req);
+    let summary = req
+        .summary
+        .clone()
+        .unwrap_or_else(|| default_task_complete_summary(&status).to_string());
+    evolution_a2a_tasks_report(
+        state,
+        headers,
+        Json(A2aCompatReportRequest {
+            sender_id: req.sender_id,
+            node_id: req.node_id,
+            protocol_version: req.protocol_version,
+            task_id: req.task_id,
+            status,
+            summary,
+            progress_pct: None,
+            retryable: req.retryable,
+            retry_after_ms: req.retry_after_ms,
+            failure_code: req.failure_code,
+            failure_details: req.failure_details,
+            used_capsule: req.used_capsule,
+            capsule_id: req.capsule_id,
+            reasoning_steps_avoided: req.reasoning_steps_avoided,
+            fallback_reason: req.fallback_reason,
+            task_class_id: req.task_class_id,
+            task_label: req.task_label,
+        }),
+    )
+    .await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn resolve_active_work_assignment_task_id(
+    state: &ExecutionApiState,
+    assignment_id: &str,
+    sender_id: &str,
+    protocol_version: &str,
+    rid: &str,
+) -> Result<String, ApiError> {
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let _ = rid;
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        let task = repo
+            .get_a2a_compat_task(assignment_id)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?
+            .ok_or_else(|| {
+                ApiError::conflict("a2a work assignment is not active")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id,
+                        "reason": "already_completed_or_unknown"
+                    }))
+            })?;
+        if task.sender_id != sender_id {
+            return Err(ApiError::forbidden("a2a work assignment sender mismatch")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id,
+                    "expected_sender_id": task.sender_id,
+                    "actual_sender_id": sender_id
+                })));
+        }
+        if task.protocol_version != protocol_version {
+            return Err(
+                ApiError::bad_request("a2a work assignment protocol version mismatch")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id,
+                        "expected_protocol_version": task.protocol_version,
+                        "actual_protocol_version": protocol_version
+                    })),
+            );
+        }
+        match task.claimed_by_sender_id.as_deref() {
+            Some(claimed_by) if claimed_by == sender_id => {}
+            Some(claimed_by) => {
+                return Err(
+                    ApiError::forbidden("a2a work assignment is owned by another claimer")
+                        .with_request_id(rid.to_string())
+                        .with_details(serde_json::json!({
+                            "assignment_id": assignment_id,
+                            "claimed_by": claimed_by,
+                            "reporter": sender_id
+                        })),
+                );
+            }
+            None => {
+                return Err(
+                    ApiError::conflict("a2a work assignment has not been claimed")
+                        .with_request_id(rid.to_string())
+                        .with_details(serde_json::json!({
+                            "assignment_id": assignment_id
+                        })),
+                );
+            }
+        }
+        if task
+            .lease_expires_at
+            .map(|expires_at| expires_at <= Utc::now())
+            .unwrap_or(false)
+        {
+            return Err(ApiError::conflict("a2a work assignment lease expired")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id
+                })));
+        }
+        return Ok(task.task_id);
+    }
+
+    let now_ms = lifecycle_timestamp_ms(Utc::now());
+    let queue = state.a2a_compat_task_queue.read().await;
+    let entry = queue
+        .iter()
+        .find(|entry| entry.session_id == assignment_id)
+        .ok_or_else(|| {
+            ApiError::conflict("a2a work assignment is not active")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id,
+                    "reason": "already_completed_or_unknown"
+                }))
+        })?;
+    if entry.owner_sender_id != sender_id {
+        return Err(ApiError::forbidden("a2a work assignment sender mismatch")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "assignment_id": assignment_id,
+                "expected_sender_id": entry.owner_sender_id,
+                "actual_sender_id": sender_id
+            })));
+    }
+    if entry.protocol_version != protocol_version {
+        return Err(
+            ApiError::bad_request("a2a work assignment protocol version mismatch")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "assignment_id": assignment_id,
+                    "expected_protocol_version": entry.protocol_version,
+                    "actual_protocol_version": protocol_version
+                })),
+        );
+    }
+    match entry.claimed_by.as_deref() {
+        Some(claimed_by) if claimed_by == sender_id => {}
+        Some(claimed_by) => {
+            return Err(
+                ApiError::forbidden("a2a work assignment is owned by another claimer")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id,
+                        "claimed_by": claimed_by,
+                        "reporter": sender_id
+                    })),
+            );
+        }
+        None => {
+            return Err(
+                ApiError::conflict("a2a work assignment has not been claimed")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "assignment_id": assignment_id
+                    })),
+            );
+        }
+    }
+    if entry
+        .lease_expires_at_ms
+        .map(|expires_at_ms| expires_at_ms <= now_ms)
+        .unwrap_or(false)
+    {
+        return Err(ApiError::conflict("a2a work assignment lease expired")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "assignment_id": assignment_id
+            })));
+    }
+    Ok(entry.task_id.clone())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_claim(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatWorkClaimRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkClaimResponse>>, ApiError> {
+    let claim = evolution_a2a_tasks_claim(
+        state,
+        headers,
+        Json(A2aCompatClaimRequest {
+            sender_id: req.sender_id.or(req.worker_id),
+            node_id: req.node_id,
+            protocol_version: req.protocol_version,
+        }),
+    )
+    .await?;
+    let envelope = claim.0;
+    let data = envelope.data;
+    Ok(Json(ApiEnvelope {
+        meta: envelope.meta,
+        request_id: envelope.request_id,
+        data: A2aCompatWorkClaimResponse {
+            claimed: data.claimed,
+            assignment: data.task.map(|task| A2aCompatWorkAssignment {
+                assignment_id: task.session_id,
+                task_id: task.task_id,
+                task_summary: task.task_summary,
+                dispatch_id: task.dispatch_id,
+            }),
+            retry_after_ms: data.retry_after_ms,
+        },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_work_complete(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatWorkCompleteRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatWorkCompleteResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    validate_thread_id(&req.assignment_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    let sender_id = resolve_compat_sender_id(
+        req.sender_id.clone().or(req.worker_id.clone()),
+        req.node_id.clone(),
+        &rid,
+    )?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+    let task_id = resolve_active_work_assignment_task_id(
+        &state,
+        &req.assignment_id,
+        &sender_id,
+        &protocol_version,
+        &rid,
+    )
+    .await?;
+    if let Some(explicit_task_id) = req.task_id.as_deref() {
+        validate_thread_id(explicit_task_id).map_err(|e| e.with_request_id(rid.clone()))?;
+        if explicit_task_id != task_id {
+            return Err(
+                ApiError::bad_request("task_id does not match assignment_id")
+                    .with_request_id(rid.clone())
+                    .with_details(serde_json::json!({
+                        "assignment_id": req.assignment_id,
+                        "expected_task_id": task_id,
+                        "actual_task_id": explicit_task_id
+                    })),
+            );
+        }
+    }
+    let assignment_id = req.assignment_id.clone();
+    let completion = evolution_a2a_task_complete(
+        State(state),
+        headers,
+        Json(A2aCompatTaskCompleteRequest {
+            sender_id: Some(sender_id),
+            node_id: None,
+            protocol_version: Some(protocol_version),
+            task_id,
+            status: req.status,
+            success: req.success,
+            summary: req.summary,
+            retryable: req.retryable,
+            retry_after_ms: req.retry_after_ms,
+            failure_code: req.failure_code,
+            failure_details: req.failure_details,
+            used_capsule: req.used_capsule,
+            capsule_id: req.capsule_id,
+            reasoning_steps_avoided: req.reasoning_steps_avoided,
+            fallback_reason: req.fallback_reason,
+            task_class_id: req.task_class_id,
+            task_label: req.task_label,
+        }),
+    )
+    .await?;
+    let envelope = completion.0;
+    let data = envelope.data;
+    Ok(Json(ApiEnvelope {
+        meta: envelope.meta,
+        request_id: envelope.request_id,
+        data: A2aCompatWorkCompleteResponse {
+            assignment_id,
+            task_id: data.task_id,
+            state: data.state,
+            terminal_state: data.terminal_state,
+            summary: data.summary,
+        },
+    }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evolution_a2a_heartbeat(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<A2aCompatHeartbeatRequest>,
+) -> Result<Json<ApiEnvelope<A2aCompatHeartbeatResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = resolve_compat_sender_id(
+        req.sender_id.clone().or(req.worker_id.clone()),
+        req.node_id.clone(),
+        &rid,
+    )?;
+    let protocol_version = resolve_compat_protocol_version(req.protocol_version.clone(), &rid)?;
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_authorized_action(
+        &state,
+        &sender_id,
+        A2aCapability::Coordination,
+        A2aPrivilegeAction::TaskSessionStart,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    let available_work = list_a2a_fetch_tasks(&state, &sender_id, &protocol_version, &rid)
+        .await?
+        .into_iter()
+        .filter(|task| task.claimable)
+        .map(|task| A2aCompatAvailableWorkItem {
+            assignment_id: task.session_id,
+            task_id: task.task_id,
+            task_summary: task.task_summary,
+            dispatch_id: task.dispatch_id,
+        })
+        .collect::<Vec<_>>();
+    let available_work_count = available_work.len();
+
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: A2aCompatHeartbeatResponse {
+            acknowledged: true,
+            worker_id: sender_id,
+            available_work_count,
+            available_work,
+            metadata_accepted: req.metadata.is_some(),
+        },
+    }))
 }
 
 #[cfg(all(
@@ -6658,6 +8190,1199 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_namespace_facade_alias_routes_map_to_existing_compat_handlers() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-facade-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-facade-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-facade-task-1",
+                    "task_summary": "compat facade task",
+                    "dispatch_id": "dispatch-compat-facade-1",
+                    "summary": "compat facade dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        assert_eq!(distribute_json["data"]["state"], "Dispatched");
+        let session_id = distribute_json["data"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-facade-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(
+            claim_json["data"]["task"]["task_id"],
+            "compat-facade-task-1"
+        );
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-facade-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-facade-task-1",
+                    "status": "succeeded",
+                    "summary": "compat facade task completed",
+                    "retryable": false,
+                    "retry_after_ms": null,
+                    "used_capsule": true,
+                    "capsule_id": "compat-facade-capsule-1",
+                    "reasoning_steps_avoided": 2,
+                    "fallback_reason": null,
+                    "task_class_id": "compat.facade",
+                    "task_label": "Compat facade task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+
+        let snapshot_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v1/evolution/a2a/sessions/{session_id}?sender_id=compat-facade-agent&protocol_version={}",
+                crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let snapshot_resp = router.clone().oneshot(snapshot_req).await.unwrap();
+        assert_eq!(snapshot_resp.status(), StatusCode::OK);
+        let snapshot_body = axum::body::to_bytes(snapshot_resp.into_body(), usize::MAX)
+            .await
+            .expect("snapshot body");
+        let snapshot_json: serde_json::Value =
+            serde_json::from_slice(&snapshot_body).expect("snapshot json");
+        assert_eq!(snapshot_json["data"]["state"], "Completed");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_fetch_include_tasks_supports_claim_flow_discovery() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-fetch-agent",
+            "A4",
+            &[
+                "Coordination",
+                "SupervisedDevloop",
+                "ReplayFeedback",
+                "EvolutionFetch",
+            ],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-fetch-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-fetch-task-1",
+                    "task_summary": "compat fetch task",
+                    "dispatch_id": "dispatch-compat-fetch-1",
+                    "summary": "compat fetch dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        let session_id = distribute_json["data"]["session_id"]
+            .as_str()
+            .expect("session_id");
+
+        let first_fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-fetch-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "signals": ["compat", "fetch"],
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_fetch_resp = router.clone().oneshot(first_fetch_req).await.unwrap();
+        assert_eq!(first_fetch_resp.status(), StatusCode::OK);
+        let first_fetch_body = axum::body::to_bytes(first_fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("first fetch body");
+        let first_fetch_json: serde_json::Value =
+            serde_json::from_slice(&first_fetch_body).expect("first fetch json");
+        assert_eq!(
+            first_fetch_json["data"]["tasks"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            first_fetch_json["data"]["tasks"][0]["session_id"],
+            serde_json::json!(session_id)
+        );
+        assert_eq!(
+            first_fetch_json["data"]["tasks"][0]["task_id"],
+            "compat-fetch-task-1"
+        );
+        assert_eq!(
+            first_fetch_json["data"]["tasks"][0]["dispatch_id"],
+            "dispatch-compat-fetch-1"
+        );
+        assert_eq!(first_fetch_json["data"]["tasks"][0]["claimable"], true);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-fetch-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let second_fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-fetch-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_fetch_resp = router.clone().oneshot(second_fetch_req).await.unwrap();
+        assert_eq!(second_fetch_resp.status(), StatusCode::OK);
+        let second_fetch_body = axum::body::to_bytes(second_fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("second fetch body");
+        let second_fetch_json: serde_json::Value =
+            serde_json::from_slice(&second_fetch_body).expect("second fetch json");
+        assert_eq!(
+            second_fetch_json["data"]["tasks"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(second_fetch_json["data"]["tasks"][0]["claimable"], false);
+        assert!(
+            second_fetch_json["data"]["tasks"][0]["lease_expires_at_ms"]
+                .as_u64()
+                .expect("lease_expires_at_ms should exist after claim")
+                > 0
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_gep_envelope_translation_maps_hello_and_fetch_requests() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "hello",
+                    "message_id": "msg-gep-hello-1",
+                    "sender_id": "gep-envelope-agent",
+                    "timestamp": "2026-03-06T00:00:00Z",
+                    "payload": {
+                        "capabilities": {
+                            "coordination": true,
+                            "supervised_devloop": true,
+                            "replay_feedback": true,
+                            "evolution_fetch": true
+                        }
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+        let hello_body = axum::body::to_bytes(hello_resp.into_body(), usize::MAX)
+            .await
+            .expect("hello body");
+        let hello_json: serde_json::Value =
+            serde_json::from_slice(&hello_body).expect("hello json");
+        assert_eq!(hello_json["data"]["accepted"], true);
+        assert_eq!(
+            hello_json["data"]["negotiated_protocol"]["version"],
+            crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+        );
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "gep-envelope-agent",
+                    "task_id": "gep-envelope-task-1",
+                    "task_summary": "gep envelope task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "fetch",
+                    "message_id": "msg-gep-fetch-1",
+                    "sender_id": "gep-envelope-agent",
+                    "timestamp": "2026-03-06T00:00:05Z",
+                    "payload": {
+                        "signals": ["compat", "gep"],
+                        "include_tasks": true
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+        assert_eq!(fetch_resp.status(), StatusCode::OK);
+        let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("fetch body");
+        let fetch_json: serde_json::Value =
+            serde_json::from_slice(&fetch_body).expect("fetch json");
+        assert_eq!(
+            fetch_json["data"]["tasks"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            fetch_json["data"]["tasks"][0]["task_id"],
+            "gep-envelope-task-1"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_gep_envelope_translation_maps_task_claim_and_complete_requests() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "gep-task-flow-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "gep-task-flow-agent",
+                    "task_id": "gep-task-flow-1",
+                    "task_summary": "gep task flow"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "fetch",
+                    "message_id": "msg-gep-claim-1",
+                    "sender_id": "gep-task-flow-agent",
+                    "timestamp": "2026-03-06T00:01:00Z",
+                    "payload": {}
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "report",
+                    "message_id": "msg-gep-complete-1",
+                    "sender_id": "gep-task-flow-agent",
+                    "timestamp": "2026-03-06T00:01:30Z",
+                    "payload": {
+                        "task_id": "gep-task-flow-1",
+                        "success": true,
+                        "summary": "gep envelope complete succeeded",
+                        "used_capsule": true,
+                        "capsule_id": "gep-task-flow-capsule-1",
+                        "reasoning_steps_avoided": 1
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_task_claim_endpoint_reuses_lease_conflict_semantics() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-task-claim-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-task-claim-agent",
+                    "task_id": "compat-task-claim-1",
+                    "task_summary": "compat task claim endpoint",
+                    "dispatch_id": "dispatch-compat-task-claim-1",
+                    "summary": "compat task claim dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-task-claim-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+        let claim_body = axum::body::to_bytes(claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("claim body");
+        let claim_json: serde_json::Value =
+            serde_json::from_slice(&claim_body).expect("claim json");
+        assert_eq!(claim_json["data"]["claimed"], true);
+        assert_eq!(claim_json["data"]["task"]["task_id"], "compat-task-claim-1");
+
+        let conflict_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let conflict_claim_resp = router.clone().oneshot(conflict_claim_req).await.unwrap();
+        assert_eq!(conflict_claim_resp.status(), StatusCode::OK);
+        let conflict_claim_body = axum::body::to_bytes(conflict_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("conflict claim body");
+        let conflict_claim_json: serde_json::Value =
+            serde_json::from_slice(&conflict_claim_body).expect("conflict claim json");
+        assert_eq!(conflict_claim_json["data"]["claimed"], false);
+        assert!(
+            conflict_claim_json["data"]["retry_after_ms"]
+                .as_u64()
+                .expect("retry_after_ms should be present")
+                > 0
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_task_complete_endpoint_maps_terminal_state_and_clears_claimability() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-task-complete-agent",
+            "A4",
+            &[
+                "Coordination",
+                "SupervisedDevloop",
+                "ReplayFeedback",
+                "EvolutionFetch",
+            ],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-complete-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-task-complete-1",
+                    "task_summary": "compat task complete endpoint",
+                    "dispatch_id": "dispatch-compat-task-complete-1",
+                    "summary": "compat task complete dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-complete-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "node_id": "compat-task-complete-agent",
+                    "task_id": "compat-task-complete-1",
+                    "success": true,
+                    "summary": "compat task complete endpoint succeeded",
+                    "used_capsule": true,
+                    "capsule_id": "compat-task-complete-capsule-1",
+                    "reasoning_steps_avoided": 3,
+                    "task_class_id": "compat.task.complete",
+                    "task_label": "Compat task complete endpoint"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::OK);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["data"]["state"], "Completed");
+        assert_eq!(complete_json["data"]["terminal_state"], "Succeeded");
+
+        let post_complete_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-task-complete-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let post_complete_claim_resp = router
+            .clone()
+            .oneshot(post_complete_claim_req)
+            .await
+            .unwrap();
+        assert_eq!(post_complete_claim_resp.status(), StatusCode::OK);
+        let post_complete_claim_body =
+            axum::body::to_bytes(post_complete_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("post-complete claim body");
+        let post_complete_claim_json: serde_json::Value =
+            serde_json::from_slice(&post_complete_claim_body).expect("post-complete claim json");
+        assert_eq!(post_complete_claim_json["data"]["claimed"], false);
+        assert!(post_complete_claim_json["data"]["task"].is_null());
+
+        let lifecycle_json = fetch_lifecycle_events(
+            &router,
+            "compat-task-complete-1",
+            "compat-task-complete-agent",
+        )
+        .await;
+        let states = lifecycle_json["data"]["events"]
+            .as_array()
+            .expect("lifecycle events")
+            .iter()
+            .filter_map(|event| event["state"].as_str())
+            .collect::<Vec<_>>();
+        assert!(states.contains(&"Succeeded"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_work_assignment_lifecycle_blocks_double_complete() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-work-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-work-task-1",
+                    "task_summary": "compat work task",
+                    "dispatch_id": "dispatch-compat-work-1",
+                    "summary": "compat work dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-work-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::OK);
+        let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("work claim body");
+        let work_claim_json: serde_json::Value =
+            serde_json::from_slice(&work_claim_body).expect("work claim json");
+        assert_eq!(work_claim_json["data"]["claimed"], true);
+        let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("assignment id")
+            .to_string();
+        assert_eq!(
+            work_claim_json["data"]["assignment"]["task_id"],
+            "compat-work-task-1"
+        );
+
+        let work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-work-agent",
+                    "assignment_id": assignment_id,
+                    "task_id": "compat-work-task-1",
+                    "success": true,
+                    "summary": "compat work complete succeeded",
+                    "used_capsule": true,
+                    "capsule_id": "compat-work-capsule-1",
+                    "reasoning_steps_avoided": 2,
+                    "task_class_id": "compat.work",
+                    "task_label": "Compat work task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
+        assert_eq!(work_complete_resp.status(), StatusCode::OK);
+        let work_complete_body = axum::body::to_bytes(work_complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("work complete body");
+        let work_complete_json: serde_json::Value =
+            serde_json::from_slice(&work_complete_body).expect("work complete json");
+        assert_eq!(work_complete_json["data"]["assignment_id"], assignment_id);
+        assert_eq!(work_complete_json["data"]["state"], "Completed");
+        assert_eq!(work_complete_json["data"]["terminal_state"], "Succeeded");
+
+        let duplicate_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-work-agent",
+                    "assignment_id": assignment_id,
+                    "success": true,
+                    "summary": "duplicate complete should fail"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let duplicate_complete_resp = router
+            .clone()
+            .oneshot(duplicate_complete_req)
+            .await
+            .unwrap();
+        assert_eq!(duplicate_complete_resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_work_complete_enforces_assignment_ownership() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let owner_handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-work-owner",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(owner_handshake["data"]["accepted"], true);
+        let other_handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-work-other",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(other_handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-owner",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-work-owner-task-1",
+                    "task_summary": "compat work owner task",
+                    "dispatch_id": "dispatch-compat-work-owner-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-owner",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::OK);
+        let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("work claim body");
+        let work_claim_json: serde_json::Value =
+            serde_json::from_slice(&work_claim_body).expect("work claim json");
+        let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("assignment id");
+
+        let intruder_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-work-other",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "assignment_id": assignment_id,
+                    "success": true,
+                    "summary": "intruder should be denied"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let intruder_complete_resp = router.clone().oneshot(intruder_complete_req).await.unwrap();
+        assert_eq!(intruder_complete_resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_heartbeat_reports_deterministic_available_work_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-heartbeat-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        for (task_id, dispatch_id) in [
+            ("compat-heartbeat-task-1", "dispatch-heartbeat-1"),
+            ("compat-heartbeat-task-2", "dispatch-heartbeat-2"),
+        ] {
+            let distribute_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/tasks/distribute")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": "compat-heartbeat-agent",
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "task_summary": format!("summary for {task_id}"),
+                        "dispatch_id": dispatch_id
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+            assert_eq!(distribute_resp.status(), StatusCode::OK);
+        }
+
+        let first_heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "worker_id": "compat-heartbeat-agent",
+                    "metadata": {
+                        "worker_mode": "pull",
+                        "version": "test"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_heartbeat_resp = router.clone().oneshot(first_heartbeat_req).await.unwrap();
+        assert_eq!(first_heartbeat_resp.status(), StatusCode::OK);
+        let first_heartbeat_body =
+            axum::body::to_bytes(first_heartbeat_resp.into_body(), usize::MAX)
+                .await
+                .expect("first heartbeat body");
+        let first_heartbeat_json: serde_json::Value =
+            serde_json::from_slice(&first_heartbeat_body).expect("first heartbeat json");
+        assert_eq!(first_heartbeat_json["data"]["acknowledged"], true);
+        assert_eq!(
+            first_heartbeat_json["data"]["worker_id"],
+            "compat-heartbeat-agent"
+        );
+        assert_eq!(first_heartbeat_json["data"]["metadata_accepted"], true);
+        assert_eq!(first_heartbeat_json["data"]["available_work_count"], 2);
+        assert_eq!(
+            first_heartbeat_json["data"]["available_work"][0]["task_id"],
+            "compat-heartbeat-task-1"
+        );
+        assert_eq!(
+            first_heartbeat_json["data"]["available_work"][1]["task_id"],
+            "compat-heartbeat-task-2"
+        );
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-heartbeat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let second_heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-heartbeat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_heartbeat_resp = router.clone().oneshot(second_heartbeat_req).await.unwrap();
+        assert_eq!(second_heartbeat_resp.status(), StatusCode::OK);
+        let second_heartbeat_body =
+            axum::body::to_bytes(second_heartbeat_resp.into_body(), usize::MAX)
+                .await
+                .expect("second heartbeat body");
+        let second_heartbeat_json: serde_json::Value =
+            serde_json::from_slice(&second_heartbeat_body).expect("second heartbeat json");
+        assert_eq!(second_heartbeat_json["data"]["available_work_count"], 1);
+        assert_eq!(
+            second_heartbeat_json["data"]["available_work"][0]["task_id"],
+            "compat-heartbeat-task-2"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_fetch_validation_errors_include_a2a_error_code_details() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let missing_sender_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let missing_sender_resp = router.clone().oneshot(missing_sender_req).await.unwrap();
+        assert_eq!(missing_sender_resp.status(), StatusCode::BAD_REQUEST);
+        let missing_sender_body = axum::body::to_bytes(missing_sender_resp.into_body(), usize::MAX)
+            .await
+            .expect("missing sender body");
+        let missing_sender_json: serde_json::Value =
+            serde_json::from_slice(&missing_sender_body).expect("missing sender json");
+        assert_eq!(
+            missing_sender_json["error"]["details"]["a2a_error_code"],
+            serde_json::json!("ValidationFailed")
+        );
+
+        let unsupported_protocol_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-fetch-validation-agent",
+                    "protocol_version": "0.0.1",
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let unsupported_protocol_resp = router
+            .clone()
+            .oneshot(unsupported_protocol_req)
+            .await
+            .unwrap();
+        assert_eq!(unsupported_protocol_resp.status(), StatusCode::BAD_REQUEST);
+        let unsupported_protocol_body =
+            axum::body::to_bytes(unsupported_protocol_resp.into_body(), usize::MAX)
+                .await
+                .expect("unsupported protocol body");
+        let unsupported_protocol_json: serde_json::Value =
+            serde_json::from_slice(&unsupported_protocol_body).expect("unsupported protocol json");
+        assert_eq!(
+            unsupported_protocol_json["error"]["details"]["a2a_error_code"],
+            serde_json::json!("UnsupportedProtocol")
+        );
+
+        let wrong_message_type_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "message_type": "hello",
+                    "sender_id": "compat-fetch-validation-agent",
+                    "payload": {
+                        "include_tasks": true
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let wrong_message_type_resp = router
+            .clone()
+            .oneshot(wrong_message_type_req)
+            .await
+            .unwrap();
+        assert_eq!(wrong_message_type_resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(not(feature = "evolution-network-experimental"))]
+    #[tokio::test]
+    async fn evolution_a2a_namespace_facade_routes_remain_feature_gated_when_disabled() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "feature-gate-check-agent",
+                    "role": "Planner",
+                    "capability_level": "A2",
+                    "supported_protocols": [
+                        { "name": "oris.a2a", "version": "1.0.0" }
+                    ],
+                    "advertised_capabilities": ["Coordination"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent",
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let fetch_resp = router.oneshot(fetch_req).await.unwrap();
+        assert_eq!(fetch_resp.status(), StatusCode::NOT_FOUND);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::NOT_FOUND);
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent",
+                    "task_id": "feature-gate-task-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::NOT_FOUND);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::NOT_FOUND);
+
+        let work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent",
+                    "assignment_id": "feature-gate-assignment-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_complete_resp = router.oneshot(work_complete_req).await.unwrap();
+        assert_eq!(work_complete_resp.status(), StatusCode::NOT_FOUND);
+
+        let heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "feature-gate-check-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_resp = router.oneshot(heartbeat_req).await.unwrap();
+        assert_eq!(heartbeat_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_compat_distribute_and_report_map_to_session_flow() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let handshake = handshake_agent_with_caps_and_protocols(
@@ -7028,6 +9753,268 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_compat_e2e_fetch_claim_complete_and_heartbeat_supports_route_variants() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        for (idx, hello_path, distribute_path) in [
+            (
+                1usize,
+                "/evolution/a2a/hello",
+                "/evolution/a2a/tasks/distribute",
+            ),
+            (2usize, "/a2a/hello", "/a2a/tasks/distribute"),
+        ] {
+            let sender_id = format!("compat-e2e-agent-{idx}");
+            let task_claim_task_id = format!("compat-e2e-task-claim-{idx}");
+            let work_claim_task_id = format!("compat-e2e-work-claim-{idx}");
+
+            let handshake = handshake_agent_with_caps_and_protocols(
+                &router,
+                hello_path,
+                &sender_id,
+                "A4",
+                &[
+                    "Coordination",
+                    "SupervisedDevloop",
+                    "ReplayFeedback",
+                    "EvolutionFetch",
+                ],
+                &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+            )
+            .await;
+            assert_eq!(handshake["data"]["accepted"], true);
+
+            let distribute_first_req = Request::builder()
+                .method(Method::POST)
+                .uri(distribute_path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_claim_task_id.clone(),
+                        "task_summary": "compat e2e task claim flow",
+                        "dispatch_id": format!("dispatch-compat-e2e-claim-{idx}"),
+                        "summary": "queued for task claim flow"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_first_resp = router.clone().oneshot(distribute_first_req).await.unwrap();
+            assert_eq!(distribute_first_resp.status(), StatusCode::OK);
+
+            let distribute_second_req = Request::builder()
+                .method(Method::POST)
+                .uri(distribute_path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": work_claim_task_id.clone(),
+                        "task_summary": "compat e2e work claim flow",
+                        "dispatch_id": format!("dispatch-compat-e2e-work-{idx}"),
+                        "summary": "queued for work claim flow"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_second_resp =
+                router.clone().oneshot(distribute_second_req).await.unwrap();
+            assert_eq!(distribute_second_resp.status(), StatusCode::OK);
+
+            let fetch_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/fetch")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "include_tasks": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+            assert_eq!(fetch_resp.status(), StatusCode::OK);
+            let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+                .await
+                .expect("fetch body");
+            let fetch_json: serde_json::Value =
+                serde_json::from_slice(&fetch_body).expect("fetch json");
+            let fetched_tasks = fetch_json["data"]["tasks"]
+                .as_array()
+                .expect("tasks array")
+                .iter()
+                .filter_map(|task| task["task_id"].as_str())
+                .map(ToString::to_string)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(fetched_tasks.contains(&task_claim_task_id));
+            assert!(fetched_tasks.contains(&work_claim_task_id));
+
+            let task_claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let task_claim_resp = router.clone().oneshot(task_claim_req).await.unwrap();
+            assert_eq!(task_claim_resp.status(), StatusCode::OK);
+            let task_claim_body = axum::body::to_bytes(task_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("task claim body");
+            let task_claim_json: serde_json::Value =
+                serde_json::from_slice(&task_claim_body).expect("task claim json");
+            assert_eq!(task_claim_json["data"]["claimed"], true);
+            let claimed_task_id = task_claim_json["data"]["task"]["task_id"]
+                .as_str()
+                .expect("claimed task id")
+                .to_string();
+            assert!(claimed_task_id == task_claim_task_id || claimed_task_id == work_claim_task_id);
+
+            let task_complete_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": claimed_task_id.clone(),
+                        "status": "succeeded",
+                        "summary": "compat e2e task complete"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let task_complete_resp = router.clone().oneshot(task_complete_req).await.unwrap();
+            assert_eq!(task_complete_resp.status(), StatusCode::OK);
+            let task_complete_body =
+                axum::body::to_bytes(task_complete_resp.into_body(), usize::MAX)
+                    .await
+                    .expect("task complete body");
+            let task_complete_json: serde_json::Value =
+                serde_json::from_slice(&task_complete_body).expect("task complete json");
+            assert_eq!(task_complete_json["data"]["state"], "Completed");
+            assert_eq!(task_complete_json["data"]["terminal_state"], "Succeeded");
+
+            let work_claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/work/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+            assert_eq!(work_claim_resp.status(), StatusCode::OK);
+            let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("work claim body");
+            let work_claim_json: serde_json::Value =
+                serde_json::from_slice(&work_claim_body).expect("work claim json");
+            assert_eq!(work_claim_json["data"]["claimed"], true);
+            let work_claimed_task_id = work_claim_json["data"]["assignment"]["task_id"]
+                .as_str()
+                .expect("work claimed task id")
+                .to_string();
+            assert_ne!(work_claimed_task_id, claimed_task_id);
+            let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+                .as_str()
+                .expect("assignment id")
+                .to_string();
+
+            let work_complete_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/work/complete")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "assignment_id": assignment_id,
+                        "task_id": work_claimed_task_id,
+                        "status": "succeeded",
+                        "summary": "compat e2e work complete"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
+            assert_eq!(work_complete_resp.status(), StatusCode::OK);
+            let work_complete_body =
+                axum::body::to_bytes(work_complete_resp.into_body(), usize::MAX)
+                    .await
+                    .expect("work complete body");
+            let work_complete_json: serde_json::Value =
+                serde_json::from_slice(&work_complete_body).expect("work complete json");
+            assert_eq!(work_complete_json["data"]["state"], "Completed");
+            assert_eq!(work_complete_json["data"]["terminal_state"], "Succeeded");
+
+            let heartbeat_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/heartbeat")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id.clone(),
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "metadata": {
+                            "worker_mode": "compat-e2e"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let heartbeat_resp = router.clone().oneshot(heartbeat_req).await.unwrap();
+            assert_eq!(heartbeat_resp.status(), StatusCode::OK);
+            let heartbeat_body = axum::body::to_bytes(heartbeat_resp.into_body(), usize::MAX)
+                .await
+                .expect("heartbeat body");
+            let heartbeat_json: serde_json::Value =
+                serde_json::from_slice(&heartbeat_body).expect("heartbeat json");
+            assert_eq!(heartbeat_json["data"]["acknowledged"], true);
+            assert_eq!(heartbeat_json["data"]["metadata_accepted"], true);
+
+            let final_claim_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/task/claim")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": sender_id,
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let final_claim_resp = router.clone().oneshot(final_claim_req).await.unwrap();
+            assert_eq!(final_claim_resp.status(), StatusCode::OK);
+            let final_claim_body = axum::body::to_bytes(final_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("final claim body");
+            let final_claim_json: serde_json::Value =
+                serde_json::from_slice(&final_claim_body).expect("final claim json");
+            assert_eq!(final_claim_json["data"]["claimed"], false);
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_compat_validation_errors_include_a2a_error_code_details() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let claim_req = Request::builder()
@@ -7078,6 +10065,96 @@ mod tests {
             distribute_json["error"]["details"]["a2a_error_code"],
             serde_json::json!("UnsupportedProtocol")
         );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental",
+        feature = "sqlite-persistence"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_fetch_include_tasks_reads_sqlite_persistence_queue() {
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            ":memory:",
+        ));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-fetch-sqlite-agent",
+            "A4",
+            &[
+                "Coordination",
+                "SupervisedDevloop",
+                "ReplayFeedback",
+                "EvolutionFetch",
+            ],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-fetch-sqlite-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-fetch-sqlite-task-1",
+                    "task_summary": "compat fetch sqlite task",
+                    "dispatch_id": "dispatch-compat-fetch-sqlite-1",
+                    "summary": "compat fetch sqlite dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        let session_id = distribute_json["data"]["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-fetch-sqlite-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+        assert_eq!(fetch_resp.status(), StatusCode::OK);
+        let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("fetch body");
+        let fetch_json: serde_json::Value =
+            serde_json::from_slice(&fetch_body).expect("fetch json");
+        assert_eq!(
+            fetch_json["data"]["tasks"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            fetch_json["data"]["tasks"][0]["session_id"],
+            serde_json::json!(session_id)
+        );
+        assert_eq!(
+            fetch_json["data"]["tasks"][0]["task_id"],
+            "compat-fetch-sqlite-task-1"
+        );
+        assert_eq!(fetch_json["data"]["tasks"][0]["claimable"], true);
     }
 
     #[cfg(all(
@@ -8075,6 +11152,149 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn auth_node_secret_compat_mode_only_applies_to_a2a_paths() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await)
+                .with_compat_node_secret("node-secret-1"),
+        );
+
+        let run_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/jobs/run")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "thread_id": "node-secret-auth-scope-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let run_resp = router.clone().oneshot(run_req).await.unwrap();
+        assert_eq!(run_resp.status(), StatusCode::OK);
+
+        let heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-secret-auth-scope-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_resp = router.clone().oneshot(heartbeat_req).await.unwrap();
+        assert_eq!(heartbeat_resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn auth_node_secret_compat_mode_authenticates_and_audits_denied_calls() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_compat_node_secret_with_role("node-secret-1", ApiRole::Operator);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("authorization", "Bearer node-secret-1")
+            .header("x-request-id", "req-node-secret-hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "node-secret-agent",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback", "EvolutionFetch"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+
+        let heartbeat_ok_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("authorization", "Bearer node-secret-1")
+            .header("x-request-id", "req-node-secret-ok")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-secret-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_ok_resp = router.clone().oneshot(heartbeat_ok_req).await.unwrap();
+        assert_eq!(heartbeat_ok_resp.status(), StatusCode::OK);
+
+        let heartbeat_denied_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("authorization", "Bearer wrong-node-secret")
+            .header("x-request-id", "req-node-secret-denied")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-secret-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_denied_resp = router.clone().oneshot(heartbeat_denied_req).await.unwrap();
+        assert_eq!(heartbeat_denied_resp.status(), StatusCode::UNAUTHORIZED);
+        let denied_body = axum::body::to_bytes(heartbeat_denied_resp.into_body(), usize::MAX)
+            .await
+            .expect("denied body");
+        let denied_json: serde_json::Value =
+            serde_json::from_slice(&denied_body).expect("denied json");
+        let supported_auth = denied_json["error"]["details"]["supported_auth"]
+            .as_array()
+            .expect("supported auth array");
+        assert!(supported_auth
+            .iter()
+            .any(|value| value.as_str() == Some("bearer(node_secret)")));
+
+        let logs = repo.list_audit_logs(50).expect("list audit logs");
+        let denied_log = logs
+            .iter()
+            .find(|log| {
+                log.request_id == "req-node-secret-denied"
+                    && log.action == "a2a.compat.heartbeat"
+                    && log.result == "error"
+            })
+            .expect("denied heartbeat audit log");
+        let denied_details: serde_json::Value = serde_json::from_str(
+            denied_log
+                .details_json
+                .as_deref()
+                .expect("denied heartbeat details json"),
+        )
+        .expect("parse denied heartbeat details");
+        assert_eq!(denied_details["path"], "/a2a/heartbeat");
+        assert_eq!(denied_details["status_code"], 401);
+    }
+
     #[tokio::test]
     async fn auth_api_key_allows_access() {
         let router = build_router(
@@ -8467,7 +11687,7 @@ mod tests {
                             "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
                         }
                     ],
-                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback"]
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback", "EvolutionFetch"]
                 })
                 .to_string(),
             ))
@@ -8582,6 +11802,244 @@ mod tests {
                 && log.result == "success"
                 && log.request_id == "req-a2a-compat-report-complete"
         }));
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn audit_logs_capture_a2a_compat_fetch_work_heartbeat_actions_with_actor() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_compat_node_secret_with_role("compat-audit-secret", ApiRole::Operator);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+        let node_id = "a2a-compat-node-audit";
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("x-request-id", "req-a2a-compat2-hello")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "a2a-compat-audit-agent-2",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback", "EvolutionFetch"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+
+        for (task_id, dispatch_id, request_id) in [
+            (
+                "a2a-compat-audit-task-2a",
+                "dispatch-a2a-compat-audit-2a",
+                "req-a2a-compat2-distribute-1",
+            ),
+            (
+                "a2a-compat-audit-task-2b",
+                "dispatch-a2a-compat-audit-2b",
+                "req-a2a-compat2-distribute-2",
+            ),
+        ] {
+            let distribute_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/tasks/distribute")
+                .header("x-request-id", request_id)
+                .header("authorization", "Bearer compat-audit-secret")
+                .header("x-node-id", node_id)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": "a2a-compat-audit-agent-2",
+                        "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                        "task_id": task_id,
+                        "task_summary": "compat audit task",
+                        "dispatch_id": dispatch_id,
+                        "summary": "compat dispatch"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+            assert_eq!(distribute_resp.status(), StatusCode::OK);
+        }
+
+        let fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("x-request-id", "req-a2a-compat2-fetch")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
+        let fetch_status = fetch_resp.status();
+        let fetch_body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("compat fetch body");
+        assert_eq!(
+            fetch_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&fetch_body)
+        );
+
+        let task_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("x-request-id", "req-a2a-compat2-task-claim")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let task_claim_resp = router.clone().oneshot(task_claim_req).await.unwrap();
+        assert_eq!(task_claim_resp.status(), StatusCode::OK);
+        let task_claim_body = axum::body::to_bytes(task_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("task claim body");
+        let task_claim_json: serde_json::Value =
+            serde_json::from_slice(&task_claim_body).expect("task claim json");
+        let task_id = task_claim_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+
+        let task_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("x-request-id", "req-a2a-compat2-task-complete")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": task_id,
+                    "status": "succeeded",
+                    "summary": "compat task complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let task_complete_resp = router.clone().oneshot(task_complete_req).await.unwrap();
+        assert_eq!(task_complete_resp.status(), StatusCode::OK);
+
+        let work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("x-request-id", "req-a2a-compat2-work-claim")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
+        assert_eq!(work_claim_resp.status(), StatusCode::OK);
+        let work_claim_body = axum::body::to_bytes(work_claim_resp.into_body(), usize::MAX)
+            .await
+            .expect("work claim body");
+        let work_claim_json: serde_json::Value =
+            serde_json::from_slice(&work_claim_body).expect("work claim json");
+        let assignment_id = work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("assignment id")
+            .to_string();
+
+        let work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("x-request-id", "req-a2a-compat2-work-complete")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "assignment_id": assignment_id,
+                    "status": "succeeded",
+                    "summary": "compat work complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
+        assert_eq!(work_complete_resp.status(), StatusCode::OK);
+
+        let heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("x-request-id", "req-a2a-compat2-heartbeat")
+            .header("authorization", "Bearer compat-audit-secret")
+            .header("x-node-id", node_id)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "a2a-compat-audit-agent-2",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_resp = router.clone().oneshot(heartbeat_req).await.unwrap();
+        assert_eq!(heartbeat_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(500).expect("list audit logs");
+        for (request_id, action) in [
+            ("req-a2a-compat2-hello", "a2a.compat.hello"),
+            ("req-a2a-compat2-fetch", "a2a.compat.fetch"),
+            ("req-a2a-compat2-task-claim", "a2a.compat.claim"),
+            ("req-a2a-compat2-task-complete", "a2a.compat.report"),
+            ("req-a2a-compat2-work-claim", "a2a.compat.work.claim"),
+            ("req-a2a-compat2-work-complete", "a2a.compat.work.complete"),
+            ("req-a2a-compat2-heartbeat", "a2a.compat.heartbeat"),
+        ] {
+            assert!(logs.iter().any(|log| {
+                log.request_id == request_id
+                    && log.action == action
+                    && log.result == "success"
+                    && log.actor_type == "node_secret"
+                    && log.actor_role.as_deref() == Some("operator")
+                    && log.actor_id.as_deref() == Some(node_id)
+            }));
+        }
     }
 
     #[cfg(feature = "sqlite-persistence")]
@@ -9825,7 +13283,12 @@ mod tests {
             "/evolution/a2a/hello",
             "metrics-compat-agent",
             "A4",
-            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[
+                "Coordination",
+                "SupervisedDevloop",
+                "ReplayFeedback",
+                "EvolutionFetch",
+            ],
             &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
         )
         .await;
@@ -9933,6 +13396,179 @@ mod tests {
         let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
         assert_eq!(complete_resp.status(), StatusCode::OK);
 
+        let compat_distribute_task_2_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "metrics-compat-task-2",
+                    "task_summary": "metrics compat task 2",
+                    "dispatch_id": "dispatch-metrics-compat-2",
+                    "summary": "metrics compat distribute 2"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_distribute_task_2_resp = router
+            .clone()
+            .oneshot(compat_distribute_task_2_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_distribute_task_2_resp.status(), StatusCode::OK);
+
+        let compat_distribute_task_3_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "metrics-compat-task-3",
+                    "task_summary": "metrics compat task 3",
+                    "dispatch_id": "dispatch-metrics-compat-3",
+                    "summary": "metrics compat distribute 3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_distribute_task_3_resp = router
+            .clone()
+            .oneshot(compat_distribute_task_3_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_distribute_task_3_resp.status(), StatusCode::OK);
+
+        let compat_fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "include_tasks": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_fetch_resp = router.clone().oneshot(compat_fetch_req).await.unwrap();
+        assert_eq!(compat_fetch_resp.status(), StatusCode::OK);
+
+        let compat_task_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_task_claim_resp = router.clone().oneshot(compat_task_claim_req).await.unwrap();
+        assert_eq!(compat_task_claim_resp.status(), StatusCode::OK);
+        let compat_task_claim_body =
+            axum::body::to_bytes(compat_task_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("compat task claim body");
+        let compat_task_claim_json: serde_json::Value =
+            serde_json::from_slice(&compat_task_claim_body).expect("compat task claim json");
+        assert_eq!(compat_task_claim_json["data"]["claimed"], true);
+        let compat_task_id = compat_task_claim_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("compat task id")
+            .to_string();
+
+        let compat_task_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": compat_task_id,
+                    "status": "succeeded",
+                    "summary": "metrics compat task complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_task_complete_resp = router
+            .clone()
+            .oneshot(compat_task_complete_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_task_complete_resp.status(), StatusCode::OK);
+
+        let compat_work_claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_work_claim_resp = router.clone().oneshot(compat_work_claim_req).await.unwrap();
+        assert_eq!(compat_work_claim_resp.status(), StatusCode::OK);
+        let compat_work_claim_body =
+            axum::body::to_bytes(compat_work_claim_resp.into_body(), usize::MAX)
+                .await
+                .expect("compat work claim body");
+        let compat_work_claim_json: serde_json::Value =
+            serde_json::from_slice(&compat_work_claim_body).expect("compat work claim json");
+        assert_eq!(compat_work_claim_json["data"]["claimed"], true);
+        let compat_assignment_id = compat_work_claim_json["data"]["assignment"]["assignment_id"]
+            .as_str()
+            .expect("compat assignment id")
+            .to_string();
+
+        let compat_work_complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/work/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "assignment_id": compat_assignment_id,
+                    "status": "succeeded",
+                    "summary": "metrics compat work complete"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_work_complete_resp = router
+            .clone()
+            .oneshot(compat_work_complete_req)
+            .await
+            .unwrap();
+        assert_eq!(compat_work_complete_resp.status(), StatusCode::OK);
+
+        let compat_heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "metrics-compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let compat_heartbeat_resp = router.clone().oneshot(compat_heartbeat_req).await.unwrap();
+        assert_eq!(compat_heartbeat_resp.status(), StatusCode::OK);
+
         let metrics_req = Request::builder()
             .method(Method::GET)
             .uri("/metrics")
@@ -9947,8 +13583,14 @@ mod tests {
 
         assert!(metrics_text.contains("# HELP oris_a2a_task_queue_depth"));
         assert!(metrics_text.contains("oris_a2a_task_lease_expired_total 1"));
-        assert!(metrics_text.contains("oris_a2a_task_claim_latency_ms_count 2"));
-        assert!(metrics_text.contains("oris_a2a_report_to_capture_latency_ms_count 1"));
+        assert!(metrics_text.contains("oris_a2a_task_claim_latency_ms_count 4"));
+        assert!(metrics_text.contains("oris_a2a_report_to_capture_latency_ms_count 3"));
+        assert!(metrics_text.contains("oris_a2a_fetch_total 1"));
+        assert!(metrics_text.contains("oris_a2a_task_claim_total 1"));
+        assert!(metrics_text.contains("oris_a2a_task_complete_total 1"));
+        assert!(metrics_text.contains("oris_a2a_work_claim_total 1"));
+        assert!(metrics_text.contains("oris_a2a_work_complete_total 1"));
+        assert!(metrics_text.contains("oris_a2a_heartbeat_total 1"));
     }
 
     #[cfg(feature = "evolution-network-experimental")]
@@ -10019,6 +13661,12 @@ mod tests {
             "oris_a2a_task_claim_latency_ms_bucket",
             "oris_a2a_task_lease_expired_total",
             "oris_a2a_report_to_capture_latency_ms_bucket",
+            "oris_a2a_fetch_total",
+            "oris_a2a_task_claim_total",
+            "oris_a2a_task_complete_total",
+            "oris_a2a_work_claim_total",
+            "oris_a2a_work_complete_total",
+            "oris_a2a_heartbeat_total",
         ];
 
         for metric in required_metrics {
@@ -10042,6 +13690,9 @@ mod tests {
             "oris_a2a_task_queue_depth",
             "oris_a2a_task_claim_latency_ms_count",
             "oris_a2a_task_lease_expired_total",
+            "oris_a2a_task_complete_total",
+            "oris_a2a_work_complete_total",
+            "oris_a2a_heartbeat_total",
         ];
         for metric in alert_metrics {
             assert!(

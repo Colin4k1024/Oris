@@ -1750,6 +1750,40 @@ impl SqliteRuntimeRepository {
         Ok(())
     }
 
+    pub fn list_a2a_compat_tasks(
+        &self,
+        sender_id: &str,
+        protocol_version: &str,
+    ) -> Result<Vec<A2aCompatTaskRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, sender_id, protocol_version, task_id, task_summary, dispatch_id,
+                        claimed_by_sender_id, lease_expires_at_ms, enqueued_at_ms, updated_at_ms
+                 FROM runtime_a2a_compat_tasks
+                 WHERE sender_id = ?1
+                   AND protocol_version = ?2
+                 ORDER BY enqueued_at_ms ASC",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare list a2a compat tasks: {}", e)))?;
+        let rows = stmt
+            .query_map(
+                params![sender_id, protocol_version],
+                map_row_to_a2a_compat_task,
+            )
+            .map_err(|e| KernelError::Driver(format!("query list a2a compat tasks: {}", e)))?;
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(
+                row.map_err(|e| KernelError::Driver(format!("scan list a2a compat tasks: {}", e)))?,
+            );
+        }
+        Ok(tasks)
+    }
+
     pub fn claim_a2a_compat_task(
         &self,
         sender_id: &str,
@@ -3267,6 +3301,74 @@ mod tests {
             )
             .expect("claim after remove");
         assert!(after_remove.task.is_none());
+    }
+
+    #[test]
+    fn list_a2a_compat_tasks_returns_ordered_sender_protocol_slice() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite runtime repo");
+        let now = Utc::now();
+
+        repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+            session_id: "session-a1".to_string(),
+            sender_id: "sender-a".to_string(),
+            protocol_version: "1.0.0".to_string(),
+            task_id: "task-a1".to_string(),
+            task_summary: "first".to_string(),
+            dispatch_id: "dispatch-a1".to_string(),
+            claimed_by_sender_id: None,
+            lease_expires_at: None,
+            enqueued_at: now,
+            updated_at: now,
+        })
+        .expect("upsert sender-a first task");
+        repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+            session_id: "session-b1".to_string(),
+            sender_id: "sender-b".to_string(),
+            protocol_version: "1.0.0".to_string(),
+            task_id: "task-b1".to_string(),
+            task_summary: "other sender".to_string(),
+            dispatch_id: "dispatch-b1".to_string(),
+            claimed_by_sender_id: None,
+            lease_expires_at: None,
+            enqueued_at: now + Duration::milliseconds(1),
+            updated_at: now + Duration::milliseconds(1),
+        })
+        .expect("upsert sender-b task");
+        repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+            session_id: "session-a2".to_string(),
+            sender_id: "sender-a".to_string(),
+            protocol_version: "1.0.0".to_string(),
+            task_id: "task-a2".to_string(),
+            task_summary: "second".to_string(),
+            dispatch_id: "dispatch-a2".to_string(),
+            claimed_by_sender_id: Some("sender-a".to_string()),
+            lease_expires_at: Some(now + Duration::seconds(10)),
+            enqueued_at: now + Duration::milliseconds(2),
+            updated_at: now + Duration::milliseconds(2),
+        })
+        .expect("upsert sender-a second task");
+
+        let sender_a_tasks = repo
+            .list_a2a_compat_tasks("sender-a", "1.0.0")
+            .expect("list sender-a tasks");
+        assert_eq!(sender_a_tasks.len(), 2);
+        assert_eq!(sender_a_tasks[0].task_id, "task-a1");
+        assert_eq!(sender_a_tasks[1].task_id, "task-a2");
+        assert_eq!(
+            sender_a_tasks[1].claimed_by_sender_id.as_deref(),
+            Some("sender-a")
+        );
+
+        let sender_b_tasks = repo
+            .list_a2a_compat_tasks("sender-b", "1.0.0")
+            .expect("list sender-b tasks");
+        assert_eq!(sender_b_tasks.len(), 1);
+        assert_eq!(sender_b_tasks[0].task_id, "task-b1");
+
+        let mismatched_protocol = repo
+            .list_a2a_compat_tasks("sender-a", "0.1.0-experimental")
+            .expect("list sender-a mismatched protocol");
+        assert!(mismatched_protocol.is_empty());
     }
 
     #[test]

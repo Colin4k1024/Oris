@@ -51,3 +51,23 @@ groups:
         annotations:
           summary: Compatibility A2A lease expiry churn is elevated
           description: Compatibility task leases are expiring and being reclaimed frequently.
+
+      - alert: OrisA2aCompatCompletionStalled
+        expr: max_over_time(oris_a2a_task_queue_depth[10m]) > 0 and (increase(oris_a2a_task_complete_total[10m]) + increase(oris_a2a_work_complete_total[10m])) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: oris-runtime
+        annotations:
+          summary: Compatibility A2A completions are stalled
+          description: Compatibility tasks remained queued for 10 minutes without task/work completion activity.
+
+      - alert: OrisA2aCompatHeartbeatMissing
+        expr: max_over_time(oris_a2a_task_queue_depth[10m]) > 0 and increase(oris_a2a_heartbeat_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: oris-runtime
+        annotations:
+          summary: Compatibility A2A heartbeat traffic is missing
+          description: Compatibility queue stayed non-empty for 10 minutes while no heartbeat activity was observed.

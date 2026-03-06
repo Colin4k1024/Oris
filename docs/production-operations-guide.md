@@ -25,7 +25,8 @@ Recommended production topology:
 
 1. One execution API process exposing `/v1/jobs*`, `/v1/interrupts*`, `/v1/workers*`, `/metrics`, and (when enabled) both native and compatibility A2A routes:
    - native `/v1/evolution/a2a/sessions/*`
-   - compatibility `/evolution/a2a/*` (`hello`, `tasks/distribute`, `tasks/claim`, `tasks/report`)
+   - compatibility preferred `/a2a/*` (`hello`, `fetch`, `task/*`, `work/*`, `heartbeat`, plus `tasks/*` aliases)
+   - compatibility legacy aliases `/evolution/a2a/*` (`hello`, `tasks/distribute`, `tasks/claim`, `tasks/report`)
 2. One or more worker processes polling the execution API.
 3. Durable persistence enabled from day one:
    - SQLite for single-node or low-scale private deployments.
@@ -91,12 +92,14 @@ curl -s http://127.0.0.1:8080/v1/jobs/ops-smoke-1
 Compatibility A2A smoke checks (if compatibility traffic is enabled):
 
 ```bash
-curl -s -X POST http://127.0.0.1:8080/evolution/a2a/hello \
+curl -s -X POST http://127.0.0.1:8080/a2a/hello \
   -H 'content-type: application/json' \
-  -d '{"agent_id":"ops-compat-smoke","role":"Planner","capability_level":"A2","supported_protocols":[{"name":"oris.a2a","version":"1.0.0"}],"advertised_capabilities":["Coordination"]}'
+  -d '{"agent_id":"ops-compat-smoke","role":"Planner","capability_level":"A2","supported_protocols":[{"name":"oris.a2a","version":"1.0.0"}],"advertised_capabilities":["Coordination","EvolutionFetch"]}'
 ```
 
-For the complete compatibility closure (`hello -> distribute -> claim -> report -> snapshot -> lifecycle`), use the runbook section in [evokernel/network.md](evokernel/network.md): `End-to-End Compatibility Operation Runbook (distribute -> claim -> report)`.
+Legacy clients can continue to use `/evolution/a2a/hello` for handshake.
+
+For the complete compatibility closure (`hello -> fetch -> task/work claim -> complete -> heartbeat -> snapshot/lifecycle`), use the runbook section in [evokernel/network.md](evokernel/network.md): `End-to-End Compatibility Operation Runbook (fetch -> task/work claim -> complete -> heartbeat)`.
 
 Success criteria:
 

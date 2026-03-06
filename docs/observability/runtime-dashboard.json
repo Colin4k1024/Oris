@@ -131,6 +131,44 @@
           "unit": "ms"
         }
       }
+    },
+    {
+      "id": 7,
+      "title": "A2A Compat Endpoint Throughput (5m)",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(oris_a2a_fetch_total[5m])",
+          "legendFormat": "fetch"
+        },
+        {
+          "refId": "B",
+          "expr": "increase(oris_a2a_task_claim_total[5m])",
+          "legendFormat": "task claim"
+        },
+        {
+          "refId": "C",
+          "expr": "increase(oris_a2a_task_complete_total[5m])",
+          "legendFormat": "task complete"
+        },
+        {
+          "refId": "D",
+          "expr": "increase(oris_a2a_work_claim_total[5m])",
+          "legendFormat": "work claim"
+        },
+        {
+          "refId": "E",
+          "expr": "increase(oris_a2a_work_complete_total[5m])",
+          "legendFormat": "work complete"
+        },
+        {
+          "refId": "F",
+          "expr": "increase(oris_a2a_heartbeat_total[5m])",
+          "legendFormat": "heartbeat"
+        }
+      ]
     }
   ]
 }
