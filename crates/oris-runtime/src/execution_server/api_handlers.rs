@@ -1,7 +1,7 @@
 //! Axum handlers for Phase 2 execution server.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::Instant;
 
 use axum::extract::{Path, Query, State};
@@ -182,6 +182,16 @@ pub struct ExecutionApiAuthConfig {
     pub compat_node_secret_hash: Option<String>,
     pub compat_node_secret_role: ApiRole,
     pub keyed_api_keys: HashMap<String, StaticApiKeyConfig>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    issued_compat_node_secrets: Arc<StdRwLock<HashMap<String, A2aIssuedCompatNodeSecret>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    issued_compat_node_secret_by_sender: Arc<StdRwLock<HashMap<String, String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -426,6 +436,16 @@ struct A2aSession {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+#[derive(Clone, Debug)]
+struct A2aIssuedCompatNodeSecret {
+    principal: Option<A2aSessionPrincipal>,
+    expires_at: chrono::DateTime<Utc>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 const A2A_SESSION_TTL_HOURS: i64 = 24;
 
 #[cfg(all(
@@ -439,6 +459,18 @@ const A2A_TASK_EVENT_HISTORY_LIMIT: usize = 256;
     feature = "evolution-network-experimental"
 ))]
 const A2A_COMPAT_CLAIM_LEASE_MS: u64 = 60_000;
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const A2A_COMPAT_TASK_CLAIM_URL: &str = "/a2a/task/claim";
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const A2A_COMPAT_HUB_NODE_ID_DEFAULT: &str = "oris-runtime";
 
 #[cfg(all(
     feature = "agent-contract-experimental",
@@ -1037,6 +1069,32 @@ pub struct A2aCompatHeartbeatResponse {
     available_work_count: usize,
     available_work: Vec<A2aCompatAvailableWorkItem>,
     metadata_accepted: bool,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatHelloPayload {
+    node_secret: String,
+    claim_url: String,
+    hub_node_id: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct A2aCompatHelloResponse {
+    accepted: bool,
+    negotiated_protocol: Option<A2aProtocol>,
+    enabled_capabilities: Vec<A2aCapability>,
+    message: Option<String>,
+    error: Option<A2aErrorEnvelope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<A2aCompatHelloPayload>,
 }
 
 #[cfg(all(
@@ -1792,6 +1850,16 @@ impl ExecutionApiAuthConfig {
             compat_node_secret_hash: None,
             compat_node_secret_role: ApiRole::Operator,
             keyed_api_keys: HashMap::new(),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            issued_compat_node_secrets: Arc::new(StdRwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            issued_compat_node_secret_by_sender: Arc::new(StdRwLock::new(HashMap::new())),
         }
     }
 
@@ -1816,6 +1884,17 @@ impl ExecutionApiAuthConfig {
             || self.api_key_hash.is_some()
             || self.compat_node_secret_hash.is_some()
             || !self.keyed_api_keys.is_empty()
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    fn has_issued_compat_node_secrets(&self) -> bool {
+        self.issued_compat_node_secrets
+            .read()
+            .map(|secrets| !secrets.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -2650,6 +2729,140 @@ fn api_key_id_from_headers(headers: &HeaderMap) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn default_a2a_compat_hub_node_id() -> String {
+    std::env::var("ORIS_A2A_HUB_NODE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| A2A_COMPAT_HUB_NODE_ID_DEFAULT.to_string())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn generate_issued_compat_node_secret() -> String {
+    format!("ns_{}", uuid::Uuid::new_v4().simple())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn purge_expired_issued_compat_node_secrets(
+    auth: &ExecutionApiAuthConfig,
+    now: chrono::DateTime<Utc>,
+) {
+    let expired_hashes = auth
+        .issued_compat_node_secrets
+        .read()
+        .ok()
+        .map(|secrets| {
+            secrets
+                .iter()
+                .filter(|(_, issued)| issued.expires_at <= now)
+                .map(|(hash, _)| hash.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if expired_hashes.is_empty() {
+        return;
+    }
+    if let Ok(mut secrets) = auth.issued_compat_node_secrets.write() {
+        for hash in &expired_hashes {
+            secrets.remove(hash);
+        }
+    }
+    if let Ok(mut by_sender) = auth.issued_compat_node_secret_by_sender.write() {
+        by_sender.retain(|_, hash| !expired_hashes.iter().any(|expired| expired == hash));
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn issue_compat_node_secret(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    principal: Option<A2aSessionPrincipal>,
+    expires_at: chrono::DateTime<Utc>,
+) -> String {
+    purge_expired_issued_compat_node_secrets(&state.auth, Utc::now());
+    let node_secret = generate_issued_compat_node_secret();
+    let node_secret_hash = ExecutionApiAuthConfig::secret_hash(node_secret.as_str());
+    let previous_hash = state
+        .auth
+        .issued_compat_node_secret_by_sender
+        .read()
+        .ok()
+        .and_then(|by_sender| by_sender.get(sender_id).cloned());
+    if let Some(previous_hash) = previous_hash {
+        if let Ok(mut secrets) = state.auth.issued_compat_node_secrets.write() {
+            secrets.remove(previous_hash.as_str());
+        }
+    }
+    if let Ok(mut secrets) = state.auth.issued_compat_node_secrets.write() {
+        secrets.insert(
+            node_secret_hash.clone(),
+            A2aIssuedCompatNodeSecret {
+                principal,
+                expires_at,
+            },
+        );
+    }
+    if let Ok(mut by_sender) = state.auth.issued_compat_node_secret_by_sender.write() {
+        by_sender.insert(sender_id.to_string(), node_secret_hash);
+    }
+    node_secret
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn authenticate_issued_compat_node_secret(
+    headers: &HeaderMap,
+    state: &ExecutionApiState,
+) -> Option<AuthContext> {
+    let auth_enabled = state.auth.is_enabled() || has_runtime_repo_api_keys(state);
+    if !auth_enabled {
+        return None;
+    }
+    let token = bearer_token_from_headers(headers)?;
+    purge_expired_issued_compat_node_secrets(&state.auth, Utc::now());
+    let token_hash = ExecutionApiAuthConfig::secret_hash(token);
+    let issued = state
+        .auth
+        .issued_compat_node_secrets
+        .read()
+        .ok()
+        .and_then(|secrets| secrets.get(token_hash.as_str()).cloned())?;
+    let principal = issued.principal?;
+    Some(AuthContext {
+        actor_type: principal.actor_type,
+        actor_id: principal
+            .actor_id
+            .or_else(|| compat_node_id_from_headers(headers)),
+        role: ApiRole::from_str(principal.actor_role.as_str()).unwrap_or(ApiRole::Operator),
+    })
+}
+
+#[cfg(not(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+)))]
+fn authenticate_issued_compat_node_secret(
+    _headers: &HeaderMap,
+    _state: &ExecutionApiState,
+) -> Option<AuthContext> {
+    None
+}
+
 fn compat_node_id_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-node-id")
@@ -2780,7 +2993,9 @@ fn has_runtime_repo_api_keys(_state: &ExecutionApiState) -> bool {
 }
 
 fn resolve_auth_context(headers: &HeaderMap, state: &ExecutionApiState) -> Option<AuthContext> {
-    authenticate_static(headers, &state.auth).or_else(|| authenticate_runtime_repo(headers, state))
+    authenticate_static(headers, &state.auth)
+        .or_else(|| authenticate_issued_compat_node_secret(headers, state))
+        .or_else(|| authenticate_runtime_repo(headers, state))
 }
 
 #[cfg(all(
@@ -3095,6 +3310,13 @@ fn supported_auth_methods(state: &ExecutionApiState) -> Vec<&'static str> {
     }
     if !state.auth.keyed_api_keys.is_empty() {
         methods.push("x-api-key-id+x-api-key");
+    }
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    if state.auth.has_issued_compat_node_secrets() {
+        methods.push("bearer(issued_node_secret)");
     }
     if has_runtime_repo_api_keys(state) {
         methods.push("sqlite:x-api-key-id+x-api-key");
@@ -4047,10 +4269,40 @@ pub async fn evolution_a2a_hello_compat(
     state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(raw): Json<Value>,
-) -> Result<Json<ApiEnvelope<A2aHandshakeResponse>>, ApiError> {
+) -> Result<Json<ApiEnvelope<A2aCompatHelloResponse>>, ApiError> {
     let rid = request_id(&headers);
     let req = parse_gep_hello_or_plain(raw, &rid)?;
-    evolution_a2a_hello(state, headers, Json(req)).await
+    let sender_id = req.agent_id.clone();
+    let handshake = evolution_a2a_hello(state.clone(), headers, Json(req)).await?;
+    let envelope = handshake.0;
+    let response = envelope.data;
+    let payload = if response.accepted {
+        let session = state.a2a_sessions.read().await.get(&sender_id).cloned();
+        session.map(|session| A2aCompatHelloPayload {
+            node_secret: issue_compat_node_secret(
+                &state,
+                &sender_id,
+                session.principal,
+                session.expires_at,
+            ),
+            claim_url: A2A_COMPAT_TASK_CLAIM_URL.to_string(),
+            hub_node_id: default_a2a_compat_hub_node_id(),
+        })
+    } else {
+        None
+    };
+    Ok(Json(ApiEnvelope {
+        meta: envelope.meta,
+        request_id: envelope.request_id,
+        data: A2aCompatHelloResponse {
+            accepted: response.accepted,
+            negotiated_protocol: response.negotiated_protocol,
+            enabled_capabilities: response.enabled_capabilities,
+            message: response.message,
+            error: response.error,
+            payload,
+        },
+    }))
 }
 
 #[cfg(all(
@@ -8544,6 +8796,92 @@ mod tests {
             json["data"]["negotiated_protocol"]["version"],
             crate::agent_contract::A2A_PROTOCOL_VERSION_V1
         );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_hello_compat_exposes_evomap_registration_payload() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let json = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-registration-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+
+        assert_eq!(json["data"]["accepted"], true);
+        assert!(json["data"]["payload"]["node_secret"]
+            .as_str()
+            .expect("node_secret")
+            .starts_with("ns_"));
+        assert_eq!(json["data"]["payload"]["claim_url"], "/a2a/task/claim");
+        assert_eq!(json["data"]["payload"]["hub_node_id"], "oris-runtime");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn auth_issued_node_secret_from_hello_allows_compat_followup_calls() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await)
+                .with_compat_node_secret("bootstrap-node-secret"),
+        );
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("authorization", "Bearer bootstrap-node-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "compat-issued-secret-agent",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["Coordination", "SupervisedDevloop", "ReplayFeedback"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+        let hello_body = axum::body::to_bytes(hello_resp.into_body(), usize::MAX)
+            .await
+            .expect("hello body");
+        let hello_json: serde_json::Value =
+            serde_json::from_slice(&hello_body).expect("hello json");
+        let issued_node_secret = hello_json["data"]["payload"]["node_secret"]
+            .as_str()
+            .expect("issued node secret")
+            .to_string();
+
+        let heartbeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/heartbeat")
+            .header("authorization", format!("Bearer {issued_node_secret}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-issued-secret-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let heartbeat_resp = router.oneshot(heartbeat_req).await.unwrap();
+        assert_eq!(heartbeat_resp.status(), StatusCode::OK);
     }
 
     #[cfg(all(
