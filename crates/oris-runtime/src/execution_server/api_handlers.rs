@@ -4303,6 +4303,126 @@ async fn resolve_active_work_assignment_task_id(
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+fn validate_active_a2a_task_lease_owner(
+    claimed_by: Option<&str>,
+    lease_is_active: bool,
+    session_id: &str,
+    task_id: &str,
+    sender_id: &str,
+    rid: &str,
+) -> Result<(), ApiError> {
+    match claimed_by {
+        Some(claimed_by) if claimed_by == sender_id && lease_is_active => Ok(()),
+        Some(claimed_by) if claimed_by == sender_id => {
+            Err(ApiError::conflict("a2a task lease expired")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "claimed_by": claimed_by
+                })))
+        }
+        Some(claimed_by) if lease_is_active => Err(ApiError::forbidden(
+            "compat task lease is owned by another claimer",
+        )
+        .with_request_id(rid.to_string())
+        .with_details(serde_json::json!({
+            "session_id": session_id,
+            "task_id": task_id,
+            "claimed_by": claimed_by,
+            "reporter": sender_id
+        }))),
+        Some(claimed_by) => Err(ApiError::conflict("a2a task lease expired")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id,
+                "claimed_by": claimed_by,
+                "reporter": sender_id
+            }))),
+        None => Err(ApiError::conflict("a2a task lease has not been claimed")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "session_id": session_id,
+                "task_id": task_id
+            }))),
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn ensure_active_a2a_task_lease_owner(
+    state: &ExecutionApiState,
+    session_id: &str,
+    task_id: &str,
+    sender_id: &str,
+    rid: &str,
+) -> Result<(), ApiError> {
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let _ = rid;
+
+    #[cfg(feature = "sqlite-persistence")]
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        let task = repo
+            .get_a2a_compat_task(session_id)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?
+            .ok_or_else(|| {
+                ApiError::conflict("a2a task is not active")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "reason": "already_completed_or_unknown"
+                    }))
+            })?;
+        let lease_is_active = task
+            .lease_expires_at
+            .map(|expires_at| expires_at > Utc::now())
+            .unwrap_or(false);
+        return validate_active_a2a_task_lease_owner(
+            task.claimed_by_sender_id.as_deref(),
+            lease_is_active,
+            session_id,
+            task_id,
+            sender_id,
+            rid,
+        );
+    }
+
+    let now_ms = lifecycle_timestamp_ms(Utc::now());
+    let queue = state.a2a_compat_task_queue.read().await;
+    let entry = queue
+        .iter()
+        .find(|entry| entry.session_id == session_id)
+        .ok_or_else(|| {
+            ApiError::conflict("a2a task is not active")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "reason": "already_completed_or_unknown"
+                }))
+        })?;
+    let lease_is_active = entry
+        .lease_expires_at_ms
+        .map(|expires_at_ms| expires_at_ms > now_ms)
+        .unwrap_or(false);
+    validate_active_a2a_task_lease_owner(
+        entry.claimed_by.as_deref(),
+        lease_is_active,
+        session_id,
+        task_id,
+        sender_id,
+        rid,
+    )
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 pub async fn evolution_a2a_work_claim(
     state: State<ExecutionApiState>,
     headers: HeaderMap,
@@ -4745,29 +4865,11 @@ pub async fn evolution_a2a_tasks_report(
 
     match req.status {
         A2aCompatReportStatus::Running => {
+            ensure_active_a2a_task_lease_owner(&state, &session_id, &task_id, &sender_id, &rid)
+                .await?;
+
             #[cfg(feature = "sqlite-persistence")]
             if let Some(repo) = state.runtime_repo.as_ref() {
-                if let Some(task) = repo
-                    .get_a2a_compat_task(&session_id)
-                    .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
-                {
-                    if let (Some(claimed_by), Some(lease_expires_at)) =
-                        (task.claimed_by_sender_id.as_deref(), task.lease_expires_at)
-                    {
-                        if claimed_by != sender_id && lease_expires_at > Utc::now() {
-                            return Err(ApiError::forbidden(
-                                "compat task lease is owned by another claimer",
-                            )
-                            .with_request_id(rid.clone())
-                            .with_details(serde_json::json!({
-                                "session_id": session_id.clone(),
-                                "task_id": task_id.clone(),
-                                "claimed_by": claimed_by,
-                                "reporter": sender_id.clone()
-                            })));
-                        }
-                    }
-                }
                 let touched = repo
                     .touch_a2a_compat_task_lease(
                         &session_id,
@@ -4777,11 +4879,13 @@ pub async fn evolution_a2a_tasks_report(
                     )
                     .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
                 if !touched {
-                    return Err(ApiError::not_found(format!(
-                        "a2a compat task lease not found for session '{}'",
-                        session_id
-                    ))
-                    .with_request_id(rid.clone()));
+                    return Err(ApiError::conflict("a2a task lease update rejected")
+                        .with_request_id(rid.clone())
+                        .with_details(serde_json::json!({
+                            "session_id": session_id.clone(),
+                            "task_id": task_id.clone(),
+                            "reason": "stale_or_non_owned_lease"
+                        })));
                 }
             } else {
                 let now_ms = lifecycle_timestamp_ms(Utc::now());
@@ -4790,22 +4894,29 @@ pub async fn evolution_a2a_tasks_report(
                     .iter_mut()
                     .find(|entry| entry.session_id == session_id)
                 {
-                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
-                        if claimed_by != sender_id {
-                            return Err(ApiError::forbidden(
-                                "compat task lease is owned by another claimer",
-                            )
+                    if entry.claimed_by.as_deref() != Some(sender_id.as_str())
+                        || entry
+                            .lease_expires_at_ms
+                            .map(|expires_at_ms| expires_at_ms <= now_ms)
+                            .unwrap_or(true)
+                    {
+                        return Err(ApiError::conflict("a2a task lease update rejected")
                             .with_request_id(rid.clone())
                             .with_details(serde_json::json!({
                                 "session_id": session_id.clone(),
                                 "task_id": task_id.clone(),
-                                "claimed_by": claimed_by,
-                                "reporter": sender_id.clone()
+                                "reason": "stale_or_non_owned_lease"
                             })));
-                        }
                     }
-                    entry.claimed_by = Some(sender_id.clone());
                     entry.lease_expires_at_ms = Some(now_ms + A2A_COMPAT_CLAIM_LEASE_MS);
+                } else {
+                    return Err(ApiError::conflict("a2a task is not active")
+                        .with_request_id(rid.clone())
+                        .with_details(serde_json::json!({
+                            "session_id": session_id.clone(),
+                            "task_id": task_id.clone(),
+                            "reason": "already_completed_or_unknown"
+                        })));
                 }
             }
             #[cfg(not(feature = "sqlite-persistence"))]
@@ -4816,22 +4927,29 @@ pub async fn evolution_a2a_tasks_report(
                     .iter_mut()
                     .find(|entry| entry.session_id == session_id)
                 {
-                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
-                        if claimed_by != sender_id {
-                            return Err(ApiError::forbidden(
-                                "compat task lease is owned by another claimer",
-                            )
+                    if entry.claimed_by.as_deref() != Some(sender_id.as_str())
+                        || entry
+                            .lease_expires_at_ms
+                            .map(|expires_at_ms| expires_at_ms <= now_ms)
+                            .unwrap_or(true)
+                    {
+                        return Err(ApiError::conflict("a2a task lease update rejected")
                             .with_request_id(rid.clone())
                             .with_details(serde_json::json!({
                                 "session_id": session_id.clone(),
                                 "task_id": task_id.clone(),
-                                "claimed_by": claimed_by,
-                                "reporter": sender_id.clone()
+                                "reason": "stale_or_non_owned_lease"
                             })));
-                        }
                     }
-                    entry.claimed_by = Some(sender_id.clone());
                     entry.lease_expires_at_ms = Some(now_ms + A2A_COMPAT_CLAIM_LEASE_MS);
+                } else {
+                    return Err(ApiError::conflict("a2a task is not active")
+                        .with_request_id(rid.clone())
+                        .with_details(serde_json::json!({
+                            "session_id": session_id.clone(),
+                            "task_id": task_id.clone(),
+                            "reason": "already_completed_or_unknown"
+                        })));
                 }
             }
 
@@ -4872,69 +4990,8 @@ pub async fn evolution_a2a_tasks_report(
                 A2aCompatReportStatus::Cancelled => A2aTaskLifecycleState::Cancelled,
                 A2aCompatReportStatus::Running => unreachable!("running handled above"),
             };
-
-            #[cfg(feature = "sqlite-persistence")]
-            if let Some(repo) = state.runtime_repo.as_ref() {
-                if let Some(task) = repo
-                    .get_a2a_compat_task(&session_id)
-                    .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
-                {
-                    if let (Some(claimed_by), Some(lease_expires_at)) =
-                        (task.claimed_by_sender_id.as_deref(), task.lease_expires_at)
-                    {
-                        if claimed_by != sender_id && lease_expires_at > Utc::now() {
-                            return Err(ApiError::forbidden(
-                                "compat task lease is owned by another claimer",
-                            )
-                            .with_request_id(rid.clone())
-                            .with_details(serde_json::json!({
-                                "session_id": session_id.clone(),
-                                "task_id": task_id.clone(),
-                                "claimed_by": claimed_by,
-                                "reporter": sender_id.clone()
-                            })));
-                        }
-                    }
-                }
-            } else {
-                let queue = state.a2a_compat_task_queue.read().await;
-                if let Some(entry) = queue.iter().find(|entry| entry.session_id == session_id) {
-                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
-                        if claimed_by != sender_id {
-                            return Err(ApiError::forbidden(
-                                "compat task lease is owned by another claimer",
-                            )
-                            .with_request_id(rid.clone())
-                            .with_details(serde_json::json!({
-                                "session_id": session_id.clone(),
-                                "task_id": task_id.clone(),
-                                "claimed_by": claimed_by,
-                                "reporter": sender_id.clone()
-                            })));
-                        }
-                    }
-                }
-            }
-            #[cfg(not(feature = "sqlite-persistence"))]
-            {
-                let queue = state.a2a_compat_task_queue.read().await;
-                if let Some(entry) = queue.iter().find(|entry| entry.session_id == session_id) {
-                    if let Some(claimed_by) = entry.claimed_by.as_deref() {
-                        if claimed_by != sender_id {
-                            return Err(ApiError::forbidden(
-                                "compat task lease is owned by another claimer",
-                            )
-                            .with_request_id(rid.clone())
-                            .with_details(serde_json::json!({
-                                "session_id": session_id.clone(),
-                                "task_id": task_id.clone(),
-                                "claimed_by": claimed_by,
-                                "reporter": sender_id.clone()
-                            })));
-                        }
-                    }
-                }
-            }
+            ensure_active_a2a_task_lease_owner(&state, &session_id, &task_id, &sender_id, &rid)
+                .await?;
 
             let completion = evolution_a2a_session_complete(
                 State(state.clone()),
@@ -8857,6 +8914,169 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evolution_a2a_tasks_report_rejects_running_without_active_claim() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-report-without-claim-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-report-without-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-report-without-claim-task-1",
+                    "task_summary": "report without claim should fail",
+                    "dispatch_id": "dispatch-report-without-claim-1",
+                    "summary": "report without claim dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-report-without-claim-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-report-without-claim-task-1",
+                    "status": "running",
+                    "summary": "running without claim should fail"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::CONFLICT);
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .expect("report body");
+        let report_json: serde_json::Value =
+            serde_json::from_slice(&report_body).expect("report json");
+        assert_eq!(
+            report_json["error"]["message"],
+            "a2a task lease has not been claimed"
+        );
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_task_complete_rejects_expired_claim_lease() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-expired-lease-agent",
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let distribute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/tasks/distribute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-expired-lease-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-expired-lease-task-1",
+                    "task_summary": "expired lease complete should fail",
+                    "dispatch_id": "dispatch-expired-lease-1",
+                    "summary": "expired lease dispatch accepted"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let distribute_resp = router.clone().oneshot(distribute_req).await.unwrap();
+        assert_eq!(distribute_resp.status(), StatusCode::OK);
+        let distribute_body = axum::body::to_bytes(distribute_resp.into_body(), usize::MAX)
+            .await
+            .expect("distribute body");
+        let distribute_json: serde_json::Value =
+            serde_json::from_slice(&distribute_body).expect("distribute json");
+        let session_id = distribute_json["data"]["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-expired-lease-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        repo.touch_a2a_compat_task_lease(
+            &session_id,
+            "compat-expired-lease-agent",
+            Utc::now() - Duration::minutes(2),
+            1,
+        )
+        .expect("backdate compat lease to expired");
+
+        let complete_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/complete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-expired-lease-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "task_id": "compat-expired-lease-task-1",
+                    "success": true,
+                    "summary": "expired lease complete should be rejected"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
+        assert_eq!(complete_resp.status(), StatusCode::CONFLICT);
+        let complete_body = axum::body::to_bytes(complete_resp.into_body(), usize::MAX)
+            .await
+            .expect("complete body");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(&complete_body).expect("complete json");
+        assert_eq!(complete_json["error"]["message"], "a2a task lease expired");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evolution_a2a_work_assignment_lifecycle_blocks_double_complete() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let handshake = handshake_agent_with_caps_and_protocols(
@@ -9443,6 +9663,21 @@ mod tests {
             .as_str()
             .expect("session id")
             .to_string();
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/tasks/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
 
         let progress_req = Request::builder()
             .method(Method::POST)

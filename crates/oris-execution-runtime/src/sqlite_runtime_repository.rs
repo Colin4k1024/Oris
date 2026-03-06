@@ -1766,7 +1766,7 @@ impl SqliteRuntimeRepository {
                  FROM runtime_a2a_compat_tasks
                  WHERE sender_id = ?1
                    AND protocol_version = ?2
-                 ORDER BY enqueued_at_ms ASC",
+                 ORDER BY enqueued_at_ms ASC, session_id ASC",
             )
             .map_err(|e| KernelError::Driver(format!("prepare list a2a compat tasks: {}", e)))?;
         let rows = stmt
@@ -1811,7 +1811,7 @@ impl SqliteRuntimeRepository {
                      OR lease_expires_at_ms IS NULL
                      OR lease_expires_at_ms <= ?3
                    )
-                 ORDER BY enqueued_at_ms ASC
+                 ORDER BY enqueued_at_ms ASC, session_id ASC
                  LIMIT 1",
                 params![sender_id, protocol_version, now_ms],
                 map_row_to_a2a_compat_task,
@@ -1931,12 +1931,9 @@ impl SqliteRuntimeRepository {
                      lease_expires_at_ms = ?3,
                      updated_at_ms = ?4
                  WHERE session_id = ?1
-                   AND (
-                     claimed_by_sender_id IS NULL
-                     OR claimed_by_sender_id = ?2
-                     OR lease_expires_at_ms IS NULL
-                     OR lease_expires_at_ms <= ?4
-                   )",
+                   AND claimed_by_sender_id = ?2
+                   AND lease_expires_at_ms IS NOT NULL
+                   AND lease_expires_at_ms > ?4",
                 params![session_id, sender_id, lease_expires_at_ms, now_ms],
             )
             .map_err(|e| KernelError::Driver(format!("touch a2a compat task lease: {}", e)))?;
@@ -3369,6 +3366,96 @@ mod tests {
             .list_a2a_compat_tasks("sender-a", "0.1.0-experimental")
             .expect("list sender-a mismatched protocol");
         assert!(mismatched_protocol.is_empty());
+    }
+
+    #[test]
+    fn claim_a2a_compat_task_uses_session_id_tiebreaker_for_equal_enqueue_time() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite runtime repo");
+        let now = Utc::now();
+
+        for (session_id, task_id) in [("session-b", "task-b"), ("session-a", "task-a")] {
+            repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+                session_id: session_id.to_string(),
+                sender_id: "sender-a".to_string(),
+                protocol_version: "1.0.0".to_string(),
+                task_id: task_id.to_string(),
+                task_summary: format!("summary-{task_id}"),
+                dispatch_id: format!("dispatch-{task_id}"),
+                claimed_by_sender_id: None,
+                lease_expires_at: None,
+                enqueued_at: now,
+                updated_at: now,
+            })
+            .expect("upsert a2a compat task");
+        }
+
+        let claim = repo
+            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000)
+            .expect("claim with deterministic order");
+        assert_eq!(
+            claim.task.as_ref().map(|task| task.session_id.as_str()),
+            Some("session-a")
+        );
+    }
+
+    #[test]
+    fn touch_a2a_compat_task_lease_requires_active_owner() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite runtime repo");
+        let now = Utc::now();
+
+        repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+            session_id: "session-lease".to_string(),
+            sender_id: "sender-a".to_string(),
+            protocol_version: "1.0.0".to_string(),
+            task_id: "task-lease".to_string(),
+            task_summary: "lease task".to_string(),
+            dispatch_id: "dispatch-lease".to_string(),
+            claimed_by_sender_id: None,
+            lease_expires_at: None,
+            enqueued_at: now,
+            updated_at: now,
+        })
+        .expect("upsert lease task");
+
+        let touched_unclaimed = repo
+            .touch_a2a_compat_task_lease("session-lease", "sender-a", now, 1_000)
+            .expect("touch unclaimed lease");
+        assert!(!touched_unclaimed);
+
+        let claim = repo
+            .claim_a2a_compat_task("sender-a", "1.0.0", now, 1_000)
+            .expect("claim lease task");
+        assert!(claim.task.is_some());
+
+        let touched_intruder = repo
+            .touch_a2a_compat_task_lease(
+                "session-lease",
+                "sender-intruder",
+                now + Duration::milliseconds(10),
+                1_000,
+            )
+            .expect("touch intruder lease");
+        assert!(!touched_intruder);
+
+        let touched_owner = repo
+            .touch_a2a_compat_task_lease(
+                "session-lease",
+                "sender-a",
+                now + Duration::milliseconds(10),
+                1_000,
+            )
+            .expect("touch owner lease");
+        assert!(touched_owner);
+
+        let touched_expired = repo
+            .touch_a2a_compat_task_lease(
+                "session-lease",
+                "sender-a",
+                now + Duration::milliseconds(2_000),
+                1_000,
+            )
+            .expect("touch expired lease");
+        assert!(!touched_expired);
     }
 
     #[test]
