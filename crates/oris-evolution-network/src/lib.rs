@@ -1,5 +1,7 @@
 //! Protocol contracts for the Oris Evolution Network (OEN).
 
+pub mod gossip;
+
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
