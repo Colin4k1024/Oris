@@ -106,6 +106,69 @@ pub struct PostgresSwarmTaskRow {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresWorkerRegistryRow {
+    pub worker_id: String,
+    pub domains_json: String,
+    pub max_load: i32,
+    pub metadata_json: Option<String>,
+    pub registered_at: DateTime<Utc>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresRecipeRow {
+    pub recipe_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub gene_sequence_json: String,
+    pub author_id: String,
+    pub forked_from: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub is_public: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresOrganismRow {
+    pub organism_id: String,
+    pub recipe_id: String,
+    pub status: String,
+    pub current_step: i32,
+    pub total_steps: i32,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresDisputeRow {
+    pub dispute_id: String,
+    pub bounty_id: String,
+    pub opened_by: String,
+    pub status: String,
+    pub resolution: Option<String>,
+    pub resolved_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub evidence_json: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresA2aSessionRow {
+    pub session_id: String,
+    pub sender_id: String,
+    pub protocol: String,
+    pub protocol_version: String,
+    pub enabled_capabilities_json: String,
+    pub actor_type: Option<String>,
+    pub actor_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub negotiated_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+}
+
 impl PostgresRuntimeRepository {
     pub fn new(database_url: impl Into<String>) -> Self {
         let database_url = database_url.into();
@@ -835,6 +898,559 @@ impl PostgresRuntimeRepository {
                 )));
             }
             Ok(())
+        })
+    }
+
+    // ========== Worker Registration Methods ==========
+
+    pub fn upsert_worker_registration(
+        &self,
+        worker_id: &str,
+        domains_json: &str,
+        max_load: i32,
+        metadata_json: Option<&str>,
+        status: &str,
+        now: DateTime<Utc>,
+    ) -> Result<PostgresWorkerRegistryRow, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let worker_id = worker_id.to_string();
+        let domains_json = domains_json.to_string();
+        let metadata_json = metadata_json.map(String::from);
+        let status = status.to_string();
+        let now_ms = dt_to_ms(now);
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_workers_registry
+                 (worker_id, domains_json, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status)
+                 VALUES ($1, $2, $3, $4, $5, $5, $6)
+                 ON CONFLICT(worker_id)
+                 DO UPDATE SET
+                   domains_json = excluded.domains_json,
+                   max_load = excluded.max_load,
+                   metadata_json = excluded.metadata_json,
+                   last_heartbeat_ms = excluded.last_heartbeat_ms,
+                   status = excluded.status",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&worker_id)
+                .bind(&domains_json)
+                .bind(max_load)
+                .bind(&metadata_json)
+                .bind(now_ms)
+                .bind(&status)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("upsert worker registration", e))?;
+
+            // Fetch the row
+            let sql = format!(
+                "SELECT worker_id, domains_json, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                 FROM \"{}\".runtime_workers_registry
+                 WHERE worker_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&worker_id)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| map_driver_err("get worker registration", e))?;
+            Ok(PostgresWorkerRegistryRow {
+                worker_id: row.get(0),
+                domains_json: row.get(1),
+                max_load: row.get(2),
+                metadata_json: row.get(3),
+                registered_at: ms_to_dt(row.get::<i64, _>(4)),
+                last_heartbeat_at: row.get::<Option<i64>, _>(5).map(|v| ms_to_dt(v)),
+                status: row.get(6),
+            })
+        })
+    }
+
+    pub fn get_worker_registration(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<PostgresWorkerRegistryRow>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let worker_id = worker_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT worker_id, domains_json, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                 FROM \"{}\".runtime_workers_registry
+                 WHERE worker_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&worker_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get worker registration", e))?;
+            Ok(row.map(|r| PostgresWorkerRegistryRow {
+                worker_id: r.get(0),
+                domains_json: r.get(1),
+                max_load: r.get(2),
+                metadata_json: r.get(3),
+                registered_at: ms_to_dt(r.get(4)),
+                last_heartbeat_at: r.get::<Option<i64>, _>(5).map(ms_to_dt),
+                status: r.get(6),
+            }))
+        })
+    }
+
+    pub fn count_active_claims_for_worker(
+        &self,
+        worker_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let worker_id = worker_id.to_string();
+        let now_ms = dt_to_ms(now);
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT COUNT(*) FROM \"{}\".runtime_a2a_compat_tasks
+                 WHERE claimed_by_sender_id = $1
+                   AND lease_expires_at_ms IS NOT NULL
+                   AND lease_expires_at_ms > $2",
+                schema
+            );
+            let count: i64 = sqlx::query(&sql)
+                .bind(&worker_id)
+                .bind(now_ms)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| map_driver_err("count active claims for worker", e))?
+                .get(0);
+            Ok(count.max(0) as u64)
+        })
+    }
+
+    // ========== Dispute Methods ==========
+
+    pub fn create_dispute(
+        &self,
+        dispute_id: &str,
+        bounty_id: &str,
+        opened_by: &str,
+        description: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<PostgresDisputeRow, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let dispute_id = dispute_id.to_string();
+        let bounty_id = bounty_id.to_string();
+        let opened_by = opened_by.to_string();
+        let description = description.to_string();
+        let created_at_ms = dt_to_ms(created_at);
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_disputes
+                 (dispute_id, bounty_id, opened_by, status, resolution, resolved_by, created_at_ms, resolved_at_ms, evidence_json)
+                 VALUES ($1, $2, $3, 'open', NULL, NULL, $4, NULL, NULL)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&dispute_id)
+                .bind(&bounty_id)
+                .bind(&opened_by)
+                .bind(created_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("create dispute", e))?;
+            Ok(PostgresDisputeRow {
+                dispute_id,
+                bounty_id,
+                opened_by,
+                status: "open".to_string(),
+                resolution: None,
+                resolved_by: None,
+                created_at,
+                resolved_at: None,
+                evidence_json: None,
+            })
+        })
+    }
+
+    pub fn get_dispute(&self, dispute_id: &str) -> Result<Option<PostgresDisputeRow>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let dispute_id = dispute_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT dispute_id, bounty_id, opened_by, status, resolution, resolved_by, created_at_ms, resolved_at_ms, evidence_json
+                 FROM \"{}\".runtime_disputes
+                 WHERE dispute_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&dispute_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get dispute", e))?;
+            Ok(row.map(|r| PostgresDisputeRow {
+                dispute_id: r.get(0),
+                bounty_id: r.get(1),
+                opened_by: r.get(2),
+                status: r.get(3),
+                resolution: r.get(4),
+                resolved_by: r.get(5),
+                created_at: ms_to_dt(r.get(6)),
+                resolved_at: r.get::<Option<i64>, _>(7).map(ms_to_dt),
+                evidence_json: r.get(8),
+            }))
+        })
+    }
+
+    pub fn append_dispute_evidence(
+        &self,
+        dispute_id: &str,
+        evidence_json: &str,
+    ) -> Result<bool, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let dispute_id = dispute_id.to_string();
+        let evidence_json = evidence_json.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_disputes
+                 SET evidence_json = COALESCE(evidence_json || ', ', '') || $2
+                 WHERE dispute_id = $1",
+                schema
+            );
+            let affected = sqlx::query(&sql)
+                .bind(&dispute_id)
+                .bind(&evidence_json)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("append dispute evidence", e))?
+                .rows_affected();
+            Ok(affected > 0)
+        })
+    }
+
+    pub fn resolve_dispute(
+        &self,
+        dispute_id: &str,
+        resolution: &str,
+        resolved_by: &str,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<bool, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let dispute_id = dispute_id.to_string();
+        let resolution = resolution.to_string();
+        let resolved_by = resolved_by.to_string();
+        let resolved_at_ms = dt_to_ms(resolved_at);
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_disputes
+                 SET status = 'resolved', resolution = $2, resolved_by = $3, resolved_at_ms = $4
+                 WHERE dispute_id = $1 AND status = 'open'",
+                schema
+            );
+            let affected = sqlx::query(&sql)
+                .bind(&dispute_id)
+                .bind(&resolution)
+                .bind(&resolved_by)
+                .bind(resolved_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("resolve dispute", e))?
+                .rows_affected();
+            Ok(affected > 0)
+        })
+    }
+
+    pub fn settle_bounty_via_dispute(
+        &self,
+        bounty_id: &str,
+        settlement_status: &str,
+        closed_at: DateTime<Utc>,
+    ) -> Result<bool, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty_id = bounty_id.to_string();
+        let settlement_status = settlement_status.to_string();
+        let closed_at_ms = dt_to_ms(closed_at);
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_bounties
+                 SET status = $2, closed_at_ms = $3
+                 WHERE bounty_id = $1
+                   AND status IN ('open', 'accepted')",
+                schema
+            );
+            let affected = sqlx::query(&sql)
+                .bind(&bounty_id)
+                .bind(&settlement_status)
+                .bind(closed_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("settle bounty via dispute", e))?
+                .rows_affected();
+            Ok(affected > 0)
+        })
+    }
+
+    // ========== Recipe Methods ==========
+
+    pub fn create_recipe(&self, recipe: &PostgresRecipeRow) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_recipes
+                 (recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&recipe.recipe_id)
+                .bind(&recipe.name)
+                .bind(&recipe.description)
+                .bind(&recipe.gene_sequence_json)
+                .bind(&recipe.author_id)
+                .bind(&recipe.forked_from)
+                .bind(dt_to_ms(recipe.created_at))
+                .bind(dt_to_ms(recipe.updated_at))
+                .bind(recipe.is_public as i32)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("create recipe", e))?;
+            Ok(())
+        })
+    }
+
+    pub fn get_recipe(&self, recipe_id: &str) -> Result<Option<PostgresRecipeRow>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let recipe_id = recipe_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public
+                 FROM \"{}\".runtime_recipes
+                 WHERE recipe_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&recipe_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get recipe", e))?;
+            Ok(row.map(|r| PostgresRecipeRow {
+                recipe_id: r.get(0),
+                name: r.get(1),
+                description: r.get(2),
+                gene_sequence_json: r.get(3),
+                author_id: r.get(4),
+                forked_from: r.get(5),
+                created_at: ms_to_dt(r.get(6)),
+                updated_at: ms_to_dt(r.get(7)),
+                is_public: r.get::<i32, _>(8) != 0,
+            }))
+        })
+    }
+
+    // ========== Organism Methods ==========
+
+    pub fn create_organism(&self, organism: &PostgresOrganismRow) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_organisms
+                 (organism_id, recipe_id, status, current_step, total_steps, created_at_ms, completed_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&organism.organism_id)
+                .bind(&organism.recipe_id)
+                .bind(&organism.status)
+                .bind(organism.current_step)
+                .bind(organism.total_steps)
+                .bind(dt_to_ms(organism.created_at))
+                .bind(organism.completed_at.map(dt_to_ms))
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("create organism", e))?;
+            Ok(())
+        })
+    }
+
+    pub fn get_organism(
+        &self,
+        organism_id: &str,
+    ) -> Result<Option<PostgresOrganismRow>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let organism_id = organism_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT organism_id, recipe_id, status, current_step, total_steps, created_at_ms, completed_at_ms
+                 FROM \"{}\".runtime_organisms
+                 WHERE organism_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&organism_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get organism", e))?;
+            Ok(row.map(|r| PostgresOrganismRow {
+                organism_id: r.get(0),
+                recipe_id: r.get(1),
+                status: r.get(2),
+                current_step: r.get(3),
+                total_steps: r.get(4),
+                created_at: ms_to_dt(r.get(5)),
+                completed_at: r.get::<Option<i64>, _>(6).map(ms_to_dt),
+            }))
+        })
+    }
+
+    pub fn update_organism_status(
+        &self,
+        organism_id: &str,
+        status: &str,
+        current_step: i32,
+    ) -> Result<bool, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let organism_id = organism_id.to_string();
+        let status = status.to_string();
+        let completed_at_ms: Option<i64> = if status == "completed" {
+            Some(dt_to_ms(Utc::now()))
+        } else {
+            None
+        };
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_organisms
+                 SET status = $2, current_step = $3, completed_at_ms = $4
+                 WHERE organism_id = $1",
+                schema
+            );
+            let affected = sqlx::query(&sql)
+                .bind(&organism_id)
+                .bind(&status)
+                .bind(current_step)
+                .bind(completed_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("update organism status", e))?
+                .rows_affected();
+            Ok(affected > 0)
+        })
+    }
+
+    // ========== Session Methods ==========
+
+    pub fn upsert_a2a_session(&self, session: &PostgresA2aSessionRow) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_a2a_sessions
+                 (session_id, sender_id, protocol, protocol_version, enabled_capabilities_json, actor_type, actor_id, actor_role, negotiated_at, expires_at, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT(session_id)
+                 DO UPDATE SET
+                   protocol = excluded.protocol,
+                   protocol_version = excluded.protocol_version,
+                   enabled_capabilities_json = excluded.enabled_capabilities_json,
+                   actor_type = excluded.actor_type,
+                   actor_id = excluded.actor_id,
+                   actor_role = excluded.actor_role,
+                   expires_at = excluded.expires_at,
+                   updated_at = excluded.updated_at",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&session.session_id)
+                .bind(&session.sender_id)
+                .bind(&session.protocol)
+                .bind(&session.protocol_version)
+                .bind(&session.enabled_capabilities_json)
+                .bind(&session.actor_type)
+                .bind(&session.actor_id)
+                .bind(&session.actor_role)
+                .bind(dt_to_ms(session.negotiated_at))
+                .bind(session.expires_at.map(dt_to_ms))
+                .bind(dt_to_ms(session.updated_at))
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("upsert a2a session", e))?;
+            Ok(())
+        })
+    }
+
+    pub fn get_active_a2a_session(
+        &self,
+        sender_id: &str,
+    ) -> Result<Option<PostgresA2aSessionRow>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let sender_id = sender_id.to_string();
+        let now_ms = dt_to_ms(Utc::now());
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT session_id, sender_id, protocol, protocol_version, enabled_capabilities_json, actor_type, actor_id, actor_role, negotiated_at, expires_at, updated_at
+                 FROM \"{}\".runtime_a2a_sessions
+                 WHERE sender_id = $1 AND (expires_at IS NULL OR expires_at > $2)",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&sender_id)
+                .bind(now_ms)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get active a2a session", e))?;
+            Ok(row.map(|r| PostgresA2aSessionRow {
+                session_id: r.get(0),
+                sender_id: r.get(1),
+                protocol: r.get(2),
+                protocol_version: r.get(3),
+                enabled_capabilities_json: r.get(4),
+                actor_type: r.get(5),
+                actor_id: r.get(6),
+                actor_role: r.get(7),
+                negotiated_at: ms_to_dt(r.get(8)),
+                expires_at: r.get::<Option<i64>, _>(9).map(ms_to_dt),
+                updated_at: ms_to_dt(r.get(10)),
+            }))
         })
     }
 }
