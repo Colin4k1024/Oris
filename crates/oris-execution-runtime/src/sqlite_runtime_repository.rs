@@ -1951,6 +1951,144 @@ impl SqliteRuntimeRepository {
         Ok(count.max(0) as u64)
     }
 
+    pub fn create_dispute(
+        &self,
+        dispute_id: &str,
+        bounty_id: &str,
+        opened_by: &str,
+        description: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<DisputeRow, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let opening_evidence = serde_json::json!([{
+            "kind": "opening_description",
+            "submitted_by": opened_by,
+            "content": description,
+            "submitted_at_ms": dt_to_ms(created_at)
+        }])
+        .to_string();
+        conn.execute(
+            "INSERT INTO runtime_disputes
+             (dispute_id, bounty_id, opened_by, status, evidence_json, resolution, resolved_by, created_at_ms, resolved_at_ms)
+             VALUES (?1, ?2, ?3, 'open', ?4, NULL, NULL, ?5, NULL)",
+            params![
+                dispute_id,
+                bounty_id,
+                opened_by,
+                opening_evidence,
+                dt_to_ms(created_at)
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("create dispute: {}", e)))?;
+        drop(conn);
+        self.get_dispute(dispute_id)?
+            .ok_or_else(|| KernelError::Driver("created dispute missing after insert".to_string()))
+    }
+
+    pub fn get_dispute(&self, dispute_id: &str) -> Result<Option<DisputeRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.query_row(
+            "SELECT dispute_id, bounty_id, opened_by, status, resolution, resolved_by, created_at_ms, resolved_at_ms, evidence_json
+             FROM runtime_disputes
+             WHERE dispute_id = ?1",
+            params![dispute_id],
+            map_row_to_dispute,
+        )
+        .optional()
+        .map_err(|e| KernelError::Driver(format!("get dispute: {}", e)))
+    }
+
+    pub fn append_dispute_evidence(
+        &self,
+        dispute_id: &str,
+        submitted_by: &str,
+        evidence_json: &str,
+    ) -> Result<bool, KernelError> {
+        let payload = serde_json::json!({
+            "submitted_by": submitted_by,
+            "evidence": evidence_json,
+            "submitted_at_ms": Utc::now().timestamp_millis()
+        })
+        .to_string();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_disputes
+                 SET evidence_json = CASE
+                     WHEN evidence_json IS NULL OR evidence_json = ''
+                       THEN json_array(?2)
+                     ELSE json_insert(COALESCE(evidence_json, '[]'), '$[#]', ?2)
+                 END
+                 WHERE dispute_id = ?1
+                   AND status = 'open'",
+                params![dispute_id, payload],
+            )
+            .map_err(|e| KernelError::Driver(format!("append dispute evidence: {}", e)))?;
+        Ok(updated > 0)
+    }
+
+    pub fn resolve_dispute(
+        &self,
+        dispute_id: &str,
+        resolved_by: &str,
+        resolution: &str,
+        resolved_at: DateTime<Utc>,
+    ) -> Result<Option<DisputeRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_disputes
+                 SET status = 'resolved',
+                     resolution = ?2,
+                     resolved_by = ?3,
+                     resolved_at_ms = ?4
+                 WHERE dispute_id = ?1
+                   AND status = 'open'",
+                params![dispute_id, resolution, resolved_by, dt_to_ms(resolved_at)],
+            )
+            .map_err(|e| KernelError::Driver(format!("resolve dispute: {}", e)))?;
+        if updated == 0 {
+            return Ok(None);
+        }
+        drop(conn);
+        self.get_dispute(dispute_id)
+    }
+
+    pub fn settle_bounty_via_dispute(
+        &self,
+        bounty_id: &str,
+        settlement_status: &str,
+        closed_at: DateTime<Utc>,
+    ) -> Result<bool, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_bounties
+                 SET status = ?2,
+                     closed_at_ms = ?3
+                 WHERE bounty_id = ?1
+                   AND status IN ('open', 'accepted')",
+                params![bounty_id, settlement_status, dt_to_ms(closed_at)],
+            )
+            .map_err(|e| KernelError::Driver(format!("settle bounty via dispute: {}", e)))?;
+        Ok(updated > 0)
+    }
+
     pub fn upsert_a2a_compat_task(&self, task: &A2aCompatTaskRow) -> Result<(), KernelError> {
         let conn = self
             .conn
@@ -2374,6 +2512,20 @@ fn map_row_to_worker_registry(row: &rusqlite::Row) -> rusqlite::Result<WorkerReg
     })
 }
 
+fn map_row_to_dispute(row: &rusqlite::Row) -> rusqlite::Result<DisputeRow> {
+    Ok(DisputeRow {
+        dispute_id: row.get(0)?,
+        bounty_id: row.get(1)?,
+        opened_by: row.get(2)?,
+        status: row.get(3)?,
+        resolution: row.get(4)?,
+        resolved_by: row.get(5)?,
+        created_at: ms_to_dt(row.get::<_, i64>(6)?),
+        resolved_at: row.get::<_, Option<i64>>(7)?.map(ms_to_dt),
+        evidence_json: row.get(8)?,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct InterruptRow {
     pub interrupt_id: String,
@@ -2447,6 +2599,19 @@ pub struct WorkerRegistryRow {
     pub registered_at: DateTime<Utc>,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub status: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisputeRow {
+    pub dispute_id: String,
+    pub bounty_id: String,
+    pub opened_by: String,
+    pub status: String,
+    pub resolution: Option<String>,
+    pub resolved_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub evidence_json: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4451,5 +4616,68 @@ mod tests {
             .count_active_claims_for_worker("worker-1", now + Duration::seconds(31))
             .expect("count claims after expiry");
         assert_eq!(after_expiry, 0);
+    }
+
+    #[test]
+    fn dispute_lifecycle_persists_and_settles_bounty() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        repo.create_bounty("bounty-d1", "b", None, 100, "alice", now)
+            .expect("create bounty");
+
+        let dispute = repo
+            .create_dispute("dispute-1", "bounty-d1", "alice", "bad output", now)
+            .expect("create dispute");
+        assert_eq!(dispute.status, "open");
+
+        let evidence_ok = repo
+            .append_dispute_evidence("dispute-1", "alice", r#"{"type":"log"}"#)
+            .expect("append evidence");
+        assert!(evidence_ok);
+
+        let resolved = repo
+            .resolve_dispute(
+                "dispute-1",
+                "arbiter-1",
+                "claimant_win",
+                now + Duration::seconds(1),
+            )
+            .expect("resolve dispute")
+            .expect("resolved row");
+        assert_eq!(resolved.status, "resolved");
+        assert_eq!(resolved.resolution.as_deref(), Some("claimant_win"));
+
+        let settled = repo
+            .settle_bounty_via_dispute("bounty-d1", "settled_claimant_win", now)
+            .expect("settle bounty");
+        assert!(settled);
+
+        let bounty = repo
+            .get_bounty("bounty-d1")
+            .expect("get bounty")
+            .expect("bounty exists");
+        assert_eq!(bounty.status, "settled_claimant_win");
+    }
+
+    #[test]
+    fn dispute_invalid_transitions_are_rejected() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        repo.create_bounty("bounty-d2", "b", None, 100, "alice", now)
+            .expect("create bounty");
+        repo.create_dispute("dispute-2", "bounty-d2", "alice", "desc", now)
+            .expect("create dispute");
+        repo.resolve_dispute("dispute-2", "arbiter", "agent_win", now)
+            .expect("resolve first");
+
+        let second_resolve = repo
+            .resolve_dispute("dispute-2", "arbiter", "split", now + Duration::seconds(1))
+            .expect("resolve second");
+        assert!(second_resolve.is_none());
+
+        let evidence_after_resolve = repo
+            .append_dispute_evidence("dispute-2", "alice", r#"{"k":"v"}"#)
+            .expect("evidence after resolve");
+        assert!(!evidence_after_resolve);
     }
 }

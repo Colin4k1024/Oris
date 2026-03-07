@@ -18272,6 +18272,287 @@ mod tests {
         let second_claim_resp = router.clone().oneshot(second_claim_req).await.unwrap();
         assert_eq!(second_claim_resp.status(), StatusCode::CONFLICT);
     }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_session_join_message_submit_maps_to_a2a_state_machine() {
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            ":memory:",
+        ));
+        let sender_id = "evomap-session-agent-1";
+        let _ = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            sender_id,
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+
+        let join_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/session/join")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "session_id": "evomap-external-session-1",
+                    "user_id": sender_id
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let join_resp = router.clone().oneshot(join_req).await.unwrap();
+        assert_eq!(join_resp.status(), StatusCode::OK);
+        let join_body = axum::body::to_bytes(join_resp.into_body(), usize::MAX)
+            .await
+            .expect("join body");
+        let join_json: serde_json::Value = serde_json::from_slice(&join_body).expect("join json");
+        let mapped_session_id = join_json["data"]["session_id"]
+            .as_str()
+            .expect("mapped session id")
+            .to_string();
+
+        let message_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/session/message")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "session_id": mapped_session_id,
+                    "sender_id": sender_id,
+                    "content": "working"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let message_resp = router.clone().oneshot(message_req).await.unwrap();
+        assert_eq!(message_resp.status(), StatusCode::OK);
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/session/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "session_id": mapped_session_id,
+                    "sender_id": sender_id,
+                    "submission_json": "{\"final\":true}"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+
+        let snapshot_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/v1/evolution/a2a/sessions/{}?sender_id={}&protocol_version={}",
+                mapped_session_id,
+                sender_id,
+                crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let snapshot_resp = router.clone().oneshot(snapshot_req).await.unwrap();
+        assert_eq!(snapshot_resp.status(), StatusCode::OK);
+        let snapshot_body = axum::body::to_bytes(snapshot_resp.into_body(), usize::MAX)
+            .await
+            .expect("snapshot body");
+        let snapshot_json: serde_json::Value =
+            serde_json::from_slice(&snapshot_body).expect("snapshot json");
+        assert_eq!(snapshot_json["data"]["state"], "Completed");
+        assert_eq!(
+            snapshot_json["data"]["progress"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert!(snapshot_json["data"]["result"].is_object());
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_session_message_unknown_session_returns_not_found() {
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            ":memory:",
+        ));
+        let sender_id = "evomap-session-agent-2";
+        let _ = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            sender_id,
+            "A4",
+            &["Coordination", "SupervisedDevloop", "ReplayFeedback"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/session/message")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "session_id": "missing-session",
+                    "sender_id": sender_id,
+                    "content": "hello"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_dispute_lifecycle_persists_and_settles_bounty() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:");
+        let router = build_router(state.clone());
+
+        let create_bounty_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bounty/create")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "title": "dispute bounty",
+                    "description": "needs arbitration",
+                    "reward": 100,
+                    "created_by": "alice"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let create_bounty_resp = router.clone().oneshot(create_bounty_req).await.unwrap();
+        assert_eq!(create_bounty_resp.status(), StatusCode::OK);
+        let create_bounty_body = axum::body::to_bytes(create_bounty_resp.into_body(), usize::MAX)
+            .await
+            .expect("create bounty body");
+        let create_bounty_json: serde_json::Value =
+            serde_json::from_slice(&create_bounty_body).expect("create bounty json");
+        let bounty_id = create_bounty_json["data"]["bounty_id"]
+            .as_str()
+            .expect("bounty id")
+            .to_string();
+
+        let open_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/dispute/open")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "bounty_id": bounty_id,
+                    "opened_by": "alice",
+                    "description": "I dispute this result"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let open_resp = router.clone().oneshot(open_req).await.unwrap();
+        assert_eq!(open_resp.status(), StatusCode::OK);
+        let open_body = axum::body::to_bytes(open_resp.into_body(), usize::MAX)
+            .await
+            .expect("open body");
+        let open_json: serde_json::Value = serde_json::from_slice(&open_body).expect("open json");
+        let dispute_id = open_json["data"]["dispute_id"]
+            .as_str()
+            .expect("dispute id")
+            .to_string();
+        assert_eq!(open_json["data"]["status"], "open");
+
+        let evidence_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/dispute/evidence")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "dispute_id": dispute_id,
+                    "submitted_by": "alice",
+                    "evidence_json": "{\"kind\":\"trace\"}"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let evidence_resp = router.clone().oneshot(evidence_req).await.unwrap();
+        assert_eq!(evidence_resp.status(), StatusCode::OK);
+
+        let resolve_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/dispute/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "dispute_id": dispute_id,
+                    "resolved_by": "arbiter-1",
+                    "resolution": "claimant_win"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resolve_resp = router.clone().oneshot(resolve_req).await.unwrap();
+        assert_eq!(resolve_resp.status(), StatusCode::OK);
+        let resolve_body = axum::body::to_bytes(resolve_resp.into_body(), usize::MAX)
+            .await
+            .expect("resolve body");
+        let resolve_json: serde_json::Value =
+            serde_json::from_slice(&resolve_body).expect("resolve json");
+        assert_eq!(resolve_json["data"]["status"], "resolved");
+
+        let repo = state.runtime_repo.as_ref().expect("runtime repo");
+        let bounty = repo
+            .get_bounty(
+                create_bounty_json["data"]["bounty_id"]
+                    .as_str()
+                    .expect("bounty id"),
+            )
+            .expect("get bounty")
+            .expect("bounty exists");
+        assert_eq!(bounty.status, "settled_claimant_win");
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_dispute_resolve_rejects_invalid_resolution() {
+        let router = build_router(ExecutionApiState::with_sqlite_idempotency(
+            build_test_graph().await,
+            ":memory:",
+        ));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/dispute/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "dispute_id": "dispute-x",
+                    "resolved_by": "arbiter-1",
+                    "resolution": "unknown"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
 }
 
 // ===================================================================
@@ -19057,12 +19338,26 @@ pub async fn evomap_session_join(
     Json(req): Json<EvomapSessionJoinRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapSessionResponse>>, ApiError> {
     let rid = request_id(&headers);
-    let now = Utc::now().timestamp_millis();
+    validate_thread_id(&req.session_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_sender_id(&req.user_id).map_err(|e| e.with_request_id(rid.clone()))?;
+
+    let start = evolution_a2a_session_start(
+        State(state.0.clone()),
+        headers,
+        Json(A2aTaskSessionStartRequest {
+            sender_id: req.user_id.clone(),
+            protocol_version: crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION.to_string(),
+            task_id: req.session_id.clone(),
+            task_summary: format!("evomap session {}", req.session_id),
+        }),
+    )
+    .await?;
+    let ack = start.0.data;
 
     let response = EvomapSessionResponse {
-        session_id: req.session_id,
+        session_id: ack.session_id,
         status: "joined".to_string(),
-        joined_at_ms: now,
+        joined_at_ms: i64::try_from(ack.updated_at_ms).unwrap_or(i64::MAX),
     };
 
     Ok(Json(ApiEnvelope {
@@ -19083,13 +19378,36 @@ pub async fn evomap_session_message(
     Json(req): Json<EvomapSessionMessageRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
+    validate_thread_id(&req.session_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    if req.content.trim().is_empty() {
+        return Err(ApiError::bad_request("content must not be empty").with_request_id(rid));
+    }
+
+    let progress = evolution_a2a_session_progress(
+        State(state.0.clone()),
+        Path(req.session_id.clone()),
+        headers,
+        Json(A2aTaskSessionProgressRequest {
+            sender_id: req.sender_id,
+            protocol_version: crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION.to_string(),
+            progress_pct: 50,
+            summary: req.content,
+            retryable: false,
+            retry_after_ms: None,
+        }),
+    )
+    .await?;
+    let ack = progress.0.data;
 
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
         data: serde_json::json!({
             "message_id": format!("msg-{}", uuid::Uuid::new_v4()),
-            "sent_at_ms": Utc::now().timestamp_millis()
+            "session_id": ack.session_id,
+            "sent_at_ms": i64::try_from(ack.updated_at_ms).unwrap_or(i64::MAX),
+            "status": "in_progress"
         }),
     }))
 }
@@ -19105,13 +19423,44 @@ pub async fn evomap_session_submit(
     Json(req): Json<EvomapSessionSubmitRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
+    validate_thread_id(&req.session_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    if req.submission_json.trim().is_empty() {
+        return Err(ApiError::bad_request("submission_json must not be empty").with_request_id(rid));
+    }
+
+    let completion = evolution_a2a_session_complete(
+        State(state.0.clone()),
+        Path(req.session_id.clone()),
+        headers,
+        Json(A2aTaskSessionCompletionRequest {
+            sender_id: req.sender_id,
+            protocol_version: crate::agent_contract::A2A_TASK_SESSION_PROTOCOL_VERSION.to_string(),
+            terminal_state: A2aTaskLifecycleState::Succeeded,
+            summary: "evomap submission accepted".to_string(),
+            retryable: false,
+            retry_after_ms: None,
+            failure_code: None,
+            failure_details: None,
+            used_capsule: false,
+            capsule_id: None,
+            reasoning_steps_avoided: 0,
+            fallback_reason: None,
+            task_class_id: String::new(),
+            task_label: String::new(),
+        }),
+    )
+    .await?;
+    let result = completion.0.data.result;
 
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
         data: serde_json::json!({
             "submission_id": format!("sub-{}", uuid::Uuid::new_v4()),
-            "submitted_at_ms": Utc::now().timestamp_millis()
+            "session_id": req.session_id,
+            "submitted_at_ms": Utc::now().timestamp_millis(),
+            "terminal_state": format!("{:?}", result.terminal_state)
         }),
     }))
 }
@@ -19165,6 +19514,19 @@ pub struct EvomapDisputeResponse {
     pub created_at_ms: i64,
 }
 
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn dispute_settlement_status(resolution: &str) -> Option<&'static str> {
+    match resolution.trim().to_ascii_lowercase().as_str() {
+        "claimant_win" => Some("settled_claimant_win"),
+        "agent_win" => Some("settled_agent_win"),
+        "split" => Some("settled_split"),
+        _ => None,
+    }
+}
+
 /// Open a dispute
 #[cfg(all(
     feature = "agent-contract-experimental",
@@ -19176,21 +19538,62 @@ pub async fn evomap_dispute_open(
     Json(req): Json<EvomapDisputeOpenRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapDisputeResponse>>, ApiError> {
     let rid = request_id(&headers);
-    let dispute_id = format!("dispute-{}", uuid::Uuid::new_v4());
-    let now = Utc::now().timestamp_millis();
+    validate_thread_id(&req.bounty_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_sender_id(&req.opened_by).map_err(|e| e.with_request_id(rid.clone()))?;
+    if req.description.trim().is_empty() {
+        return Err(ApiError::bad_request("description must not be empty").with_request_id(rid));
+    }
 
-    let response = EvomapDisputeResponse {
-        dispute_id: dispute_id.clone(),
-        bounty_id: req.bounty_id,
-        status: "open".to_string(),
-        created_at_ms: now,
-    };
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        if repo
+            .get_bounty(&req.bounty_id)
+            .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?
+            .is_none()
+        {
+            return Err(ApiError::not_found("bounty not found").with_request_id(rid));
+        }
+        let now = Utc::now();
+        let dispute_id = format!("dispute-{}", uuid::Uuid::new_v4());
+        let row = repo
+            .create_dispute(
+                &dispute_id,
+                &req.bounty_id,
+                req.opened_by.trim(),
+                req.description.trim(),
+                now,
+            )
+            .map_err(|e| {
+                ApiError::internal(format!("create dispute: {e}")).with_request_id(rid.clone())
+            })?;
+        let response = EvomapDisputeResponse {
+            dispute_id: row.dispute_id,
+            bounty_id: row.bounty_id,
+            status: row.status,
+            created_at_ms: row.created_at.timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: response,
-    }))
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let response = EvomapDisputeResponse {
+            dispute_id: format!("dispute-{}", uuid::Uuid::new_v4()),
+            bounty_id: req.bounty_id,
+            status: "open".to_string(),
+            created_at_ms: Utc::now().timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 }
 
 /// Submit dispute evidence
@@ -19204,6 +19607,25 @@ pub async fn evomap_dispute_evidence(
     Json(req): Json<EvomapDisputeEvidenceRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
+    validate_thread_id(&req.dispute_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_sender_id(&req.submitted_by).map_err(|e| e.with_request_id(rid.clone()))?;
+    if req.evidence_json.trim().is_empty() {
+        return Err(ApiError::bad_request("evidence_json must not be empty").with_request_id(rid));
+    }
+
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        let updated = repo
+            .append_dispute_evidence(&req.dispute_id, &req.submitted_by, &req.evidence_json)
+            .map_err(|e| {
+                ApiError::internal(format!("append dispute evidence: {e}"))
+                    .with_request_id(rid.clone())
+            })?;
+        if !updated {
+            return Err(ApiError::not_found("open dispute not found").with_request_id(rid));
+        }
+    }
 
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
@@ -19226,17 +19648,69 @@ pub async fn evomap_dispute_resolve(
     Json(req): Json<EvomapDisputeResolveRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapDisputeResponse>>, ApiError> {
     let rid = request_id(&headers);
-
-    let response = EvomapDisputeResponse {
-        dispute_id: req.dispute_id,
-        bounty_id: "unknown".to_string(),
-        status: "resolved".to_string(),
-        created_at_ms: Utc::now().timestamp_millis(),
+    validate_thread_id(&req.dispute_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    validate_sender_id(&req.resolved_by).map_err(|e| e.with_request_id(rid.clone()))?;
+    let Some(settlement_status) = dispute_settlement_status(&req.resolution) else {
+        return Err(ApiError::bad_request(
+            "resolution must be one of: claimant_win|agent_win|split",
+        )
+        .with_request_id(rid));
     };
 
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: response,
-    }))
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        let Some(row) = repo
+            .resolve_dispute(
+                &req.dispute_id,
+                &req.resolved_by,
+                &req.resolution,
+                Utc::now(),
+            )
+            .map_err(|e| {
+                ApiError::internal(format!("resolve dispute: {e}")).with_request_id(rid.clone())
+            })?
+        else {
+            return Err(ApiError::not_found("open dispute not found").with_request_id(rid));
+        };
+
+        let settled = repo
+            .settle_bounty_via_dispute(&row.bounty_id, settlement_status, Utc::now())
+            .map_err(|e| {
+                ApiError::internal(format!("settle bounty via dispute: {e}"))
+                    .with_request_id(rid.clone())
+            })?;
+        if !settled {
+            return Err(
+                ApiError::conflict("bounty settlement update rejected").with_request_id(rid)
+            );
+        }
+
+        let response = EvomapDisputeResponse {
+            dispute_id: row.dispute_id,
+            bounty_id: row.bounty_id,
+            status: row.status,
+            created_at_ms: row.created_at.timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
+
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let response = EvomapDisputeResponse {
+            dispute_id: req.dispute_id,
+            bounty_id: "unknown".to_string(),
+            status: "resolved".to_string(),
+            created_at_ms: Utc::now().timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 }
