@@ -3671,8 +3671,9 @@ mod tests {
 
     use super::{
         apply_sqlite_runtime_migration_v1, ensure_sqlite_migration_table, record_sqlite_migration,
-        A2aCompatTaskRow, A2aSessionRow, ReplayEffectClaim, RetryPolicyConfig, RetryStrategy,
-        SqliteRuntimeRepository, TimeoutPolicyConfig, SQLITE_RUNTIME_SCHEMA_VERSION,
+        A2aCompatTaskRow, A2aSessionRow, OrganismRow, RecipeRow, ReplayEffectClaim,
+        RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository, TimeoutPolicyConfig,
+        SQLITE_RUNTIME_SCHEMA_VERSION,
     };
     use crate::models::AttemptExecutionStatus;
     use crate::repository::RuntimeRepository;
@@ -4877,5 +4878,139 @@ mod tests {
             .append_dispute_evidence("dispute-2", "alice", r#"{"k":"v"}"#)
             .expect("evidence after resolve");
         assert!(!evidence_after_resolve);
+    }
+
+    #[test]
+    fn recipe_crud_lifecycle() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+
+        // Create recipe
+        let recipe = RecipeRow {
+            recipe_id: "recipe-1".to_string(),
+            name: "Test Recipe".to_string(),
+            description: Some("A test recipe".to_string()),
+            gene_sequence_json: r#"{"steps": ["step1", "step2"]}"#.to_string(),
+            author_id: "author-1".to_string(),
+            forked_from: None,
+            created_at: now,
+            updated_at: now,
+            is_public: true,
+        };
+        repo.create_recipe(&recipe).expect("create recipe");
+
+        // Get recipe
+        let retrieved = repo.get_recipe("recipe-1").expect("get recipe");
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.name, "Test Recipe");
+        assert_eq!(retrieved.author_id, "author-1");
+
+        // List by author
+        let list = repo
+            .list_recipes_by_author("author-1")
+            .expect("list recipes");
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn organism_lifecycle() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+
+        // First create a recipe (organism requires recipe)
+        let recipe = RecipeRow {
+            recipe_id: "recipe-org-1".to_string(),
+            name: "Org Test Recipe".to_string(),
+            description: None,
+            gene_sequence_json: r#"{"steps": ["step1", "step2", "step3"]}"#.to_string(),
+            author_id: "author-1".to_string(),
+            forked_from: None,
+            created_at: now,
+            updated_at: now,
+            is_public: false,
+        };
+        repo.create_recipe(&recipe).expect("create recipe");
+
+        // Create organism
+        let organism = OrganismRow {
+            organism_id: "organism-1".to_string(),
+            recipe_id: "recipe-org-1".to_string(),
+            status: "running".to_string(),
+            current_step: 0,
+            total_steps: 3,
+            created_at: now,
+            completed_at: None,
+        };
+        repo.create_organism(&organism).expect("create organism");
+
+        // Get organism
+        let retrieved = repo.get_organism("organism-1").expect("get organism");
+        assert!(retrieved.is_some());
+        let retrieved = retrieved.unwrap();
+        assert_eq!(retrieved.status, "running");
+        assert_eq!(retrieved.current_step, 0);
+
+        // Update status
+        let updated = repo
+            .update_organism_status("organism-1", "running", 1)
+            .expect("update status");
+        assert!(updated);
+
+        // Verify update
+        let after = repo
+            .get_organism("organism-1")
+            .expect("get after update")
+            .unwrap();
+        assert_eq!(after.current_step, 1);
+
+        // Complete organism
+        let completed = repo
+            .update_organism_status("organism-1", "completed", 3)
+            .expect("complete");
+        assert!(completed);
+
+        let final_state = repo.get_organism("organism-1").expect("get final").unwrap();
+        assert_eq!(final_state.status, "completed");
+        assert!(final_state.completed_at.is_some());
+    }
+
+    #[test]
+    fn recipe_fork_lifecycle() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+
+        // Create original recipe
+        let original = RecipeRow {
+            recipe_id: "original-recipe".to_string(),
+            name: "Original".to_string(),
+            description: Some("Original recipe".to_string()),
+            gene_sequence_json: r#"{"version": 1}"#.to_string(),
+            author_id: "author-original".to_string(),
+            forked_from: None,
+            created_at: now,
+            updated_at: now,
+            is_public: true,
+        };
+        repo.create_recipe(&original).expect("create original");
+
+        // Fork the recipe
+        let forked = RecipeRow {
+            recipe_id: "forked-recipe".to_string(),
+            name: "Forked Original".to_string(),
+            description: Some("Forked from original".to_string()),
+            gene_sequence_json: r#"{"version": 1, "forked": true}"#.to_string(),
+            author_id: "author-forker".to_string(),
+            forked_from: Some("original-recipe".to_string()),
+            created_at: now,
+            updated_at: now,
+            is_public: true,
+        };
+        repo.create_recipe(&forked).expect("create fork");
+
+        // Verify fork
+        let retrieved = repo.get_recipe("forked-recipe").expect("get fork").unwrap();
+        assert_eq!(retrieved.forked_from, Some("original-recipe".to_string()));
+        assert_eq!(retrieved.author_id, "author-forker");
     }
 }
