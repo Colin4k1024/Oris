@@ -12,6 +12,7 @@ use oris_agent_contract::{
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+use serde_json;
 
 pub const EXPECTED_PROTOCOL_VERSION: &str = A2A_TASK_SESSION_PROTOCOL_VERSION;
 
@@ -380,5 +381,241 @@ pub fn default_handshake_request(sender_id: &str) -> A2aHandshakeRequest {
             A2aCapability::SupervisedDevloop,
             A2aCapability::ReplayFeedback,
         ],
+    }
+}
+
+use oris_agent_contract::{
+    HubOperationClass, HubProfile, HubSelectionPolicy, HubTrustTier,
+};
+
+/// Multi-hub runtime client that routes A2A operations based on hub trust tiers.
+/// 
+/// This client supports:
+/// - Internal/private hubs with Full trust (all operations)
+/// - Public hubs with ReadOnly trust (read-only operations: Hello, Fetch)
+/// - Automatic fallback: if internal hub fails for Fetch, try public hub
+#[derive(Clone)]
+pub struct MultiHubRuntimeA2aClient {
+    hubs: Vec<HubProfile>,
+    policy: HubSelectionPolicy,
+    http_client: reqwest::Client,
+}
+
+impl MultiHubRuntimeA2aClient {
+    /// Create a new multi-hub client with the given hub profiles
+    pub fn new(hubs: Vec<HubProfile>) -> Self {
+        Self {
+            hubs,
+            policy: HubSelectionPolicy::default(),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// Create a new multi-hub client with custom selection policy
+    pub fn with_policy(hubs: Vec<HubProfile>, policy: HubSelectionPolicy) -> Self {
+        Self {
+            hubs,
+            policy,
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    /// Select a hub for the given operation class
+    fn select_hub(&self, operation: &HubOperationClass) -> Option<&HubProfile> {
+        let allowed_tiers = self.policy.allowed_tiers(operation);
+        
+        // Filter hubs by allowed trust tiers and sort by priority (descending)
+        let mut candidates: Vec<&HubProfile> = self
+            .hubs
+            .iter()
+            .filter(|hub| allowed_tiers.contains(&hub.trust_tier) && hub.allows_operation(operation))
+            .collect();
+        
+        // Sort by priority descending
+        candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+        
+        candidates.first().copied()
+    }
+
+    /// Execute an operation on the selected hub, with fallback for read-only operations
+    async fn execute<TReq, TResp>(
+        &self,
+        operation: HubOperationClass,
+        path: &str,
+        request: &TReq,
+    ) -> Result<TResp, RuntimeClientError>
+    where
+        TReq: serde::Serialize,
+        TResp: serde::de::DeserializeOwned,
+    {
+        // Try internal hub first
+        if let Some(hub) = self.select_hub(&operation) {
+            match self.execute_on_hub(hub, path, request).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    // For read-only operations, try fallback to public hub
+                    if operation.is_read_only() {
+                        let fallback_hub = self.fallback_hub(hub, &operation);
+                        if let Some(public_hub) = fallback_hub {
+                            // Need to re-serialize the request for the fallback hub
+                            let resp = self.execute_on_hub(&public_hub, path, request).await?;
+                            return Ok(resp);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        
+        Err(RuntimeClientError::new(format!(
+            "no hub available for operation {:?}",
+            operation
+        )))
+    }
+
+    /// Find a fallback hub (public/readonly) when internal hub fails
+    fn fallback_hub<'a>(&'a self, excluded: &'a HubProfile, operation: &HubOperationClass) -> Option<&'a HubProfile> {
+        self.hubs
+            .iter()
+            .filter(|hub| {
+                hub.hub_id != excluded.hub_id 
+                && hub.trust_tier == HubTrustTier::ReadOnly 
+                && hub.allows_operation(operation)
+            })
+            .max_by_key(|hub| hub.priority)
+    }
+
+    /// Execute a request on a specific hub
+    async fn execute_on_hub<TReq, TResp>(
+        &self,
+        hub: &HubProfile,
+        path: &str,
+        request: &TReq,
+    ) -> Result<TResp, RuntimeClientError>
+    where
+        TReq: serde::Serialize,
+        TResp: serde::de::DeserializeOwned,
+    {
+        let url = format!("{}/{}", hub.base_url.trim_end_matches('/'), path.trim_start_matches('/'));
+        
+        let response = self.http_client.post(url).json(request).send().await?;
+        
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(RuntimeClientError::new(format!(
+                "hub {} returned {}: {}",
+                hub.hub_id, status, body
+            )));
+        }
+        
+        let envelope = response.json::<ApiEnvelope<TResp>>().await?;
+        
+        // Add source tracking to response if the type supports it
+        Ok(envelope.data)
+    }
+
+    /// Perform handshake on the best available hub
+    pub async fn handshake(
+        &self,
+        request: A2aHandshakeRequest,
+    ) -> Result<A2aHandshakeResponse, RuntimeClientError> {
+        self.execute(HubOperationClass::Hello, "/a2a/hello", &request).await
+    }
+
+    /// Fetch assets/tasks from the best available hub (with fallback to public)
+    pub async fn fetch(
+        &self,
+        request: impl serde::Serialize,
+    ) -> Result<serde_json::Value, RuntimeClientError> {
+        self.execute(HubOperationClass::Fetch, "/a2a/fetch", &request).await
+    }
+
+    /// Publish an asset (requires full-trust hub)
+    pub async fn publish(
+        &self,
+        request: impl serde::Serialize,
+    ) -> Result<serde_json::Value, RuntimeClientError> {
+        self.execute(HubOperationClass::Publish, "/a2a/publish", &request).await
+    }
+
+    /// Claim a task (requires full-trust hub)
+    pub async fn claim_task(
+        &self,
+        request: impl serde::Serialize,
+    ) -> Result<serde_json::Value, RuntimeClientError> {
+        self.execute(HubOperationClass::TaskClaim, "/a2a/task/claim", &request).await
+    }
+
+    /// Complete a task (requires full-trust hub)
+    pub async fn complete_task(
+        &self,
+        request: impl serde::Serialize,
+    ) -> Result<serde_json::Value, RuntimeClientError> {
+        self.execute(HubOperationClass::TaskComplete, "/a2a/task/complete", &request).await
+    }
+
+    /// Send heartbeat (requires full-trust hub)
+    pub async fn heartbeat(
+        &self,
+        request: impl serde::Serialize,
+    ) -> Result<serde_json::Value, RuntimeClientError> {
+        self.execute(HubOperationClass::Hello, "/a2a/heartbeat", &request).await
+    }
+}
+
+/// Builder for creating MultiHubRuntimeA2aClient with fluent configuration
+pub struct MultiHubRuntimeA2aClientBuilder {
+    hubs: Vec<HubProfile>,
+    policy: Option<HubSelectionPolicy>,
+}
+
+impl MultiHubRuntimeA2aClientBuilder {
+    pub fn new() -> Self {
+        Self {
+            hubs: Vec::new(),
+            policy: None,
+        }
+    }
+
+    /// Add an internal/private hub with full trust
+    pub fn with_internal_hub(mut self, hub_id: impl Into<String>, base_url: impl Into<String>, priority: u32) -> Self {
+        self.hubs.push(HubProfile {
+            hub_id: hub_id.into(),
+            base_url: base_url.into(),
+            trust_tier: HubTrustTier::Full,
+            priority,
+            health_url: None,
+        });
+        self
+    }
+
+    /// Add a public hub with read-only trust
+    pub fn with_public_hub(mut self, hub_id: impl Into<String>, base_url: impl Into<String>, priority: u32) -> Self {
+        self.hubs.push(HubProfile {
+            hub_id: hub_id.into(),
+            base_url: base_url.into(),
+            trust_tier: HubTrustTier::ReadOnly,
+            priority,
+            health_url: None,
+        });
+        self
+    }
+
+    /// Set custom selection policy
+    pub fn with_policy(mut self, policy: HubSelectionPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// Build the multi-hub client
+    pub fn build(self) -> MultiHubRuntimeA2aClient {
+        MultiHubRuntimeA2aClient::with_policy(self.hubs, self.policy.unwrap_or_default())
+    }
+}
+
+impl Default for MultiHubRuntimeA2aClientBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -30,6 +30,18 @@ pub enum AssetState {
     Quarantined,
 }
 
+/// Convert Oris AssetState to EvoMap-compatible state string.
+/// This mapping preserves the EvoMap terminology without modifying the core enum.
+pub fn asset_state_to_evomap_compat(state: &AssetState) -> &'static str {
+    match state {
+        AssetState::Candidate => "candidate",
+        AssetState::Promoted => "promoted",
+        AssetState::Revoked => "revoked",
+        AssetState::Archived => "rejected", // Archive maps to rejected in EvoMap terms
+        AssetState::Quarantined => "quarantined",
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CandidateSource {
     #[default]

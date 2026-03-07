@@ -214,6 +214,16 @@ impl SqliteRuntimeRepository {
             apply_sqlite_runtime_migration_v11(&conn)?;
             record_sqlite_migration(&conn, 11, "runtime_a2a_compat_tasks")?;
         }
+        // EvoMap Alignment: Bounty, Swarm, Worker registry
+        if current < 12 {
+            apply_sqlite_runtime_migration_v12(&conn)?;
+            record_sqlite_migration(&conn, 12, "runtime_bounties_swarm_worker")?;
+        }
+        // EvoMap Alignment: Recipe, Organism, Session, Dispute
+        if current < 13 {
+            apply_sqlite_runtime_migration_v13(&conn)?;
+            record_sqlite_migration(&conn, 13, "runtime_recipes_organisms_sessions_disputes")?;
+        }
         Ok(())
     }
 
@@ -2830,6 +2840,132 @@ fn apply_sqlite_runtime_migration_v11(conn: &Connection) -> Result<(), KernelErr
         "#,
     )
     .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v11: {}", e)))?;
+    Ok(())
+}
+
+/// Migration v12: EvoMap Bounty, Swarm, and Worker registry tables
+fn apply_sqlite_runtime_migration_v12(conn: &Connection) -> Result<(), KernelError> {
+    conn.execute_batch(
+        r#"
+        -- Bounty table for task rewards
+        CREATE TABLE IF NOT EXISTS runtime_bounties (
+          bounty_id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          description TEXT,
+          reward INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          created_by TEXT NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          closed_at_ms INTEGER NULL,
+          accepted_by TEXT NULL,
+          accepted_at_ms INTEGER NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_bounties_status ON runtime_bounties(status);
+        CREATE INDEX IF NOT EXISTS idx_runtime_bounties_created_by ON runtime_bounties(created_by);
+
+        -- Swarm task decomposition table
+        CREATE TABLE IF NOT EXISTS runtime_swarm_tasks (
+          parent_task_id TEXT PRIMARY KEY,
+          decomposition_json TEXT NOT NULL,
+          proposer_id TEXT NOT NULL,
+          proposer_reward_pct INTEGER NOT NULL DEFAULT 5,
+          solver_reward_pct INTEGER NOT NULL DEFAULT 85,
+          aggregator_reward_pct INTEGER NOT NULL DEFAULT 10,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_swarm_tasks_proposer ON runtime_swarm_tasks(proposer_id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_swarm_tasks_status ON runtime_swarm_tasks(status);
+
+        -- Worker registry table
+        CREATE TABLE IF NOT EXISTS runtime_workers_registry (
+          worker_id TEXT PRIMARY KEY,
+          domains TEXT NOT NULL,
+          max_load INTEGER NOT NULL DEFAULT 1,
+          metadata_json TEXT,
+          registered_at_ms INTEGER NOT NULL,
+          last_heartbeat_ms INTEGER NULL,
+          status TEXT NOT NULL DEFAULT 'active'
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_workers_domains ON runtime_workers_registry(domains);
+        CREATE INDEX IF NOT EXISTS idx_runtime_workers_status ON runtime_workers_registry(status);
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v12: {}", e)))?;
+    Ok(())
+}
+
+/// Migration v13: EvoMap Recipe, Organism, Session, Dispute tables
+fn apply_sqlite_runtime_migration_v13(conn: &Connection) -> Result<(), KernelError> {
+    conn.execute_batch(
+        r#"
+        -- Recipe table for reusable gene sequences
+        CREATE TABLE IF NOT EXISTS runtime_recipes (
+          recipe_id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          description TEXT,
+          gene_sequence_json TEXT NOT NULL,
+          author_id TEXT NOT NULL,
+          forked_from TEXT NULL,
+          created_at_ms INTEGER NOT NULL,
+          updated_at_ms INTEGER NOT NULL,
+          is_public INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_recipes_author ON runtime_recipes(author_id);
+        
+        -- Organism table for running recipes
+        CREATE TABLE IF NOT EXISTS runtime_organisms (
+          organism_id TEXT PRIMARY KEY,
+          recipe_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          current_step INTEGER NOT NULL DEFAULT 0,
+          total_steps INTEGER NOT NULL,
+          created_at_ms INTEGER NOT NULL,
+          completed_at_ms INTEGER NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_organisms_recipe ON runtime_organisms(recipe_id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_organisms_status ON runtime_organisms(status);
+        
+        -- Collaborative session table
+        CREATE TABLE IF NOT EXISTS runtime_collab_sessions (
+          session_id TEXT PRIMARY KEY,
+          session_type TEXT NOT NULL,
+          creator_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at_ms INTEGER NOT NULL,
+          ended_at_ms INTEGER NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_collab_sessions_creator ON runtime_collab_sessions(creator_id);
+        
+        -- Collaborative messages table
+        CREATE TABLE IF NOT EXISTS runtime_collab_messages (
+          message_id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          sender_id TEXT NOT NULL,
+          content TEXT NOT NULL,
+          message_type TEXT NOT NULL DEFAULT 'message',
+          sent_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_collab_messages_session ON runtime_collab_messages(session_id);
+        
+        -- Dispute table
+        CREATE TABLE IF NOT EXISTS runtime_disputes (
+          dispute_id TEXT PRIMARY KEY,
+          bounty_id TEXT NOT NULL,
+          opened_by TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'open',
+          evidence_json TEXT,
+          resolution TEXT NULL,
+          resolved_by TEXT NULL,
+          resolved_at_ms INTEGER NULL,
+          created_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runtime_disputes_bounty ON runtime_disputes(bounty_id);
+        CREATE INDEX IF NOT EXISTS idx_runtime_disputes_status ON runtime_disputes(status);
+        "#,
+    )
+    .map_err(|e| KernelError::Driver(format!("apply sqlite runtime migration v13: {}", e)))?;
     Ok(())
 }
 

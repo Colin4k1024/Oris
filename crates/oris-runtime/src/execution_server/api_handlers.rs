@@ -1083,6 +1083,9 @@ pub struct A2aCompatHeartbeatResponse {
     available_work_count: usize,
     available_work: Vec<A2aCompatAvailableWorkItem>,
     metadata_accepted: bool,
+    /// Next heartbeat interval in milliseconds (EvoMap compatibility)
+    /// Default: 900_000 (15 minutes)
+    next_heartbeat_ms: Option<u64>,
 }
 
 #[cfg(all(
@@ -1092,6 +1095,7 @@ pub struct A2aCompatHeartbeatResponse {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatHelloPayload {
     node_secret: String,
+    claim_code: String,
     claim_url: String,
     hub_node_id: String,
 }
@@ -2281,6 +2285,32 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/heartbeat", post(evolution_a2a_heartbeat_compat))
         .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim_compat))
         .route("/a2a/tasks/report", post(evolution_a2a_tasks_report_compat))
+        // EvoMap compatibility aliases
+        .route("/task/claim", post(evolution_a2a_tasks_claim_compat))
+        .route("/task/complete", post(evolution_a2a_task_complete_compat))
+        // EvoMap: Bounty endpoints
+        .route("/a2a/bounty/create", post(evomap_bounty_create))
+        .route("/a2a/bounty/:id/accept", post(evomap_bounty_accept))
+        .route("/a2a/bounty/:id/close", post(evomap_bounty_close))
+        // EvoMap: Swarm decomposition
+        .route("/task/propose-decomposition", post(evomap_swarm_propose_decomposition))
+        // EvoMap: Worker registration
+        .route("/a2a/worker/register", post(evomap_worker_register))
+        // EvoMap: Recipe endpoints
+        .route("/a2a/recipe", post(evomap_recipe_create))
+        .route("/a2a/recipe/:id", get(evomap_recipe_get))
+        .route("/a2a/recipe/:id/fork", post(evomap_recipe_fork))
+        // EvoMap: Organism endpoints
+        .route("/a2a/organism/express", post(evomap_organism_express))
+        .route("/a2a/organism/:id", get(evomap_organism_get))
+        // EvoMap: Session endpoints
+        .route("/a2a/session/join", post(evomap_session_join))
+        .route("/a2a/session/message", post(evomap_session_message))
+        .route("/a2a/session/submit", post(evomap_session_submit))
+        // EvoMap: Dispute endpoints
+        .route("/a2a/dispute/open", post(evomap_dispute_open))
+        .route("/a2a/dispute/evidence", post(evomap_dispute_evidence))
+        .route("/a2a/dispute/resolve", post(evomap_dispute_resolve))
 }
 
 #[cfg(not(all(
@@ -2302,7 +2332,9 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     let router = router
         .route("/v1/evolution/publish", post(evolution_publish))
         .route("/v1/evolution/fetch", post(evolution_fetch))
-        .route("/v1/evolution/revoke", post(evolution_revoke));
+        .route("/v1/evolution/revoke", post(evolution_revoke))
+        // EvoMap compatibility alias for publish
+        .route("/a2a/publish", post(evolution_publish));
     #[cfg(feature = "agent-contract-experimental")]
     let router = router
         .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
@@ -2792,6 +2824,24 @@ fn generate_issued_compat_node_secret() -> String {
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     )
+}
+
+/// Generate a short one-time claim code (6 alphanumeric characters)
+/// Used for EvoMap compatibility - same lifecycle as node_secret
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn generate_claim_code() -> String {
+    // Generate a 6-character alphanumeric code from UUID
+    // Uses uuid v4 which is random, then filters to alphanumeric chars
+    let uuid_str = uuid::Uuid::new_v4().simple().to_string();
+    let alphanumeric: String = uuid_str
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(6)
+        .collect();
+    alphanumeric
 }
 
 #[cfg(all(
@@ -4450,6 +4500,7 @@ pub async fn evolution_a2a_hello_compat(
                 session.principal,
                 session.expires_at,
             ),
+            claim_code: generate_claim_code(),
             claim_url: A2A_COMPAT_TASK_CLAIM_URL.to_string(),
             hub_node_id: default_a2a_compat_hub_node_id(),
         })
@@ -4478,6 +4529,9 @@ pub async fn evolution_a2a_hello_compat(
             root.insert("payload".into(), payload_value.clone());
             if let Some(node_secret) = payload_value.get("node_secret") {
                 root.insert("node_secret".into(), node_secret.clone());
+            }
+            if let Some(claim_code) = payload_value.get("claim_code") {
+                root.insert("claim_code".into(), claim_code.clone());
             }
             if let Some(hub_node_id) = payload_value.get("hub_node_id") {
                 root.insert("hub_node_id".into(), hub_node_id.clone());
@@ -4725,6 +4779,9 @@ pub async fn evolution_a2a_heartbeat_compat(
             "acknowledged".into(),
             serde_json::json!(envelope.data.acknowledged),
         );
+        // EvoMap compatibility: include next_heartbeat_ms
+        // Default: 15 minutes (900_000 ms)
+        root.insert("next_heartbeat_ms".into(), serde_json::json!(900_000));
     }
     Ok(Json(body))
 }
@@ -5655,6 +5712,7 @@ pub async fn evolution_a2a_heartbeat(
             available_work_count,
             available_work,
             metadata_accepted: req.metadata.is_some(),
+            next_heartbeat_ms: Some(900_000),
         },
     }))
 }
@@ -17579,4 +17637,711 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("export json");
         assert!(json["data"]["timeline"].is_array());
     }
+}
+
+// ===================================================================
+// EvoMap Bounty, Swarm, and Worker API Handlers
+// ===================================================================
+
+/// Request for creating a bounty
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapBountyCreateRequest {
+    pub title: String,
+    pub description: Option<String>,
+    pub reward: i64,
+    pub created_by: String,
+}
+
+/// Response for bounty operations
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EvomapBountyResponse {
+    pub bounty_id: String,
+    pub title: String,
+    pub reward: i64,
+    pub status: String,
+    pub created_at_ms: i64,
+}
+
+/// Create a new bounty
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bounty_create(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapBountyCreateRequest>,
+) -> Result<Json<ApiEnvelope<EvomapBountyResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let bounty_id = format!("bounty-{}", uuid::Uuid::new_v4());
+    let now = Utc::now().timestamp_millis();
+    
+    // For now, return a mock response - actual persistence would require repo integration
+    let response = EvomapBountyResponse {
+        bounty_id: bounty_id.clone(),
+        title: req.title,
+        reward: req.reward,
+        status: "open".to_string(),
+        created_at_ms: now,
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Accept a bounty
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bounty_accept(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(bounty_id): Path<String>,
+    Json(_req): Json<Value>,
+) -> Result<Json<ApiEnvelope<EvomapBountyResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    let response = EvomapBountyResponse {
+        bounty_id: bounty_id.clone(),
+        title: "Accepted Bounty".to_string(),
+        reward: 0,
+        status: "accepted".to_string(),
+        created_at_ms: Utc::now().timestamp_millis(),
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Close/complete a bounty
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bounty_close(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(bounty_id): Path<String>,
+    Json(_req): Json<Value>,
+) -> Result<Json<ApiEnvelope<EvomapBountyResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    let response = EvomapBountyResponse {
+        bounty_id: bounty_id.clone(),
+        title: "Closed Bounty".to_string(),
+        reward: 0,
+        status: "closed".to_string(),
+        created_at_ms: Utc::now().timestamp_millis(),
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Request for swarm task decomposition
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapSwarmDecompositionRequest {
+    pub parent_task_id: String,
+    pub proposer_id: String,
+    pub task_description: String,
+}
+
+/// Response for swarm decomposition
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EvomapSwarmDecompositionResponse {
+    pub parent_task_id: String,
+    pub decomposition: SwarmDecomposition,
+    pub status: String,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SwarmDecomposition {
+    pub child_tasks: Vec<ChildTask>,
+    pub proposer_reward_pct: i32,
+    pub solver_reward_pct: i32,
+    pub aggregator_reward_pct: i32,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChildTask {
+    pub task_id: String,
+    pub description: String,
+    pub role: String,
+}
+
+/// Propose task decomposition for swarm intelligence
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_swarm_propose_decomposition(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapSwarmDecompositionRequest>,
+) -> Result<Json<ApiEnvelope<EvomapSwarmDecompositionResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    // Generate mock child tasks - actual decomposition would use LLM
+    let child_tasks = vec![
+        ChildTask {
+            task_id: format!("child-{}-1", req.parent_task_id),
+            description: "Subtask 1".to_string(),
+            role: "solver".to_string(),
+        },
+        ChildTask {
+            task_id: format!("child-{}-2", req.parent_task_id),
+            description: "Subtask 2".to_string(),
+            role: "solver".to_string(),
+        },
+        ChildTask {
+            task_id: format!("child-{}-agg", req.parent_task_id),
+            description: "Aggregation task".to_string(),
+            role: "aggregator".to_string(),
+        },
+    ];
+    
+    let response = EvomapSwarmDecompositionResponse {
+        parent_task_id: req.parent_task_id,
+        decomposition: SwarmDecomposition {
+            child_tasks,
+            proposer_reward_pct: 5,
+            solver_reward_pct: 85,
+            aggregator_reward_pct: 10,
+        },
+        status: "pending".to_string(),
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Worker registration request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapWorkerRegisterRequest {
+    pub worker_id: String,
+    pub domains: Vec<String>,
+    pub max_load: i32,
+    pub metadata: Option<Value>,
+}
+
+/// Worker registration response
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EvomapWorkerRegisterResponse {
+    pub worker_id: String,
+    pub domains: Vec<String>,
+    pub max_load: i32,
+    pub status: String,
+    pub registered_at_ms: i64,
+}
+
+/// Register a worker
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_worker_register(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapWorkerRegisterRequest>,
+) -> Result<Json<ApiEnvelope<EvomapWorkerRegisterResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let now = Utc::now().timestamp_millis();
+    
+    let response = EvomapWorkerRegisterResponse {
+        worker_id: req.worker_id,
+        domains: req.domains,
+        max_load: req.max_load,
+        status: "active".to_string(),
+        registered_at_ms: now,
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+// ===================================================================
+// EvoMap Recipe, Organism, Session, Dispute API Handlers
+// ===================================================================
+
+/// Recipe create request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapRecipeCreateRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub gene_sequence_json: String,
+    pub author_id: String,
+    pub is_public: Option<bool>,
+}
+
+/// Recipe response
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EvomapRecipeResponse {
+    pub recipe_id: String,
+    pub name: String,
+    pub author_id: String,
+    pub created_at_ms: i64,
+}
+
+/// Create a recipe
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_recipe_create(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapRecipeCreateRequest>,
+) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let recipe_id = format!("recipe-{}", uuid::Uuid::new_v4());
+    let now = Utc::now().timestamp_millis();
+    
+    let response = EvomapRecipeResponse {
+        recipe_id: recipe_id.clone(),
+        name: req.name,
+        author_id: req.author_id,
+        created_at_ms: now,
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Get a recipe
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_recipe_get(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(recipe_id): Path<String>,
+) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    let response = EvomapRecipeResponse {
+        recipe_id: recipe_id.clone(),
+        name: "Sample Recipe".to_string(),
+        author_id: "system".to_string(),
+        created_at_ms: Utc::now().timestamp_millis(),
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Fork a recipe
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_recipe_fork(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(recipe_id): Path<String>,
+    Json(req): Json<Value>,
+) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let new_recipe_id = format!("recipe-{}", uuid::Uuid::new_v4());
+    
+    let response = EvomapRecipeResponse {
+        recipe_id: new_recipe_id,
+        name: format!("Forked {}", recipe_id),
+        author_id: "current_user".to_string(),
+        created_at_ms: Utc::now().timestamp_millis(),
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Organism express request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapOrganismExpressRequest {
+    pub recipe_id: String,
+    pub organism_name: Option<String>,
+}
+
+/// Organism response
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EvomapOrganismResponse {
+    pub organism_id: String,
+    pub recipe_id: String,
+    pub status: String,
+    pub current_step: i32,
+    pub total_steps: i32,
+    pub created_at_ms: i64,
+}
+
+/// Express a recipe as organism
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_organism_express(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapOrganismExpressRequest>,
+) -> Result<Json<ApiEnvelope<EvomapOrganismResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let organism_id = format!("organism-{}", uuid::Uuid::new_v4());
+    let now = Utc::now().timestamp_millis();
+    
+    let response = EvomapOrganismResponse {
+        organism_id: organism_id.clone(),
+        recipe_id: req.recipe_id,
+        status: "running".to_string(),
+        current_step: 0,
+        total_steps: 3,
+        created_at_ms: now,
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Get organism status
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_organism_get(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(organism_id): Path<String>,
+) -> Result<Json<ApiEnvelope<EvomapOrganismResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    let response = EvomapOrganismResponse {
+        organism_id: organism_id.clone(),
+        recipe_id: "sample-recipe".to_string(),
+        status: "running".to_string(),
+        current_step: 1,
+        total_steps: 3,
+        created_at_ms: Utc::now().timestamp_millis(),
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Session join request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapSessionJoinRequest {
+    pub session_id: String,
+    pub user_id: String,
+}
+
+/// Session message request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapSessionMessageRequest {
+    pub session_id: String,
+    pub sender_id: String,
+    pub content: String,
+}
+
+/// Session submit request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapSessionSubmitRequest {
+    pub session_id: String,
+    pub sender_id: String,
+    pub submission_json: String,
+}
+
+/// Session response
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EvomapSessionResponse {
+    pub session_id: String,
+    pub status: String,
+    pub joined_at_ms: i64,
+}
+
+/// Join a collaborative session
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_session_join(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapSessionJoinRequest>,
+) -> Result<Json<ApiEnvelope<EvomapSessionResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let now = Utc::now().timestamp_millis();
+    
+    let response = EvomapSessionResponse {
+        session_id: req.session_id,
+        status: "joined".to_string(),
+        joined_at_ms: now,
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Send message to session
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_session_message(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapSessionMessageRequest>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: serde_json::json!({
+            "message_id": format!("msg-{}", uuid::Uuid::new_v4()),
+            "sent_at_ms": Utc::now().timestamp_millis()
+        }),
+    }))
+}
+
+/// Submit to session
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_session_submit(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapSessionSubmitRequest>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: serde_json::json!({
+            "submission_id": format!("sub-{}", uuid::Uuid::new_v4()),
+            "submitted_at_ms": Utc::now().timestamp_millis()
+        }),
+    }))
+}
+
+/// Dispute open request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapDisputeOpenRequest {
+    pub bounty_id: String,
+    pub opened_by: String,
+    pub description: String,
+}
+
+/// Dispute evidence request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapDisputeEvidenceRequest {
+    pub dispute_id: String,
+    pub submitted_by: String,
+    pub evidence_json: String,
+}
+
+/// Dispute resolve request
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapDisputeResolveRequest {
+    pub dispute_id: String,
+    pub resolved_by: String,
+    pub resolution: String,
+}
+
+/// Dispute response
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EvomapDisputeResponse {
+    pub dispute_id: String,
+    pub bounty_id: String,
+    pub status: String,
+    pub created_at_ms: i64,
+}
+
+/// Open a dispute
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_dispute_open(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapDisputeOpenRequest>,
+) -> Result<Json<ApiEnvelope<EvomapDisputeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    let dispute_id = format!("dispute-{}", uuid::Uuid::new_v4());
+    let now = Utc::now().timestamp_millis();
+    
+    let response = EvomapDisputeResponse {
+        dispute_id: dispute_id.clone(),
+        bounty_id: req.bounty_id,
+        status: "open".to_string(),
+        created_at_ms: now,
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
+}
+
+/// Submit dispute evidence
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_dispute_evidence(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapDisputeEvidenceRequest>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: serde_json::json!({
+            "evidence_id": format!("evidence-{}", uuid::Uuid::new_v4()),
+            "submitted_at_ms": Utc::now().timestamp_millis()
+        }),
+    }))
+}
+
+/// Resolve a dispute
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_dispute_resolve(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapDisputeResolveRequest>,
+) -> Result<Json<ApiEnvelope<EvomapDisputeResponse>>, ApiError> {
+    let rid = request_id(&headers);
+    
+    let response = EvomapDisputeResponse {
+        dispute_id: req.dispute_id,
+        bounty_id: "unknown".to_string(),
+        status: "resolved".to_string(),
+        created_at_ms: Utc::now().timestamp_millis(),
+    };
+    
+    Ok(Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data: response,
+    }))
 }

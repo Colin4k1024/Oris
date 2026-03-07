@@ -13,7 +13,7 @@ use oris_kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
-const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 2;
+const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 4;
 
 fn is_valid_schema_ident(schema: &str) -> bool {
     !schema.is_empty()
@@ -264,6 +264,157 @@ impl PostgresRuntimeRepository {
                     sqlx::query(&sql_record)
                         .bind(2_i32)
                         .bind("runtime_indexes")
+                        .bind(now)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                // Migration v3: EvoMap Bounty, Swarm, Worker registry
+                if current_version < 3 {
+                    let sql_bounties = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_bounties (
+                            bounty_id TEXT PRIMARY KEY,
+                            title TEXT NOT NULL,
+                            description TEXT,
+                            reward BIGINT NOT NULL,
+                            status TEXT NOT NULL DEFAULT 'open',
+                            created_by TEXT NOT NULL,
+                            created_at_ms BIGINT NOT NULL,
+                            closed_at_ms BIGINT NULL,
+                            accepted_by TEXT NULL,
+                            accepted_at_ms BIGINT NULL
+                        )",
+                        schema
+                    );
+                    let sql_swarm = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_swarm_tasks (
+                            parent_task_id TEXT PRIMARY KEY,
+                            decomposition_json TEXT NOT NULL,
+                            proposer_id TEXT NOT NULL,
+                            proposer_reward_pct INTEGER NOT NULL DEFAULT 5,
+                            solver_reward_pct INTEGER NOT NULL DEFAULT 85,
+                            aggregator_reward_pct INTEGER NOT NULL DEFAULT 10,
+                            status TEXT NOT NULL DEFAULT 'pending',
+                            created_at_ms BIGINT NOT NULL,
+                            completed_at_ms BIGINT NULL
+                        )",
+                        schema
+                    );
+                    let sql_workers = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_workers_registry (
+                            worker_id TEXT PRIMARY KEY,
+                            domains TEXT NOT NULL,
+                            max_load INTEGER NOT NULL DEFAULT 1,
+                            metadata_json TEXT,
+                            registered_at_ms BIGINT NOT NULL,
+                            last_heartbeat_ms BIGINT NULL,
+                            status TEXT NOT NULL DEFAULT 'active'
+                        )",
+                        schema
+                    );
+                    
+                    sqlx::query(&sql_bounties).execute(&pool).await.map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_swarm).execute(&pool).await.map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_workers).execute(&pool).await.map_err(|e| e.to_string())?;
+                    
+                    let now = dt_to_ms(Utc::now());
+                    let sql_record = format!(
+                        "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT(version) DO NOTHING",
+                        schema
+                    );
+                    sqlx::query(&sql_record)
+                        .bind(3_i32)
+                        .bind("runtime_bounties_swarm_worker")
+                        .bind(now)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                // Migration v4: EvoMap Recipe, Organism, Session, Dispute
+                if current_version < 4 {
+                    let sql_recipes = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_recipes (
+                            recipe_id TEXT PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            description TEXT,
+                            gene_sequence_json TEXT NOT NULL,
+                            author_id TEXT NOT NULL,
+                            forked_from TEXT NULL,
+                            created_at_ms BIGINT NOT NULL,
+                            updated_at_ms BIGINT NOT NULL,
+                            is_public INTEGER NOT NULL DEFAULT 0
+                        )",
+                        schema
+                    );
+                    let sql_organisms = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_organisms (
+                            organism_id TEXT PRIMARY KEY,
+                            recipe_id TEXT NOT NULL,
+                            status TEXT NOT NULL DEFAULT 'pending',
+                            current_step INTEGER NOT NULL DEFAULT 0,
+                            total_steps INTEGER NOT NULL,
+                            created_at_ms BIGINT NOT NULL,
+                            completed_at_ms BIGINT NULL
+                        )",
+                        schema
+                    );
+                    let sql_sessions = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_collab_sessions (
+                            session_id TEXT PRIMARY KEY,
+                            session_type TEXT NOT NULL,
+                            creator_id TEXT NOT NULL,
+                            status TEXT NOT NULL DEFAULT 'active',
+                            created_at_ms BIGINT NOT NULL,
+                            ended_at_ms BIGINT NULL
+                        )",
+                        schema
+                    );
+                    let sql_messages = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_collab_messages (
+                            message_id TEXT PRIMARY KEY,
+                            session_id TEXT NOT NULL,
+                            sender_id TEXT NOT NULL,
+                            content TEXT NOT NULL,
+                            message_type TEXT NOT NULL DEFAULT 'message',
+                            sent_at_ms BIGINT NOT NULL
+                        )",
+                        schema
+                    );
+                    let sql_disputes = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".runtime_disputes (
+                            dispute_id TEXT PRIMARY KEY,
+                            bounty_id TEXT NOT NULL,
+                            opened_by TEXT NOT NULL,
+                            status TEXT NOT NULL DEFAULT 'open',
+                            evidence_json TEXT,
+                            resolution TEXT NULL,
+                            resolved_by TEXT NULL,
+                            resolved_at_ms BIGINT NULL,
+                            created_at_ms BIGINT NOT NULL
+                        )",
+                        schema
+                    );
+                    
+                    sqlx::query(&sql_recipes).execute(&pool).await.map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_organisms).execute(&pool).await.map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_sessions).execute(&pool).await.map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_messages).execute(&pool).await.map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_disputes).execute(&pool).await.map_err(|e| e.to_string())?;
+                    
+                    let now = dt_to_ms(Utc::now());
+                    let sql_record = format!(
+                        "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT(version) DO NOTHING",
+                        schema
+                    );
+                    sqlx::query(&sql_record)
+                        .bind(4_i32)
+                        .bind("runtime_recipes_organisms_sessions_disputes")
                         .bind(now)
                         .execute(&pool)
                         .await

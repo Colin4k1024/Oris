@@ -427,3 +427,99 @@ mod tests {
         assert!(req.negotiate_supported_protocol().is_none());
     }
 }
+
+/// Hub trust tier - defines operational permissions for a Hub
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HubTrustTier {
+    /// Full trust - allows all operations (internal/private Hub)
+    Full,
+    /// Read-only - allows only read operations (public Hub)
+    ReadOnly,
+}
+
+/// Hub operation class - classifies the type of A2A operation
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum HubOperationClass {
+    Hello,
+    Fetch,
+    Publish,
+    Revoke,
+    TaskClaim,
+    TaskComplete,
+    WorkerRegister,
+    Recipe,
+    Session,
+    Dispute,
+    Swarm,
+}
+
+impl HubOperationClass {
+    /// Returns true if the operation is read-only (allowed for ReadOnly hubs)
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, HubOperationClass::Hello | HubOperationClass::Fetch)
+    }
+}
+
+/// Hub profile - describes a Hub's capabilities and configuration
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HubProfile {
+    pub hub_id: String,
+    pub base_url: String,
+    pub trust_tier: HubTrustTier,
+    /// Priority for hub selection (higher = preferred)
+    pub priority: u32,
+    /// Optional health check endpoint
+    pub health_url: Option<String>,
+}
+
+impl HubProfile {
+    /// Check if this hub allows the given operation class
+    pub fn allows_operation(&self, operation: &HubOperationClass) -> bool {
+        match &self.trust_tier {
+            HubTrustTier::Full => true,
+            HubTrustTier::ReadOnly => operation.is_read_only(),
+        }
+    }
+}
+
+/// Hub selection policy - defines how to choose between multiple hubs
+#[derive(Clone, Debug)]
+pub struct HubSelectionPolicy {
+    /// Map operation class to allowed trust tiers
+    pub allowed_tiers_for_operation: Vec<(HubOperationClass, Vec<HubTrustTier>)>,
+    /// Default trust tiers if no specific mapping
+    pub default_allowed_tiers: Vec<HubTrustTier>,
+}
+
+impl Default for HubSelectionPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_tiers_for_operation: vec![
+                (HubOperationClass::Hello, vec![HubTrustTier::Full, HubTrustTier::ReadOnly]),
+                (HubOperationClass::Fetch, vec![HubTrustTier::Full, HubTrustTier::ReadOnly]),
+                // All write operations require Full trust
+                (HubOperationClass::Publish, vec![HubTrustTier::Full]),
+                (HubOperationClass::Revoke, vec![HubTrustTier::Full]),
+                (HubOperationClass::TaskClaim, vec![HubTrustTier::Full]),
+                (HubOperationClass::TaskComplete, vec![HubTrustTier::Full]),
+                (HubOperationClass::WorkerRegister, vec![HubTrustTier::Full]),
+                (HubOperationClass::Recipe, vec![HubTrustTier::Full]),
+                (HubOperationClass::Session, vec![HubTrustTier::Full]),
+                (HubOperationClass::Dispute, vec![HubTrustTier::Full]),
+                (HubOperationClass::Swarm, vec![HubTrustTier::Full]),
+            ],
+            default_allowed_tiers: vec![HubTrustTier::Full],
+        }
+    }
+}
+
+impl HubSelectionPolicy {
+    /// Get allowed trust tiers for a given operation
+    pub fn allowed_tiers(&self, operation: &HubOperationClass) -> &[HubTrustTier] {
+        self.allowed_tiers_for_operation
+            .iter()
+            .find(|(op, _)| op == operation)
+            .map(|(_, tiers)| tiers.as_slice())
+            .unwrap_or(&self.default_allowed_tiers)
+    }
+}
