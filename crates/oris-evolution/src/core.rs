@@ -954,6 +954,18 @@ mod tests {
     }
 
     #[test]
+    fn evomap_asset_state_mapping_archived_is_rejected() {
+        assert_eq!(
+            asset_state_to_evomap_compat(&AssetState::Archived),
+            "rejected"
+        );
+        assert_eq!(
+            asset_state_to_evomap_compat(&AssetState::Quarantined),
+            "quarantined"
+        );
+    }
+
+    #[test]
     fn append_event_assigns_monotonic_seq() {
         let root = temp_root("seq");
         let store = JsonlEvolutionStore::new(root);

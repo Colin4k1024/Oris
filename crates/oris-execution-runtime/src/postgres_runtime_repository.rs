@@ -79,6 +79,33 @@ pub struct PostgresRuntimeRepository {
     schema_ready: OnceLock<Result<(), String>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresBountyRow {
+    pub bounty_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub reward: i64,
+    pub status: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub accepted_by: Option<String>,
+    pub accepted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostgresSwarmTaskRow {
+    pub parent_task_id: String,
+    pub decomposition_json: String,
+    pub proposer_id: String,
+    pub proposer_reward_pct: i32,
+    pub solver_reward_pct: i32,
+    pub aggregator_reward_pct: i32,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
 impl PostgresRuntimeRepository {
     pub fn new(database_url: impl Into<String>) -> Self {
         let database_url = database_url.into();
@@ -313,11 +340,20 @@ impl PostgresRuntimeRepository {
                         )",
                         schema
                     );
-                    
-                    sqlx::query(&sql_bounties).execute(&pool).await.map_err(|e| e.to_string())?;
-                    sqlx::query(&sql_swarm).execute(&pool).await.map_err(|e| e.to_string())?;
-                    sqlx::query(&sql_workers).execute(&pool).await.map_err(|e| e.to_string())?;
-                    
+
+                    sqlx::query(&sql_bounties)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_swarm)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_workers)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
                     let now = dt_to_ms(Utc::now());
                     let sql_record = format!(
                         "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
@@ -398,13 +434,28 @@ impl PostgresRuntimeRepository {
                         )",
                         schema
                     );
-                    
-                    sqlx::query(&sql_recipes).execute(&pool).await.map_err(|e| e.to_string())?;
-                    sqlx::query(&sql_organisms).execute(&pool).await.map_err(|e| e.to_string())?;
-                    sqlx::query(&sql_sessions).execute(&pool).await.map_err(|e| e.to_string())?;
-                    sqlx::query(&sql_messages).execute(&pool).await.map_err(|e| e.to_string())?;
-                    sqlx::query(&sql_disputes).execute(&pool).await.map_err(|e| e.to_string())?;
-                    
+
+                    sqlx::query(&sql_recipes)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_organisms)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_sessions)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_messages)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_disputes)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
                     let now = dt_to_ms(Utc::now());
                     let sql_record = format!(
                         "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
@@ -515,6 +566,229 @@ impl PostgresRuntimeRepository {
                 lease_expires_at: ms_to_dt(row.get::<i64, _>(3)),
                 heartbeat_at: ms_to_dt(row.get::<i64, _>(4)),
                 version: row.get::<i64, _>(5) as u64,
+            }))
+        })
+    }
+
+    pub fn create_bounty(
+        &self,
+        bounty_id: &str,
+        title: &str,
+        description: Option<&str>,
+        reward: i64,
+        created_by: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<PostgresBountyRow, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty_id = bounty_id.to_string();
+        let title = title.to_string();
+        let description = description.map(|v| v.to_string());
+        let created_by = created_by.to_string();
+        let created_at_ms = dt_to_ms(created_at);
+        let bounty_id_for_insert = bounty_id.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_bounties
+                 (bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms)
+                 VALUES ($1, $2, $3, $4, 'open', $5, $6, NULL, NULL, NULL)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&bounty_id_for_insert)
+                .bind(&title)
+                .bind(description.as_deref())
+                .bind(reward)
+                .bind(&created_by)
+                .bind(created_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("create bounty", e))?;
+            Ok(())
+        })?;
+        self.get_bounty(&bounty_id)?
+            .ok_or_else(|| map_driver_err("create bounty", "missing row after insert"))
+    }
+
+    pub fn get_bounty(&self, bounty_id: &str) -> Result<Option<PostgresBountyRow>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty_id = bounty_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms
+                 FROM \"{}\".runtime_bounties
+                 WHERE bounty_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&bounty_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get bounty", e))?;
+            Ok(row.map(|r| PostgresBountyRow {
+                bounty_id: r.get::<String, _>(0),
+                title: r.get::<String, _>(1),
+                description: r.get::<Option<String>, _>(2),
+                reward: r.get::<i64, _>(3),
+                status: r.get::<String, _>(4),
+                created_by: r.get::<String, _>(5),
+                created_at: ms_to_dt(r.get::<i64, _>(6)),
+                closed_at: r.get::<Option<i64>, _>(7).map(ms_to_dt),
+                accepted_by: r.get::<Option<String>, _>(8),
+                accepted_at: r.get::<Option<i64>, _>(9).map(ms_to_dt),
+            }))
+        })
+    }
+
+    pub fn accept_bounty(
+        &self,
+        bounty_id: &str,
+        accepted_by: &str,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<bool, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty_id = bounty_id.to_string();
+        let accepted_by = accepted_by.to_string();
+        let accepted_at_ms = dt_to_ms(accepted_at);
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_bounties
+                 SET status = 'accepted',
+                     accepted_by = $2,
+                     accepted_at_ms = $3
+                 WHERE bounty_id = $1
+                   AND status = 'open'",
+                schema
+            );
+            let affected = sqlx::query(&sql)
+                .bind(&bounty_id)
+                .bind(&accepted_by)
+                .bind(accepted_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("accept bounty", e))?
+                .rows_affected();
+            Ok(affected > 0)
+        })
+    }
+
+    pub fn close_bounty(
+        &self,
+        bounty_id: &str,
+        closed_at: DateTime<Utc>,
+    ) -> Result<bool, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty_id = bounty_id.to_string();
+        let closed_at_ms = dt_to_ms(closed_at);
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_bounties
+                 SET status = 'closed',
+                     closed_at_ms = $2
+                 WHERE bounty_id = $1
+                   AND status = 'accepted'",
+                schema
+            );
+            let affected = sqlx::query(&sql)
+                .bind(&bounty_id)
+                .bind(closed_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("close bounty", e))?
+                .rows_affected();
+            Ok(affected > 0)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_swarm_task(
+        &self,
+        parent_task_id: &str,
+        decomposition_json: &str,
+        proposer_id: &str,
+        proposer_reward_pct: i32,
+        solver_reward_pct: i32,
+        aggregator_reward_pct: i32,
+        status: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<PostgresSwarmTaskRow, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let parent_task_id = parent_task_id.to_string();
+        let decomposition_json = decomposition_json.to_string();
+        let proposer_id = proposer_id.to_string();
+        let status = status.to_string();
+        let created_at_ms = dt_to_ms(created_at);
+        let parent_task_id_for_insert = parent_task_id.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_swarm_tasks
+                 (parent_task_id, decomposition_json, proposer_id, proposer_reward_pct, solver_reward_pct, aggregator_reward_pct, status, created_at_ms, completed_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&parent_task_id_for_insert)
+                .bind(&decomposition_json)
+                .bind(&proposer_id)
+                .bind(proposer_reward_pct)
+                .bind(solver_reward_pct)
+                .bind(aggregator_reward_pct)
+                .bind(&status)
+                .bind(created_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("create swarm task", e))?;
+            Ok(())
+        })?;
+        self.get_swarm_task(&parent_task_id)?
+            .ok_or_else(|| map_driver_err("create swarm task", "missing row after insert"))
+    }
+
+    pub fn get_swarm_task(
+        &self,
+        parent_task_id: &str,
+    ) -> Result<Option<PostgresSwarmTaskRow>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let parent_task_id = parent_task_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT parent_task_id, decomposition_json, proposer_id, proposer_reward_pct, solver_reward_pct, aggregator_reward_pct, status, created_at_ms, completed_at_ms
+                 FROM \"{}\".runtime_swarm_tasks
+                 WHERE parent_task_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&parent_task_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get swarm task", e))?;
+            Ok(row.map(|r| PostgresSwarmTaskRow {
+                parent_task_id: r.get::<String, _>(0),
+                decomposition_json: r.get::<String, _>(1),
+                proposer_id: r.get::<String, _>(2),
+                proposer_reward_pct: r.get::<i32, _>(3),
+                solver_reward_pct: r.get::<i32, _>(4),
+                aggregator_reward_pct: r.get::<i32, _>(5),
+                status: r.get::<String, _>(6),
+                created_at: ms_to_dt(r.get::<i64, _>(7)),
+                completed_at: r.get::<Option<i64>, _>(8).map(ms_to_dt),
             }))
         })
     }
@@ -1243,5 +1517,112 @@ mod tests {
 
         assert_eq!(dispatched, 1, "only one scheduler dispatch should succeed");
         assert_eq!(noops, 1, "one scheduler should observe conflict and noop");
+    }
+
+    #[test]
+    fn postgres_bounty_lifecycle_roundtrip_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        let now = Utc::now();
+        let created = repo
+            .create_bounty(
+                "pg-bounty-1",
+                "Implement feature X",
+                Some("details"),
+                200,
+                "alice",
+                now,
+            )
+            .expect("create bounty");
+        assert_eq!(created.status, "open");
+
+        let accepted = repo
+            .accept_bounty("pg-bounty-1", "worker-1", now + Duration::seconds(1))
+            .expect("accept bounty");
+        assert!(accepted);
+
+        let closed = repo
+            .close_bounty("pg-bounty-1", now + Duration::seconds(2))
+            .expect("close bounty");
+        assert!(closed);
+
+        let final_row = repo
+            .get_bounty("pg-bounty-1")
+            .expect("get bounty")
+            .expect("bounty exists");
+        assert_eq!(final_row.status, "closed");
+        assert_eq!(final_row.accepted_by.as_deref(), Some("worker-1"));
+        assert!(final_row.closed_at.is_some());
+    }
+
+    #[test]
+    fn postgres_bounty_invalid_transitions_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        let now = Utc::now();
+        repo.create_bounty(
+            "pg-bounty-2",
+            "Implement feature Y",
+            None,
+            100,
+            "alice",
+            now,
+        )
+        .expect("create bounty");
+
+        let close_open = repo
+            .close_bounty("pg-bounty-2", now + Duration::seconds(1))
+            .expect("close open bounty");
+        assert!(!close_open);
+
+        let accept_once = repo
+            .accept_bounty("pg-bounty-2", "worker-2", now + Duration::seconds(2))
+            .expect("accept open bounty");
+        assert!(accept_once);
+
+        let accept_again = repo
+            .accept_bounty("pg-bounty-2", "worker-3", now + Duration::seconds(3))
+            .expect("accept accepted bounty");
+        assert!(!accept_again);
+    }
+
+    #[test]
+    fn postgres_swarm_task_roundtrip_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        let now = Utc::now();
+        let decomposition_json =
+            r#"{"child_tasks":[{"task_id":"c1","description":"d1","role":"solver"}]}"#;
+
+        let created = repo
+            .create_swarm_task(
+                "pg-parent-1",
+                decomposition_json,
+                "alice",
+                5,
+                85,
+                10,
+                "pending",
+                now,
+            )
+            .expect("create swarm task");
+        assert_eq!(created.parent_task_id, "pg-parent-1");
+        assert_eq!(created.proposer_reward_pct, 5);
+        assert_eq!(created.solver_reward_pct, 85);
+        assert_eq!(created.aggregator_reward_pct, 10);
+
+        let fetched = repo
+            .get_swarm_task("pg-parent-1")
+            .expect("get swarm task")
+            .expect("swarm task exists");
+        assert_eq!(fetched.decomposition_json, decomposition_json);
+        assert_eq!(fetched.proposer_id, "alice");
+        assert_eq!(fetched.status, "pending");
     }
 }

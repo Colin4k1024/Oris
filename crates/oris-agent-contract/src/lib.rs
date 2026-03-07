@@ -495,8 +495,14 @@ impl Default for HubSelectionPolicy {
     fn default() -> Self {
         Self {
             allowed_tiers_for_operation: vec![
-                (HubOperationClass::Hello, vec![HubTrustTier::Full, HubTrustTier::ReadOnly]),
-                (HubOperationClass::Fetch, vec![HubTrustTier::Full, HubTrustTier::ReadOnly]),
+                (
+                    HubOperationClass::Hello,
+                    vec![HubTrustTier::Full, HubTrustTier::ReadOnly],
+                ),
+                (
+                    HubOperationClass::Fetch,
+                    vec![HubTrustTier::Full, HubTrustTier::ReadOnly],
+                ),
                 // All write operations require Full trust
                 (HubOperationClass::Publish, vec![HubTrustTier::Full]),
                 (HubOperationClass::Revoke, vec![HubTrustTier::Full]),

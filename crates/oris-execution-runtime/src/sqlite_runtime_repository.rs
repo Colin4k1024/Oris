@@ -11,7 +11,7 @@ use oris_kernel::identity::{RunId, Seq};
 use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
 use super::repository::RuntimeRepository;
 
-const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 11;
+const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 13;
 
 #[derive(Clone)]
 pub struct SqliteRuntimeRepository {
@@ -1726,6 +1726,231 @@ impl SqliteRuntimeRepository {
         Ok(deleted as u64)
     }
 
+    pub fn create_bounty(
+        &self,
+        bounty_id: &str,
+        title: &str,
+        description: Option<&str>,
+        reward: i64,
+        created_by: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<BountyRow, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_bounties
+             (bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, NULL, NULL, NULL)",
+            params![
+                bounty_id,
+                title,
+                description,
+                reward,
+                created_by,
+                dt_to_ms(created_at)
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("create bounty: {}", e)))?;
+        drop(conn);
+        self.get_bounty(bounty_id)?
+            .ok_or_else(|| KernelError::Driver("created bounty missing after insert".to_string()))
+    }
+
+    pub fn get_bounty(&self, bounty_id: &str) -> Result<Option<BountyRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.query_row(
+            "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms
+             FROM runtime_bounties
+             WHERE bounty_id = ?1",
+            params![bounty_id],
+            map_row_to_bounty,
+        )
+        .optional()
+        .map_err(|e| KernelError::Driver(format!("get bounty: {}", e)))
+    }
+
+    pub fn accept_bounty(
+        &self,
+        bounty_id: &str,
+        accepted_by: &str,
+        accepted_at: DateTime<Utc>,
+    ) -> Result<bool, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_bounties
+                 SET status = 'accepted',
+                     accepted_by = ?2,
+                     accepted_at_ms = ?3
+                 WHERE bounty_id = ?1
+                   AND status = 'open'",
+                params![bounty_id, accepted_by, dt_to_ms(accepted_at)],
+            )
+            .map_err(|e| KernelError::Driver(format!("accept bounty: {}", e)))?;
+        Ok(updated > 0)
+    }
+
+    pub fn close_bounty(
+        &self,
+        bounty_id: &str,
+        closed_at: DateTime<Utc>,
+    ) -> Result<bool, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_bounties
+                 SET status = 'closed',
+                     closed_at_ms = ?2
+                 WHERE bounty_id = ?1
+                   AND status = 'accepted'",
+                params![bounty_id, dt_to_ms(closed_at)],
+            )
+            .map_err(|e| KernelError::Driver(format!("close bounty: {}", e)))?;
+        Ok(updated > 0)
+    }
+
+    pub fn create_swarm_task(
+        &self,
+        parent_task_id: &str,
+        decomposition_json: &str,
+        proposer_id: &str,
+        proposer_reward_pct: i32,
+        solver_reward_pct: i32,
+        aggregator_reward_pct: i32,
+        status: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<SwarmTaskRow, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_swarm_tasks
+             (parent_task_id, decomposition_json, proposer_id, proposer_reward_pct, solver_reward_pct, aggregator_reward_pct, status, created_at_ms, completed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
+            params![
+                parent_task_id,
+                decomposition_json,
+                proposer_id,
+                proposer_reward_pct,
+                solver_reward_pct,
+                aggregator_reward_pct,
+                status,
+                dt_to_ms(created_at)
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("create swarm task: {}", e)))?;
+        drop(conn);
+        self.get_swarm_task(parent_task_id)?.ok_or_else(|| {
+            KernelError::Driver("created swarm task missing after insert".to_string())
+        })
+    }
+
+    pub fn get_swarm_task(
+        &self,
+        parent_task_id: &str,
+    ) -> Result<Option<SwarmTaskRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.query_row(
+            "SELECT parent_task_id, decomposition_json, proposer_id, proposer_reward_pct, solver_reward_pct, aggregator_reward_pct, status, created_at_ms, completed_at_ms
+             FROM runtime_swarm_tasks
+             WHERE parent_task_id = ?1",
+            params![parent_task_id],
+            map_row_to_swarm_task,
+        )
+        .optional()
+        .map_err(|e| KernelError::Driver(format!("get swarm task: {}", e)))
+    }
+
+    pub fn upsert_worker_registration(
+        &self,
+        worker_id: &str,
+        domains_json: &str,
+        max_load: i32,
+        metadata_json: Option<&str>,
+        status: &str,
+        now: DateTime<Utc>,
+    ) -> Result<WorkerRegistryRow, KernelError> {
+        let now_ms = dt_to_ms(now);
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_workers_registry
+             (worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
+             ON CONFLICT(worker_id)
+             DO UPDATE SET
+               domains = excluded.domains,
+               max_load = excluded.max_load,
+               metadata_json = excluded.metadata_json,
+               last_heartbeat_ms = excluded.last_heartbeat_ms,
+               status = excluded.status",
+            params![worker_id, domains_json, max_load, metadata_json, now_ms, status],
+        )
+        .map_err(|e| KernelError::Driver(format!("upsert worker registration: {}", e)))?;
+        drop(conn);
+        self.get_worker_registration(worker_id)?
+            .ok_or_else(|| KernelError::Driver("worker row missing after upsert".to_string()))
+    }
+
+    pub fn get_worker_registration(
+        &self,
+        worker_id: &str,
+    ) -> Result<Option<WorkerRegistryRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.query_row(
+            "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+             FROM runtime_workers_registry
+             WHERE worker_id = ?1",
+            params![worker_id],
+            map_row_to_worker_registry,
+        )
+        .optional()
+        .map_err(|e| KernelError::Driver(format!("get worker registration: {}", e)))
+    }
+
+    pub fn count_active_claims_for_worker(
+        &self,
+        worker_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<u64, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM runtime_a2a_compat_tasks
+                 WHERE claimed_by_sender_id = ?1
+                   AND lease_expires_at_ms IS NOT NULL
+                   AND lease_expires_at_ms > ?2",
+                params![worker_id, dt_to_ms(now)],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|e| KernelError::Driver(format!("count active claims for worker: {}", e)))?;
+        Ok(count.max(0) as u64)
+    }
+
     pub fn upsert_a2a_compat_task(&self, task: &A2aCompatTaskRow) -> Result<(), KernelError> {
         let conn = self
             .conn
@@ -2108,6 +2333,47 @@ fn map_row_to_a2a_compat_task(row: &rusqlite::Row) -> rusqlite::Result<A2aCompat
     })
 }
 
+fn map_row_to_bounty(row: &rusqlite::Row) -> rusqlite::Result<BountyRow> {
+    Ok(BountyRow {
+        bounty_id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get(2)?,
+        reward: row.get(3)?,
+        status: row.get(4)?,
+        created_by: row.get(5)?,
+        created_at: ms_to_dt(row.get::<_, i64>(6)?),
+        closed_at: row.get::<_, Option<i64>>(7)?.map(ms_to_dt),
+        accepted_by: row.get(8)?,
+        accepted_at: row.get::<_, Option<i64>>(9)?.map(ms_to_dt),
+    })
+}
+
+fn map_row_to_swarm_task(row: &rusqlite::Row) -> rusqlite::Result<SwarmTaskRow> {
+    Ok(SwarmTaskRow {
+        parent_task_id: row.get(0)?,
+        decomposition_json: row.get(1)?,
+        proposer_id: row.get(2)?,
+        proposer_reward_pct: row.get(3)?,
+        solver_reward_pct: row.get(4)?,
+        aggregator_reward_pct: row.get(5)?,
+        status: row.get(6)?,
+        created_at: ms_to_dt(row.get::<_, i64>(7)?),
+        completed_at: row.get::<_, Option<i64>>(8)?.map(ms_to_dt),
+    })
+}
+
+fn map_row_to_worker_registry(row: &rusqlite::Row) -> rusqlite::Result<WorkerRegistryRow> {
+    Ok(WorkerRegistryRow {
+        worker_id: row.get(0)?,
+        domains_json: row.get(1)?,
+        max_load: row.get(2)?,
+        metadata_json: row.get(3)?,
+        registered_at: ms_to_dt(row.get::<_, i64>(4)?),
+        last_heartbeat_at: row.get::<_, Option<i64>>(5)?.map(ms_to_dt),
+        status: row.get(6)?,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct InterruptRow {
     pub interrupt_id: String,
@@ -2143,6 +2409,44 @@ pub struct A2aSessionRow {
     pub negotiated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BountyRow {
+    pub bounty_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub reward: i64,
+    pub status: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub accepted_by: Option<String>,
+    pub accepted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SwarmTaskRow {
+    pub parent_task_id: String,
+    pub decomposition_json: String,
+    pub proposer_id: String,
+    pub proposer_reward_pct: i32,
+    pub solver_reward_pct: i32,
+    pub aggregator_reward_pct: i32,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerRegistryRow {
+    pub worker_id: String,
+    pub domains_json: String,
+    pub max_load: i32,
+    pub metadata_json: Option<String>,
+    pub registered_at: DateTime<Utc>,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3989,5 +4293,163 @@ mod tests {
             .expect("read attempt status")
             .expect("attempt exists");
         assert_eq!(status, AttemptExecutionStatus::Queued);
+    }
+
+    #[test]
+    fn bounty_lifecycle_create_accept_close_roundtrip() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        let created = repo
+            .create_bounty(
+                "bounty-1",
+                "Implement feature X",
+                Some("details"),
+                100,
+                "alice",
+                now,
+            )
+            .expect("create bounty");
+        assert_eq!(created.status, "open");
+        assert_eq!(created.accepted_by, None);
+
+        let accepted = repo
+            .accept_bounty("bounty-1", "worker-1", now + Duration::seconds(1))
+            .expect("accept bounty");
+        assert!(accepted);
+
+        let after_accept = repo
+            .get_bounty("bounty-1")
+            .expect("read bounty after accept")
+            .expect("bounty exists");
+        assert_eq!(after_accept.status, "accepted");
+        assert_eq!(after_accept.accepted_by.as_deref(), Some("worker-1"));
+
+        let closed = repo
+            .close_bounty("bounty-1", now + Duration::seconds(2))
+            .expect("close bounty");
+        assert!(closed);
+
+        let after_close = repo
+            .get_bounty("bounty-1")
+            .expect("read bounty after close")
+            .expect("bounty exists");
+        assert_eq!(after_close.status, "closed");
+        assert!(after_close.closed_at.is_some());
+    }
+
+    #[test]
+    fn bounty_lifecycle_invalid_transitions_are_rejected() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        repo.create_bounty("bounty-2", "Implement feature Y", None, 50, "alice", now)
+            .expect("create bounty");
+
+        let close_while_open = repo
+            .close_bounty("bounty-2", now + Duration::seconds(1))
+            .expect("close open bounty");
+        assert!(!close_while_open);
+
+        let first_accept = repo
+            .accept_bounty("bounty-2", "worker-2", now + Duration::seconds(2))
+            .expect("accept open bounty");
+        assert!(first_accept);
+
+        let second_accept = repo
+            .accept_bounty("bounty-2", "worker-3", now + Duration::seconds(3))
+            .expect("accept accepted bounty");
+        assert!(!second_accept);
+
+        let missing_close = repo
+            .close_bounty("bounty-missing", now + Duration::seconds(4))
+            .expect("close missing bounty");
+        assert!(!missing_close);
+    }
+
+    #[test]
+    fn swarm_task_create_and_get_roundtrip() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        let decomposition_json =
+            r#"{"child_tasks":[{"task_id":"c1","description":"d1","role":"solver"}]}"#;
+
+        let created = repo
+            .create_swarm_task(
+                "parent-1",
+                decomposition_json,
+                "alice",
+                5,
+                85,
+                10,
+                "pending",
+                now,
+            )
+            .expect("create swarm task");
+        assert_eq!(created.parent_task_id, "parent-1");
+        assert_eq!(created.proposer_reward_pct, 5);
+        assert_eq!(created.solver_reward_pct, 85);
+        assert_eq!(created.aggregator_reward_pct, 10);
+        assert_eq!(created.status, "pending");
+
+        let fetched = repo
+            .get_swarm_task("parent-1")
+            .expect("get swarm task")
+            .expect("swarm task exists");
+        assert_eq!(fetched.decomposition_json, decomposition_json);
+        assert_eq!(fetched.proposer_id, "alice");
+    }
+
+    #[test]
+    fn worker_registration_upsert_and_read_roundtrip() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        let row = repo
+            .upsert_worker_registration(
+                "worker-1",
+                r#"["docs","ci"]"#,
+                2,
+                Some(r#"{"region":"cn"}"#),
+                "active",
+                now,
+            )
+            .expect("upsert worker");
+        assert_eq!(row.worker_id, "worker-1");
+        assert_eq!(row.max_load, 2);
+        assert_eq!(row.status, "active");
+
+        let fetched = repo
+            .get_worker_registration("worker-1")
+            .expect("get worker")
+            .expect("worker exists");
+        assert_eq!(fetched.domains_json, r#"["docs","ci"]"#);
+        assert_eq!(fetched.max_load, 2);
+    }
+
+    #[test]
+    fn worker_active_claim_count_tracks_unexpired_leases() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("create sqlite repo");
+        let now = Utc::now();
+        repo.upsert_a2a_compat_task(&A2aCompatTaskRow {
+            session_id: "session-worker-1".to_string(),
+            sender_id: "worker-1".to_string(),
+            protocol_version: "1.0.0".to_string(),
+            task_id: "task-worker-1".to_string(),
+            task_summary: "task".to_string(),
+            dispatch_id: "dispatch-worker-1".to_string(),
+            claimed_by_sender_id: Some("worker-1".to_string()),
+            lease_expires_at: Some(now + Duration::seconds(30)),
+            enqueued_at: now,
+            updated_at: now,
+        })
+        .expect("insert claimed task");
+
+        let active = repo
+            .count_active_claims_for_worker("worker-1", now)
+            .expect("count active claims");
+        assert_eq!(active, 1);
+
+        let after_expiry = repo
+            .count_active_claims_for_worker("worker-1", now + Duration::seconds(31))
+            .expect("count claims after expiry");
+        assert_eq!(after_expiry, 0);
     }
 }
