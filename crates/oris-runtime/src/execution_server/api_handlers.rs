@@ -71,8 +71,9 @@ use crate::execution_runtime::repository::RuntimeRepository;
 use crate::execution_runtime::sqlite_runtime_repository::{A2aCompatTaskRow, A2aSessionRow};
 #[cfg(feature = "sqlite-persistence")]
 use crate::execution_runtime::sqlite_runtime_repository::{
-    AttemptTraceContextRow, AuditLogEntry, DeadLetterRow, ReplayEffectClaim, RetryPolicyConfig,
-    RetryStrategy, SqliteRuntimeRepository, StepReportWriteResult, TimeoutPolicyConfig,
+    AttemptTraceContextRow, AuditLogEntry, DeadLetterRow, OrganismRow, RecipeRow,
+    ReplayEffectClaim, RetryPolicyConfig, RetryStrategy, SqliteRuntimeRepository,
+    StepReportWriteResult, TimeoutPolicyConfig,
 };
 use crate::graph::{CompiledGraph, MessagesState};
 use tracing::{info_span, Instrument};
@@ -19126,20 +19127,52 @@ pub async fn evomap_recipe_create(
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
     let rid = request_id(&headers);
     let recipe_id = format!("recipe-{}", uuid::Uuid::new_v4());
-    let now = Utc::now().timestamp_millis();
+    let now = Utc::now();
 
-    let response = EvomapRecipeResponse {
-        recipe_id: recipe_id.clone(),
-        name: req.name,
-        author_id: req.author_id,
-        created_at_ms: now,
-    };
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        let recipe = RecipeRow {
+            recipe_id: recipe_id.clone(),
+            name: req.name.clone(),
+            description: req.description.clone(),
+            gene_sequence_json: req.gene_sequence_json.clone(),
+            author_id: req.author_id.clone(),
+            forked_from: None,
+            created_at: now,
+            updated_at: now,
+            is_public: req.is_public.unwrap_or(false),
+        };
+        repo.create_recipe(&recipe).map_err(|e| {
+            ApiError::internal(format!("create recipe: {e}")).with_request_id(rid.clone())
+        })?;
+        let response = EvomapRecipeResponse {
+            recipe_id,
+            name: req.name,
+            author_id: req.author_id,
+            created_at_ms: now.timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: response,
-    }))
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let response = EvomapRecipeResponse {
+            recipe_id,
+            name: req.name,
+            author_id: req.author_id,
+            created_at_ms: Utc::now().timestamp_millis(),
+        };
+        Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }))
+    }
 }
 
 /// Get a recipe
@@ -19154,18 +19187,44 @@ pub async fn evomap_recipe_get(
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
     let rid = request_id(&headers);
 
-    let response = EvomapRecipeResponse {
-        recipe_id: recipe_id.clone(),
-        name: "Sample Recipe".to_string(),
-        author_id: "system".to_string(),
-        created_at_ms: Utc::now().timestamp_millis(),
-    };
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        let recipe = repo.get_recipe(&recipe_id).map_err(|e| {
+            ApiError::internal(format!("get recipe: {e}")).with_request_id(rid.clone())
+        })?;
+        let Some(recipe) = recipe else {
+            return Err(
+                ApiError::not_found(format!("recipe not found: {recipe_id}")).with_request_id(rid),
+            );
+        };
+        let response = EvomapRecipeResponse {
+            recipe_id: recipe.recipe_id,
+            name: recipe.name,
+            author_id: recipe.author_id,
+            created_at_ms: recipe.created_at.timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: response,
-    }))
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let response = EvomapRecipeResponse {
+            recipe_id: recipe_id.clone(),
+            name: "Sample Recipe".to_string(),
+            author_id: "system".to_string(),
+            created_at_ms: Utc::now().timestamp_millis(),
+        };
+        Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }))
+    }
 }
 
 /// Fork a recipe
@@ -19181,19 +19240,74 @@ pub async fn evomap_recipe_fork(
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
     let rid = request_id(&headers);
     let new_recipe_id = format!("recipe-{}", uuid::Uuid::new_v4());
+    let now = Utc::now();
 
-    let response = EvomapRecipeResponse {
-        recipe_id: new_recipe_id,
-        name: format!("Forked {}", recipe_id),
-        author_id: "current_user".to_string(),
-        created_at_ms: Utc::now().timestamp_millis(),
-    };
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        // Get the original recipe
+        let original = repo.get_recipe(&recipe_id).map_err(|e| {
+            ApiError::internal(format!("get original recipe: {e}")).with_request_id(rid.clone())
+        })?;
+        let Some(original) = original else {
+            return Err(
+                ApiError::not_found(format!("recipe not found: {recipe_id}")).with_request_id(rid),
+            );
+        };
+        // Parse author_id from request
+        let author_id = req
+            .get("author_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        // Parse name from request or use default
+        let name = req
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("Forked {}", original.name));
+        // Create forked recipe
+        let forked = RecipeRow {
+            recipe_id: new_recipe_id.clone(),
+            name,
+            description: original.description,
+            gene_sequence_json: original.gene_sequence_json,
+            author_id,
+            forked_from: Some(recipe_id),
+            created_at: now,
+            updated_at: now,
+            is_public: original.is_public,
+        };
+        repo.create_recipe(&forked).map_err(|e| {
+            ApiError::internal(format!("fork recipe: {e}")).with_request_id(rid.clone())
+        })?;
+        let response = EvomapRecipeResponse {
+            recipe_id: new_recipe_id,
+            name: forked.name,
+            author_id: forked.author_id,
+            created_at_ms: now.timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: response,
-    }))
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let response = EvomapRecipeResponse {
+            recipe_id: new_recipe_id,
+            name: format!("Forked {}", recipe_id),
+            author_id: "current_user".to_string(),
+            created_at_ms: Utc::now().timestamp_millis(),
+        };
+        Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }))
+    }
 }
 
 /// Organism express request
@@ -19234,22 +19348,66 @@ pub async fn evomap_organism_express(
 ) -> Result<Json<ApiEnvelope<EvomapOrganismResponse>>, ApiError> {
     let rid = request_id(&headers);
     let organism_id = format!("organism-{}", uuid::Uuid::new_v4());
-    let now = Utc::now().timestamp_millis();
+    let now = Utc::now();
 
-    let response = EvomapOrganismResponse {
-        organism_id: organism_id.clone(),
-        recipe_id: req.recipe_id,
-        status: "running".to_string(),
-        current_step: 0,
-        total_steps: 3,
-        created_at_ms: now,
-    };
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        // Verify recipe exists
+        let recipe = repo.get_recipe(&req.recipe_id).map_err(|e| {
+            ApiError::internal(format!("get recipe: {e}")).with_request_id(rid.clone())
+        })?;
+        if recipe.is_none() {
+            return Err(
+                ApiError::not_found(format!("recipe not found: {}", req.recipe_id))
+                    .with_request_id(rid),
+            );
+        }
+        // Parse total_steps from recipe's gene_sequence or default to 3
+        let total_steps = 3; // TODO: parse from gene_sequence_json
+        let organism = OrganismRow {
+            organism_id: organism_id.clone(),
+            recipe_id: req.recipe_id.clone(),
+            status: "running".to_string(),
+            current_step: 0,
+            total_steps,
+            created_at: now,
+            completed_at: None,
+        };
+        repo.create_organism(&organism).map_err(|e| {
+            ApiError::internal(format!("create organism: {e}")).with_request_id(rid.clone())
+        })?;
+        let response = EvomapOrganismResponse {
+            organism_id,
+            recipe_id: req.recipe_id,
+            status: "running".to_string(),
+            current_step: 0,
+            total_steps,
+            created_at_ms: now.timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: response,
-    }))
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let response = EvomapOrganismResponse {
+            organism_id,
+            recipe_id: req.recipe_id,
+            status: "running".to_string(),
+            current_step: 0,
+            total_steps: 3,
+            created_at_ms: now.timestamp_millis(),
+        };
+        Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }))
+    }
 }
 
 /// Get organism status
@@ -19264,20 +19422,49 @@ pub async fn evomap_organism_get(
 ) -> Result<Json<ApiEnvelope<EvomapOrganismResponse>>, ApiError> {
     let rid = request_id(&headers);
 
-    let response = EvomapOrganismResponse {
-        organism_id: organism_id.clone(),
-        recipe_id: "sample-recipe".to_string(),
-        status: "running".to_string(),
-        current_step: 1,
-        total_steps: 3,
-        created_at_ms: Utc::now().timestamp_millis(),
-    };
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let repo = runtime_repo(&state, &rid)?;
+        let organism = repo.get_organism(&organism_id).map_err(|e| {
+            ApiError::internal(format!("get organism: {e}")).with_request_id(rid.clone())
+        })?;
+        let Some(organism) = organism else {
+            return Err(
+                ApiError::not_found(format!("organism not found: {organism_id}"))
+                    .with_request_id(rid),
+            );
+        };
+        let response = EvomapOrganismResponse {
+            organism_id: organism.organism_id,
+            recipe_id: organism.recipe_id,
+            status: organism.status,
+            current_step: organism.current_step,
+            total_steps: organism.total_steps,
+            created_at_ms: organism.created_at.timestamp_millis(),
+        };
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }));
+    }
 
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: response,
-    }))
+    #[cfg(not(feature = "sqlite-persistence"))]
+    {
+        let response = EvomapOrganismResponse {
+            organism_id: organism_id.clone(),
+            recipe_id: "sample-recipe".to_string(),
+            status: "running".to_string(),
+            current_step: 1,
+            total_steps: 3,
+            created_at_ms: Utc::now().timestamp_millis(),
+        };
+        Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: response,
+        }))
+    }
 }
 
 /// Session join request

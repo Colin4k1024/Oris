@@ -2089,6 +2089,180 @@ impl SqliteRuntimeRepository {
         Ok(updated > 0)
     }
 
+    // ========== Recipe Methods ==========
+
+    pub fn create_recipe(&self, recipe: &RecipeRow) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_recipes (
+                recipe_id, name, description, gene_sequence_json, author_id,
+                forked_from, created_at_ms, updated_at_ms, is_public
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                recipe.recipe_id,
+                recipe.name,
+                recipe.description,
+                recipe.gene_sequence_json,
+                recipe.author_id,
+                recipe.forked_from,
+                dt_to_ms(recipe.created_at),
+                dt_to_ms(recipe.updated_at),
+                recipe.is_public as i32,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("create recipe: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn get_recipe(&self, recipe_id: &str) -> Result<Option<RecipeRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT recipe_id, name, description, gene_sequence_json, author_id,
+                        forked_from, created_at_ms, updated_at_ms, is_public
+                 FROM runtime_recipes WHERE recipe_id = ?1",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare get recipe: {}", e)))?;
+        let result = stmt
+            .query_row(params![recipe_id], |row| {
+                Ok(RecipeRow {
+                    recipe_id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    gene_sequence_json: row.get(3)?,
+                    author_id: row.get(4)?,
+                    forked_from: row.get(5)?,
+                    created_at: ms_to_dt(row.get::<_, i64>(6)?),
+                    updated_at: ms_to_dt(row.get::<_, i64>(7)?),
+                    is_public: row.get::<_, i32>(8)? != 0,
+                })
+            })
+            .optional()
+            .map_err(|e| KernelError::Driver(format!("get recipe: {}", e)))?;
+        Ok(result)
+    }
+
+    pub fn list_recipes_by_author(&self, author_id: &str) -> Result<Vec<RecipeRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT recipe_id, name, description, gene_sequence_json, author_id,
+                        forked_from, created_at_ms, updated_at_ms, is_public
+                 FROM runtime_recipes WHERE author_id = ?1 ORDER BY created_at_ms DESC",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare list recipes: {}", e)))?;
+        let rows = stmt
+            .query_map(params![author_id], |row| {
+                Ok(RecipeRow {
+                    recipe_id: row.get(0)?,
+                    name: row.get(1)?,
+                    description: row.get(2)?,
+                    gene_sequence_json: row.get(3)?,
+                    author_id: row.get(4)?,
+                    forked_from: row.get(5)?,
+                    created_at: ms_to_dt(row.get::<_, i64>(6)?),
+                    updated_at: ms_to_dt(row.get::<_, i64>(7)?),
+                    is_public: row.get::<_, i32>(8)? != 0,
+                })
+            })
+            .map_err(|e| KernelError::Driver(format!("list recipes: {}", e)))?;
+        let mut recipes = Vec::new();
+        for row in rows {
+            recipes.push(row.map_err(|e| KernelError::Driver(format!("iterate recipes: {}", e)))?);
+        }
+        Ok(recipes)
+    }
+
+    // ========== Organism Methods ==========
+
+    pub fn create_organism(&self, organism: &OrganismRow) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_organisms (
+                organism_id, recipe_id, status, current_step, total_steps,
+                created_at_ms, completed_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                organism.organism_id,
+                organism.recipe_id,
+                organism.status,
+                organism.current_step,
+                organism.total_steps,
+                dt_to_ms(organism.created_at),
+                organism.completed_at.map(dt_to_ms),
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("create organism: {}", e)))?;
+        Ok(())
+    }
+
+    pub fn get_organism(&self, organism_id: &str) -> Result<Option<OrganismRow>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT organism_id, recipe_id, status, current_step, total_steps,
+                        created_at_ms, completed_at_ms
+                 FROM runtime_organisms WHERE organism_id = ?1",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare get organism: {}", e)))?;
+        let result = stmt
+            .query_row(params![organism_id], |row| {
+                Ok(OrganismRow {
+                    organism_id: row.get(0)?,
+                    recipe_id: row.get(1)?,
+                    status: row.get(2)?,
+                    current_step: row.get(3)?,
+                    total_steps: row.get(4)?,
+                    created_at: ms_to_dt(row.get::<_, i64>(5)?),
+                    completed_at: row.get::<_, Option<i64>>(6)?.map(ms_to_dt),
+                })
+            })
+            .optional()
+            .map_err(|e| KernelError::Driver(format!("get organism: {}", e)))?;
+        Ok(result)
+    }
+
+    pub fn update_organism_status(
+        &self,
+        organism_id: &str,
+        status: &str,
+        current_step: i32,
+    ) -> Result<bool, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let completed_at_ms: Option<i64> = if status == "completed" {
+            Some(dt_to_ms(Utc::now()))
+        } else {
+            None
+        };
+        let updated = conn
+            .execute(
+                "UPDATE runtime_organisms
+                 SET status = ?2, current_step = ?3, completed_at_ms = ?4
+                 WHERE organism_id = ?1",
+                params![organism_id, status, current_step, completed_at_ms],
+            )
+            .map_err(|e| KernelError::Driver(format!("update organism status: {}", e)))?;
+        Ok(updated > 0)
+    }
+
     pub fn upsert_a2a_compat_task(&self, task: &A2aCompatTaskRow) -> Result<(), KernelError> {
         let conn = self
             .conn
@@ -2612,6 +2786,30 @@ pub struct DisputeRow {
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub evidence_json: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecipeRow {
+    pub recipe_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub gene_sequence_json: String,
+    pub author_id: String,
+    pub forked_from: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub is_public: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrganismRow {
+    pub organism_id: String,
+    pub recipe_id: String,
+    pub status: String,
+    pub current_step: i32,
+    pub total_steps: i32,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
