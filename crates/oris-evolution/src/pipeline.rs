@@ -315,7 +315,11 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage_states.push(stage);
 
             let input = SelectorInput {
-                signals: context.signals.iter().map(|s| s.description.clone()).collect(),
+                signals: context
+                    .signals
+                    .iter()
+                    .map(|s| s.description.clone())
+                    .collect(),
                 env: crate::core::EnvFingerprint {
                     rustc_version: String::new(),
                     cargo_lock_hash: String::new(),
@@ -497,7 +501,11 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             }
             PipelineStage::Select => {
                 let input = SelectorInput {
-                    signals: context.signals.iter().map(|s| s.description.clone()).collect(),
+                    signals: context
+                        .signals
+                        .iter()
+                        .map(|s| s.description.clone())
+                        .collect(),
                     env: crate::core::EnvFingerprint {
                         rustc_version: String::new(),
                         cargo_lock_hash: String::new(),
