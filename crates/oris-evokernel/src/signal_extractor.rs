@@ -435,53 +435,6 @@ impl Default for RuntimeSignalExtractor {
     }
 }
 
-/// Convert runtime signals to evolution signals
-impl From<&RuntimeSignal> for oris_evolution::EvolutionSignal {
-    fn from(runtime: &RuntimeSignal) -> Self {
-        let signal_type = match runtime.signal_type {
-            RuntimeSignalType::CompilerDiagnostic => oris_evolution::SignalType::Performance {
-                metric: "compiler_diagnostic".to_string(),
-                improvement_potential: runtime.confidence,
-            },
-            RuntimeSignalType::RuntimePanic => oris_evolution::SignalType::ErrorPattern {
-                error_type: "panic".to_string(),
-                frequency: 1,
-            },
-            RuntimeSignalType::Timeout => oris_evolution::SignalType::ErrorPattern {
-                error_type: "timeout".to_string(),
-                frequency: 1,
-            },
-            RuntimeSignalType::TestFailure => oris_evolution::SignalType::ErrorPattern {
-                error_type: "test_failure".to_string(),
-                frequency: 1,
-            },
-            RuntimeSignalType::PerformanceIssue => oris_evolution::SignalType::Performance {
-                metric: runtime.content.clone(),
-                improvement_potential: runtime.confidence,
-            },
-            RuntimeSignalType::ResourceExhaustion => {
-                oris_evolution::SignalType::ResourceOptimization {
-                    resource_type: "memory_or_cpu".to_string(),
-                    current_usage: 1.0 - runtime.confidence,
-                }
-            }
-            _ => oris_evolution::SignalType::QualityIssue {
-                issue_type: "runtime_error".to_string(),
-                severity: runtime.confidence,
-            },
-        };
-
-        oris_evolution::EvolutionSignal {
-            signal_id: runtime.signal_id.clone(),
-            signal_type,
-            source_task_id: "runtime".to_string(),
-            confidence: runtime.confidence,
-            description: runtime.content.clone(),
-            metadata: runtime.metadata.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
