@@ -1,6 +1,7 @@
 //! EvoKernel orchestration: mutation capture, validation, capsule construction, and replay-first reuse.
 
 mod core;
+pub mod signal_extractor;
 
 /// Experimental external agent contract facade re-exported through EvoKernel.
 pub mod agent_contract {

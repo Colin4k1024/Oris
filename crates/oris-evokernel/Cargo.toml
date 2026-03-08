@@ -18,7 +18,9 @@ oris-governor = { version = "0.3.0", path = "../oris-governor" }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel" }
 oris-sandbox = { version = "0.2.0", path = "../oris-sandbox" }
 oris-spec = { version = "0.2.0", path = "../oris-spec" }
+regex-lite = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0.0"
 tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
