@@ -25,7 +25,8 @@
       "WebSearch",
       "WebFetch(domain:evolvemap.ai)",
       "WebFetch(domain:evomap.ai)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Bash(cargo run:*)"
     ]
   }
 }

@@ -4,9 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Oris is a **durable execution runtime for reasoning-driven software systems** written in Rust. It provides stateful graphs, agents, tools, and multi-step execution capabilities—similar to Temporal or Ray but designed for AI/ML workloads.
+Oris is a **self-evolving execution runtime** — software that reasons, learns, and improves itself. It combines durable execution with self-evolution capabilities where software can:
+- **Detect** problems from runtime signals (compiler diagnostics, panics, test failures)
+- **Select** the best candidate gene for solving the problem
+- **Mutate** generate solutions based on successful patterns
+- **Execute** sandboxed mutations safely
+- **Validate** ensure correctness before promotion
+- **Evaluate** measure improvement vs regression
+- **Solidify** promote successful mutations to reusable genes
+- **Reuse** apply proven solutions from the gene pool
 
-The main crate is `oris-runtime` in `crates/oris-runtime/`. This is a Cargo workspace with multiple examples in `examples/`.
+The main crate is `oris-runtime` in `crates/oris-runtime/`. This is a Cargo workspace with examples in `examples/`.
 
 ## Common Commands
 
@@ -60,6 +68,9 @@ cargo fmt --all
 | **vectorstore/** | Vector stores (pgvector, Qdrant, SQLite, SurrealDB, etc.) |
 | **document_loaders/** | PDF, HTML, CSV, Git, S3 loaders |
 | **rag/** | RAG implementations (agentic, hybrid, two-step) |
+| **evolution/** | Self-evolution: Gene, Capsule, Selector, Pipeline, Confidence |
+| **intake/** | Issue intake, deduplication, prioritization |
+| **evokernel/** | Signal extraction from runtime diagnostics |
 
 ### Key Abstractions
 
@@ -72,6 +83,32 @@ cargo fmt --all
 **Agent** (`agent/agent.rs`): Trait for building agents with `plan()` and `get_tools()` methods.
 
 **Tool** (`tools/tool.rs`): Trait for implementing tools that agents can call.
+
+### Evolution Crates
+
+| Crate | Purpose |
+|-------|---------|
+| `oris-evolution` | Core: Gene, Capsule, EvolutionEvent, Selector, Pipeline, Confidence |
+| `oris-evokernel` | Signal extraction from runtime diagnostics |
+| `oris-intake` | Issue intake, deduplication, prioritization |
+| `oris-evolution-network` | A2A protocol for evolution agents |
+| `oris-sandbox` | Safe mutation execution |
+
+### Running Evolution Examples
+
+```bash
+# Run canonical evolution example
+cargo run -p evo_oris_repo
+
+# Run supervised dev loop
+cargo run -p evo_oris_repo --bin supervised_devloop
+
+# Run network exchange
+cargo run -p evo_oris_repo --bin network_exchange
+
+# Run evolution feature wiring test
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+```
 
 ### Stable API (0.1.x)
 
@@ -99,6 +136,8 @@ This repository follows an **issue-driven GitHub workflow**. When working on mai
 
 See `skills/oris-maintainer/SKILL.md` and `skills/oris-maintainer/references/command-checklist.md` for the full workflow.
 
+**Cursor Rules**: When working in Cursor, see `.cursor/rules/oris-maintainer.mdc` for maintainer process guidelines.
+
 ## Feature Flags
 
 Key features for common use cases:
@@ -107,6 +146,9 @@ Key features for common use cases:
 - `ollama` — Local LLM support
 - `execution-server` — HTTP API server
 - `surrealdb`, `qdrant`, `chroma` — Vector stores
+- `evolution-experimental` — Core `oris_runtime::evolution`
+- `full-evolution-experimental` — End-to-end facade (evolution, governor, network, economics)
+- `a2a-production` — Production `/a2a/*` runtime boundary
 
 ## Environment Variables
 
