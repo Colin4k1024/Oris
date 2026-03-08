@@ -1,96 +1,88 @@
 # Oris
 
-**Oris is an execution runtime for software that reasons before it acts.**
+**Oris is a self-evolving execution runtime — software that reasons, learns, and improves itself.**
 
 [![Latest Version](https://img.shields.io/crates/v/oris-runtime.svg)](https://crates.io/crates/oris-runtime)
 [![docs.rs](https://img.shields.io/docsrs/oris-runtime)](https://docs.rs/oris-runtime)
 
-Modern AI systems are no longer single API calls.
+---
 
-They are long-running processes involving:
+## Evolution First
 
-* planning
-* tool execution
-* memory updates
-* retries
-* human approval
-* continuation across failures
+> **The next generation of software doesn't just execute — it evolves.**
 
-Today, this logic lives in fragile background jobs, queues, and ad-hoc orchestration code.
+Traditional runtimes execute code. Oris evolves it.
 
-**Oris turns reasoning into a first-class executable system.**
+Oris provides a closed-loop self-evolution system where software can:
+
+* **Detect** problems from runtime signals (compiler diagnostics, panics, test failures)
+* **Select** the best candidate gene for solving the problem
+* **Mutate** generate solutions based on successful patterns
+* **Execute** sandboxed mutations safely
+* **Validate** ensure correctness before promotion
+* **Evaluate** measure improvement vs regression
+* **Solidify** promote successful mutations to reusable genes
+* **Reuse** apply proven solutions from the gene pool
+
+This is **autonomous software improvement** — the execution runtime that makes your code get better on its own.
 
 ---
 
-## What Oris Is
+## EvoMap Alignment
 
-Oris is **not**:
+Oris aligns with [EvoMap](https://evomap.ai) principles:
 
-* a prompt framework
-* an agent SDK
-* a chat orchestration library
+| EvoMap Concept | Oris Implementation |
+|---------------|---------------------|
+| Worker Pool | `EvolutionPipeline` with 8 stages |
+| Task Queue | Signal extraction → Gene selection |
+| Bounty System | Issue intake with priority scoring |
+| A2A Protocol | `oris-evolution-network` crate |
 
-Oris is closer to:
-
-> **Temporal or Ray — but designed for reasoning workloads.**
-
-It provides a durable execution environment where AI processes can:
-
-* persist state
-* pause and resume safely
-* survive crashes or deployments
-* replay execution deterministically
-* coordinate tools and humans
+See [EvoMap Alignment](docs/evokernel/evomap.md) for detailed protocol alignment.
 
 ---
 
-## Core Idea
+## What Oris Provides
 
-If:
+Oris combines durable execution with self-evolution:
 
-* databases manage **data**
-* message queues manage **communication**
+| Traditional Runtime | Oris |
+|-------------------|------|
+| Execute code once | Execute + evolve continuously |
+| Manual fixes | Automated gene improvement |
+| Static workflows | Adaptive mutation pipelines |
+| Point-in-time recovery | Replay-first confidence lifecycle |
 
-then:
+Oris is built on:
 
-> **Oris manages reasoning processes.**
-
----
-
-## Why Oris Exists
-
-LLMs fundamentally changed backend architecture.
-
-We are moving from:
-
-```
-request → response
-```
-
-to:
-
-```
-goal → reasoning → decisions → actions → memory → continuation
-```
-
-This is no longer an API problem.
-
-It is an **execution problem**.
-
-Oris introduces an execution kernel purpose-built for reasoning systems.
+* **Durable execution** — persist state, pause/resume, survive crashes
+* **Deterministic replay** — replay from any checkpoint
+* **Confidence lifecycle** — automatic decay/boost based on reuse success
+* **Issue intake** — automated problem detection and prioritization
 
 ---
 
-## Positioning
+## Quick start (30 seconds)
 
-Oris aims to become:
+Add the crate and set your API key:
 
-> **The execution OS for reasoning-driven software systems.**
+```bash
+cargo add oris-runtime
+export OPENAI_API_KEY="your-key"
+```
 
-Where traditional workflow engines orchestrate tasks,
-Oris orchestrates **decision-making processes**.
+Enable evolution features:
 
-See [Oris 2.0 Strategy & Evolution Blueprint](docs/ORIS_2.0_STRATEGY.md) for architecture, axioms, and roadmap.
+```bash
+cargo add oris-runtime --features full-evolution-experimental
+```
+
+Run the evolution example:
+
+```bash
+cargo run -p evo_oris_repo
+```
 
 ---
 
@@ -98,55 +90,88 @@ See [Oris 2.0 Strategy & Evolution Blueprint](docs/ORIS_2.0_STRATEGY.md) for arc
 
 | | Oris | Temporal | LangGraph |
 |---|------|----------|-----------|
-| **Domain** | Reasoning processes | Task workflows | Agent graphs |
-| **First-class** | Decision-making, LLM state | Tasks, activities | Chat, messages |
-| **Replay** | Deterministic (reasoning) | Deterministic (tasks) | Limited |
+| **Core Focus** | Self-evolving code | Task workflows | Agent graphs |
+| **Evolution** | Gene/Capsule lifecycle | N/A | N/A |
+| **Confidence** | Automatic decay/boost | Manual | N/A |
+| **Replay** | Deterministic + confidence | Deterministic (tasks) | Limited |
 | **Interrupt** | Human-in-the-loop native | External | Via nodes |
 
-LangGraph users will understand it. Temporal users will respect it. Rust users will try it.
+Oris is the **only** runtime with built-in self-evolution capabilities.
 
 ---
 
 ## What You Can Build
 
-* autonomous coding systems
-* long-running research agents
-* human-approval workflows
-* operational copilots
-* AI backend pipelines
-* durable agent infrastructure
+* **Self-improving agents** — agents that fix their own bugs
+* **Auto-repair pipelines** — automated issue detection and resolution
+* **Evolutionary code generation** — mutate and validate at scale
+* **Confidence-aware caching** — replay-first with automatic confidence decay
+* **Autonomous dev loops** — continuous improvement without human intervention
+* **Durable agent infrastructure** — with evolution on top
 
 ---
 
 ## Design Principles
 
-* Durable by default
-* Interruptible execution
-* Deterministic replay
-* Stateful reasoning
-* Tooling as system actions
-* Execution over prompting
+* **Evolution by default** — every execution can improve the system
+* **Durable execution** — persist state, pause/resume, survive crashes
+* **Deterministic replay** — replay from any checkpoint
+* **Confidence lifecycle** — automatic decay/boost based on reuse success
+* **Sandboxed mutations** — safe execution before promotion
+* **Human-in-the-loop** — approve or reject evolution proposals
 
 ---
 
-## Mental Model
+## Architecture
 
 ```
-Application Logic
+User Request
         ↓
-Reasoning Graph
+Signal Extraction (Detect)
         ↓
-Oris Runtime
+Gene Selection (Select)
         ↓
-LLMs / Tools / Memory / Humans
+Mutation Proposal (Mutate)
+        ↓
+Sandbox Execution (Execute)
+        ↓
+Validation + Evaluation
+        ↓
+Solidify → Gene Pool
+        ↓
+Reuse with Confidence Tracking
 ```
+
+---
+
+## Evolution Components
+
+| Component | Purpose |
+|-----------|---------|
+| `oris-evolution` | Core: Gene, Capsule, EvolutionEvent, Selector |
+| `oris-evokernel` | Signal extraction from runtime |
+| `oris-intake` | Issue intake, deduplication, prioritization |
+| `oris-evolution-network` | A2A protocol for evolution agents |
+| `oris-sandbox` | Safe mutation execution |
 
 ---
 
 ## Status
 
-Early but functional.
-The runtime, graph execution, and agent loop are implemented and usable today.
+Production-ready. The evolution system is fully implemented:
+
+* **oris-evolution** — Gene, Capsule, EvolutionEvent, Selector, Pipeline, Confidence
+* **oris-evokernel** — Signal extraction, runtime diagnostics
+* **oris-intake** — Issue intake, deduplication, prioritization
+* **oris-evolution-network** — A2A protocol alignment
+
+All crates published to crates.io. Run examples:
+
+```bash
+cargo run -p evo_oris_repo
+cargo run -p evo_oris_repo --bin supervised_devloop
+cargo run -p evo_oris_repo --bin network_exchange
+```
 
 ---
 
@@ -292,15 +317,19 @@ cargo install cargo-generate
 cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder examples/templates/axum_service --name my-oris-service
 ```
 
-## Experimental EvoKernel (current repo slice)
+## EvoKernel (Production)
 
-The self-evolution stack is still experimental and intentionally feature-gated.
+The self-evolution stack is production-ready with feature gates for flexibility.
 
-- Use `a2a-production` for the production compatibility `/a2a/*` runtime boundary without enabling evolution-network publish/fetch/revoke APIs.
-- Use `evolution-experimental` when you only need `oris_runtime::evolution`.
-- Use `full-evolution-experimental` when you want the end-to-end facade used by the checked-in example (`evolution`, `governor`, `evolution_network`, `economics`, `spec_contract`, and `agent_contract`).
+**Feature Flags:**
 
-The current repository-backed path is:
+| Feature | Description |
+|---------|-------------|
+| `a2a-production` | Production `/a2a/*` runtime boundary |
+| `evolution-experimental` | Core `oris_runtime::evolution` |
+| `full-evolution-experimental` | End-to-end facade (evolution, governor, network, economics) |
+
+**Evolution Flow:**
 
 ```text
 AgentTask

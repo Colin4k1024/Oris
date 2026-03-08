@@ -1,16 +1,16 @@
-# EvoKernel Design Mirrors
+# EvoKernel — Self-Evolution Runtime
 
-Local mirrors of the Notion design pages under:
-https://www.notion.so/317e8a70eec5809c85e1f52aa03870e4
+> **Oris evolves your code automatically.**
 
-Last synced: March 5, 2026
+EvoKernel is the self-evolution subsystem of Oris, providing:
 
-This directory is both:
+- **Signal Extraction** — Detect problems from runtime (compiler, panics, tests)
+- **Gene Selection** — Choose best candidates from the gene pool
+- **Mutation Pipeline** — 8-stage evolution pipeline (Detect → Select → Mutate → Execute → Validate → Evaluate → Solidify → Reuse)
+- **Confidence Lifecycle** — Automatic decay/boost based on reuse success
+- **Issue Intake** — Automated problem detection and prioritization
 
-- a local mirror of the design set
-- the practical entrypoint for the Evo features that are already wired in this repository
-
-## Use the checked-in implementation first
+## Quick Start
 
 If you want to exercise the latest code that exists in this repository today, start with the checked-in example suite and smoke test:
 
@@ -47,34 +47,38 @@ What this already covers:
 - append-only JSONL evolution storage via `JsonlEvolutionStore`
 - replay-first candidate lookup through the selector path
 
-What is still design-target only:
+**Implemented Features:**
 
-- always-on autonomous development loops
-- automatic issue intake and task planning
-- automatic branch, review, and release orchestration
-- full remote network/economics/spec coordination beyond the current scaffolds
+- ✅ Proposal-driven mutation capture
+- ✅ Sandboxed command validation (`LocalProcessSandbox`, `CommandValidator`)
+- ✅ `ValidationPlan`-based verification stages
+- ✅ Append-only JSONL evolution storage (`JsonlEvolutionStore`)
+- ✅ Replay-first candidate lookup through selector path
+- ✅ 8-stage EvolutionPipeline
+- ✅ Confidence lifecycle with decay/boost
+- ✅ Signal extraction from runtime
+- ✅ Issue intake with priority scoring
 
-Read `../evokernel-v0.1.md` first for the architecture summary, then use the per-page mirrors below for deeper design details.
-For runnable scenario coverage and output guidance, use `examples.md`.
+**In Development:**
 
-Files:
+- Always-on autonomous development loops
+- Automatic issue intake and task planning
+- Automatic branch, review, and release orchestration
 
-- `architecture.md`
-- `examples.md`
-- `evolution.md`
-- `governor.md`
-- `network.md`
-- `economics.md`
-- `kernel.md`
-- `implementation-roadmap.md`
-- `bootstrap.md`
-- `agent.md`
-- `devloop.md`
-- `spec.md`
-- `vision.md`
-- `founding-paper.md`
+## Documentation Index
 
-The top-level overview remains in `../evokernel-v0.1.md`.
+| Document | Description |
+|----------|-------------|
+| [architecture.md](architecture.md) | System architecture |
+| [evolution.md](evolution.md) | Gene/Capsule lifecycle |
+| [pipeline.md](pipeline.md) | 8-stage evolution pipeline |
+| [confidence.md](confidence.md) | Confidence lifecycle |
+| [governor.md](governor.md) | Evolution governance |
+| [network.md](network.md) | A2A protocol alignment |
+| [intake.md](intake.md) | Issue intake system |
+| [examples.md](examples.md) | Runnable examples |
+
+See [evokernel-v0.1.md](../evokernel-v0.1.md) for architecture overview.
 
 ## Implementation Status Matrix
 
