@@ -21,7 +21,11 @@
       "Bash(gh issue close:*)",
       "Bash(xargs -r git push:*)",
       "Bash(git fetch:*)",
-      "Bash(cargo publish:*)"
+      "Bash(cargo publish:*)",
+      "WebSearch",
+      "WebFetch(domain:evolvemap.ai)",
+      "WebFetch(domain:evomap.ai)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

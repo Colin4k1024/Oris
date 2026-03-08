@@ -10,7 +10,7 @@ description = "Local sandboxed mutation application for Oris EvoKernel."
 [dependencies]
 async-trait = "0.1.80"
 hex = "0.4"
-oris-evolution = { version = "0.2.0", path = "../oris-evolution" }
+oris-evolution = { version = "0.3.0", path = "../oris-evolution" }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 thiserror = "2.0.0"

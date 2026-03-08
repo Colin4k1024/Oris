@@ -1,16 +1,17 @@
 [package]
 name = "oris-evolution"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.80"
 publish = ["crates-io"]
 license = "MIT"
-description = "Append-only evolution memory for Oris EvoKernel."
+description = "Append-only evolution memory and pipeline for Oris EvoKernel."
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 oris-kernel = { version = "0.2.12", path = "../oris-kernel" }
+regex-lite = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

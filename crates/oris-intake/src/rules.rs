@@ -1,7 +1,7 @@
 //! Custom rule engine for intake processing
 
-use crate::source::IntakeEvent;
 use crate::signal::ExtractedSignal;
+use crate::source::IntakeEvent;
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -139,9 +139,7 @@ impl RuleEngine {
                     min_confidence: Some(0.7),
                     ..Default::default()
                 },
-                actions: vec![
-                    RuleAction::SetPriorityBoost { boost: 30 },
-                ],
+                actions: vec![RuleAction::SetPriorityBoost { boost: 30 }],
             },
             IntakeRule {
                 id: "rule_test_failures".to_string(),
@@ -154,9 +152,9 @@ impl RuleEngine {
                     signal_patterns: vec!["test_failure".to_string()],
                     ..Default::default()
                 },
-                actions: vec![
-                    RuleAction::AddTags { tags: vec!["ci".to_string(), "test".to_string()] },
-                ],
+                actions: vec![RuleAction::AddTags {
+                    tags: vec!["ci".to_string(), "test".to_string()],
+                }],
             },
             IntakeRule {
                 id: "rule_low_confidence".to_string(),
@@ -168,9 +166,7 @@ impl RuleEngine {
                     min_confidence: Some(0.3),
                     ..Default::default()
                 },
-                actions: vec![
-                    RuleAction::RequireApproval,
-                ],
+                actions: vec![RuleAction::RequireApproval],
             },
         ];
 
@@ -222,10 +218,7 @@ impl RuleEngine {
                     matched: true,
                     actions_applied: rule.actions.clone(),
                     modified_event: None,
-                    should_skip: rule
-                        .actions
-                        .iter()
-                        .any(|a| matches!(a, RuleAction::Skip)),
+                    should_skip: rule.actions.iter().any(|a| matches!(a, RuleAction::Skip)),
                 };
                 results.push(application);
             }
@@ -243,9 +236,10 @@ impl RuleEngine {
     ) -> bool {
         // Check source type
         if !conditions.source_types.is_empty() {
-            let source_match = conditions.source_types.iter().any(|st| {
-                st.eq_ignore_ascii_case(&event.source_type.to_string())
-            });
+            let source_match = conditions
+                .source_types
+                .iter()
+                .any(|st| st.eq_ignore_ascii_case(&event.source_type.to_string()));
             if !source_match {
                 return false;
             }
@@ -253,9 +247,10 @@ impl RuleEngine {
 
         // Check severity
         if !conditions.severities.is_empty() {
-            let severity_match = conditions.severities.iter().any(|s| {
-                s.eq_ignore_ascii_case(&event.severity.to_string())
-            });
+            let severity_match = conditions
+                .severities
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&event.severity.to_string()));
             if !severity_match {
                 return false;
             }
@@ -284,9 +279,10 @@ impl RuleEngine {
         // Check signal patterns
         if !conditions.signal_patterns.is_empty() {
             let signal_match = signals.iter().any(|s| {
-                conditions.signal_patterns.iter().any(|p| {
-                    s.content.to_lowercase().contains(&p.to_lowercase())
-                })
+                conditions
+                    .signal_patterns
+                    .iter()
+                    .any(|p| s.content.to_lowercase().contains(&p.to_lowercase()))
             });
             if !signal_match {
                 return false;

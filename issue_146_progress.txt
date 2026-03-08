@@ -1,0 +1,50 @@
+## Implementation Progress
+
+### P0 In Progress
+
+Created new pipeline module in `crates/oris-evolution/src/pipeline.rs`:
+
+### Implemented
+- [x] Define `EvolutionPipeline` trait - provides interface for pipeline execution
+- [x] Define `StandardEvolutionPipeline` struct - standard implementation
+- [x] Implement Select phase - uses Selector trait to select gene candidates
+- [x] Implement Mutate phase - creates MutationProposal from candidates
+- [x] Implement stage state management - PipelineStageState enum (Pending/Running/Completed/Failed/Skipped)
+- [x] Pipeline configurable - EvolutionPipelineConfig with enable/disable for each stage
+- [x] Timeout configuration per stage
+
+### Key Types
+```rust
+pub enum PipelineStage {
+    Detect, Select, Mutate, Execute, Validate, Evaluate, Solidify, Reuse,
+}
+
+pub struct PipelineContext {
+    pub signals: Vec<EvolutionSignal>,
+    pub candidates: Vec<GeneCandidate>,
+    pub proposals: Vec<MutationProposal>,
+    pub execution_result: Option<serde_json::Value>,
+    pub validation_result: Option<ValidationResult>,
+    pub evaluation_result: Option<EvaluationResult>,
+    pub solidified_genes: Vec<String>,
+    pub reused_capsules: Vec<String>,
+}
+
+pub enum PipelineStageState {
+    Pending, Running, Completed, Failed(String), Skipped(String),
+}
+```
+
+### Test Results
+```
+cargo test -p oris-evolution pipeline
+  running 2 tests
+  test pipeline::tests::test_pipeline_stage_states ... ok
+  test pipeline::tests::test_pipeline_config_default ... ok
+  test result: ok. 2 passed
+```
+
+### Next Steps
+- Integration with SignalExtractor (Detect phase)
+- Integration with execution sandbox (Execute phase)
+- Metrics exposure for stage duration
