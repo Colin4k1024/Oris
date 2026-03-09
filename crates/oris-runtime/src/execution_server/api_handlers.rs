@@ -3386,6 +3386,81 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
                 resource_type: "question",
                 resource_id: None,
             }),
+            ["a2a", "assets", asset_id, "verify"] => Some(AuditTarget {
+                action: "a2a.semantic.asset.verify",
+                resource_type: "asset",
+                resource_id: Some((*asset_id).to_string()),
+            }),
+            ["a2a", "assets", asset_id, "vote"] => Some(AuditTarget {
+                action: "a2a.semantic.asset.vote",
+                resource_type: "asset",
+                resource_id: Some((*asset_id).to_string()),
+            }),
+            ["a2a", "service", "publish"] => Some(AuditTarget {
+                action: "a2a.semantic.service.publish",
+                resource_type: "service",
+                resource_id: None,
+            }),
+            ["a2a", "bid", "create"] => Some(AuditTarget {
+                action: "a2a.semantic.bid.create",
+                resource_type: "bid",
+                resource_id: None,
+            }),
+            ["a2a", "bid", bid_id, "accept"] => Some(AuditTarget {
+                action: "a2a.semantic.bid.accept",
+                resource_type: "bid",
+                resource_id: Some((*bid_id).to_string()),
+            }),
+            ["a2a", "dispute", "rule"] => Some(AuditTarget {
+                action: "a2a.semantic.dispute.rule",
+                resource_type: "dispute",
+                resource_id: None,
+            }),
+            ["a2a", "council", "propose"] => Some(AuditTarget {
+                action: "a2a.semantic.council.propose",
+                resource_type: "proposal",
+                resource_id: None,
+            }),
+            ["a2a", "council", "vote"] => Some(AuditTarget {
+                action: "a2a.semantic.council.vote",
+                resource_type: "proposal",
+                resource_id: None,
+            }),
+            ["a2a", "council", "execute"] => Some(AuditTarget {
+                action: "a2a.semantic.council.execute",
+                resource_type: "proposal",
+                resource_id: None,
+            }),
+            ["a2a", "council", "session"] => Some(AuditTarget {
+                action: "a2a.semantic.council.session",
+                resource_type: "session",
+                resource_id: None,
+            }),
+            ["a2a", "project", "propose"] => Some(AuditTarget {
+                action: "a2a.semantic.project.propose",
+                resource_type: "project",
+                resource_id: None,
+            }),
+            ["a2a", "project", project_id, "claim"] => Some(AuditTarget {
+                action: "a2a.semantic.project.claim",
+                resource_type: "project",
+                resource_id: Some((*project_id).to_string()),
+            }),
+            ["a2a", "project", project_id, "progress"] => Some(AuditTarget {
+                action: "a2a.semantic.project.progress",
+                resource_type: "project",
+                resource_id: Some((*project_id).to_string()),
+            }),
+            ["a2a", "project", project_id, "review"] => Some(AuditTarget {
+                action: "a2a.semantic.project.review",
+                resource_type: "project",
+                resource_id: Some((*project_id).to_string()),
+            }),
+            ["a2a", "project", project_id, "merge"] => Some(AuditTarget {
+                action: "a2a.semantic.project.merge",
+                resource_type: "project",
+                resource_id: Some((*project_id).to_string()),
+            }),
             ["a2a", "tasks", "distribute"] => Some(AuditTarget {
                 action: "a2a.compat.distribute",
                 resource_type: "task",
@@ -18985,6 +19060,372 @@ mod tests {
                 log.request_id == request_id && log.action == action && log.result == "success"
             }));
         }
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn audit_logs_capture_semantic_market_and_governance_write_actions() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_with_role("sem-market-audit-key", ApiRole::Operator);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        for (request_id, uri, action) in [
+            (
+                "req-asset-verify",
+                "/a2a/assets/asset-1/verify",
+                "a2a.semantic.asset.verify",
+            ),
+            (
+                "req-asset-vote",
+                "/a2a/assets/asset-1/vote",
+                "a2a.semantic.asset.vote",
+            ),
+            (
+                "req-service-publish",
+                "/a2a/service/publish",
+                "a2a.semantic.service.publish",
+            ),
+            (
+                "req-bid-create",
+                "/a2a/bid/create",
+                "a2a.semantic.bid.create",
+            ),
+            (
+                "req-bid-accept",
+                "/a2a/bid/bid-1/accept",
+                "a2a.semantic.bid.accept",
+            ),
+            (
+                "req-dispute-rule",
+                "/a2a/dispute/rule",
+                "a2a.semantic.dispute.rule",
+            ),
+            (
+                "req-council-propose",
+                "/a2a/council/propose",
+                "a2a.semantic.council.propose",
+            ),
+            (
+                "req-council-vote",
+                "/a2a/council/vote",
+                "a2a.semantic.council.vote",
+            ),
+            (
+                "req-council-execute",
+                "/a2a/council/execute",
+                "a2a.semantic.council.execute",
+            ),
+            (
+                "req-council-session",
+                "/a2a/council/session",
+                "a2a.semantic.council.session",
+            ),
+            (
+                "req-project-propose",
+                "/a2a/project/propose",
+                "a2a.semantic.project.propose",
+            ),
+            (
+                "req-project-claim",
+                "/a2a/project/project-1/claim",
+                "a2a.semantic.project.claim",
+            ),
+            (
+                "req-project-progress",
+                "/a2a/project/project-1/progress",
+                "a2a.semantic.project.progress",
+            ),
+            (
+                "req-project-review",
+                "/a2a/project/project-1/review",
+                "a2a.semantic.project.review",
+            ),
+            (
+                "req-project-merge",
+                "/a2a/project/project-1/merge",
+                "a2a.semantic.project.merge",
+            ),
+        ] {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("x-request-id", request_id)
+                .header("x-api-key", "sem-market-audit-key")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "unexpected status for {uri}");
+
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .expect("market/governance write body");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("market/governance write json");
+            assert_eq!(json["data"]["status"], "planned");
+
+            let logs = repo.list_audit_logs(1000).expect("list audit logs");
+            assert!(logs.iter().any(|log| {
+                log.request_id == request_id && log.action == action && log.result == "success"
+            }));
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_semantic_assets_auth_matrix_supports_node_secret_and_api_key_and_blocks_worker()
+    {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await)
+                .with_compat_node_secret_with_role("sem-node-secret", ApiRole::Operator)
+                .with_static_api_key_record_with_role(
+                    "sem-operator-key",
+                    "sem-operator-secret",
+                    true,
+                    ApiRole::Operator,
+                )
+                .with_static_api_key_record_with_role(
+                    "sem-worker-key",
+                    "sem-worker-secret",
+                    true,
+                    ApiRole::Worker,
+                ),
+        );
+
+        let node_hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("authorization", "Bearer sem-node-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "sem-node-agent",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["EvolutionFetch"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let node_hello_resp = router.clone().oneshot(node_hello_req).await.unwrap();
+        assert_eq!(node_hello_resp.status(), StatusCode::OK);
+
+        let node_search_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=sem-node-agent&q=docs")
+            .header("authorization", "Bearer sem-node-secret")
+            .body(Body::empty())
+            .unwrap();
+        let node_search_resp = router.clone().oneshot(node_search_req).await.unwrap();
+        assert_eq!(node_search_resp.status(), StatusCode::OK);
+
+        let operator_hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("x-api-key-id", "sem-operator-key")
+            .header("x-api-key", "sem-operator-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": "sem-operator-agent",
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["EvolutionFetch"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let operator_hello_resp = router.clone().oneshot(operator_hello_req).await.unwrap();
+        assert_eq!(operator_hello_resp.status(), StatusCode::OK);
+
+        let operator_search_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=sem-operator-agent&q=docs")
+            .header("x-api-key-id", "sem-operator-key")
+            .header("x-api-key", "sem-operator-secret")
+            .body(Body::empty())
+            .unwrap();
+        let operator_search_resp = router.clone().oneshot(operator_search_req).await.unwrap();
+        assert_eq!(operator_search_resp.status(), StatusCode::OK);
+
+        let worker_search_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=sem-worker-agent&q=docs")
+            .header("x-api-key-id", "sem-worker-key")
+            .header("x-api-key", "sem-worker-secret")
+            .body(Body::empty())
+            .unwrap();
+        let worker_search_resp = router.oneshot(worker_search_req).await.unwrap();
+        assert_eq!(worker_search_resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(worker_search_resp.into_body(), usize::MAX)
+            .await
+            .expect("worker search forbidden body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("worker search forbidden json");
+        assert_eq!(json["error"]["code"], "forbidden");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_semantic_contract_e2e_covers_protocol_task_asset_and_governance_flows() {
+        let store_root =
+            std::env::temp_dir().join(format!("oris-evomap-semantic-e2e-{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&store_root);
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_evolution_store(Arc::new(
+                crate::evolution::JsonlEvolutionStore::new(&store_root),
+            )),
+        );
+
+        let handshake =
+            handshake_agent_with_caps(&router, "sem-e2e-agent", &["EvolutionFetch"]).await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let validate_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-e2e-agent",
+                    "required_model_tier": "A3",
+                    "model_tier": "A4"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let validate_resp = router.clone().oneshot(validate_req).await.unwrap();
+        assert_eq!(validate_resp.status(), StatusCode::OK);
+        let validate_body = axum::body::to_bytes(validate_resp.into_body(), usize::MAX)
+            .await
+            .expect("validate body");
+        let validate_json: serde_json::Value =
+            serde_json::from_slice(&validate_body).expect("validate json");
+        assert_eq!(
+            validate_json["data"]["protocol"]["version"],
+            crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+        );
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-e2e-agent",
+                    "title": "E2E semantic task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+        let submit_body = axum::body::to_bytes(submit_resp.into_body(), usize::MAX)
+            .await
+            .expect("submit body");
+        let submit_json: serde_json::Value =
+            serde_json::from_slice(&submit_body).expect("submit json");
+        let task_id = submit_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("task id")
+            .to_string();
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": task_id,
+                    "sender_id": "sem-e2e-agent",
+                    "summary": "semantic e2e report"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .expect("report body");
+        let report_json: serde_json::Value =
+            serde_json::from_slice(&report_body).expect("report json");
+        assert_eq!(report_json["data"]["status"], "submitted");
+
+        let asset_search_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=sem-e2e-agent&q=docs")
+            .body(Body::empty())
+            .unwrap();
+        let asset_search_resp = router.clone().oneshot(asset_search_req).await.unwrap();
+        assert_eq!(asset_search_resp.status(), StatusCode::OK);
+        let asset_search_body = axum::body::to_bytes(asset_search_resp.into_body(), usize::MAX)
+            .await
+            .expect("asset search body");
+        let asset_search_json: serde_json::Value =
+            serde_json::from_slice(&asset_search_body).expect("asset search json");
+        assert_eq!(asset_search_json["data"]["mode"], "search");
+        assert!(asset_search_json["data"]["results"].is_array());
+
+        let principles_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/governance/principles")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let principles_resp = router.clone().oneshot(principles_req).await.unwrap();
+        assert_eq!(principles_resp.status(), StatusCode::OK);
+        let principles_body = axum::body::to_bytes(principles_resp.into_body(), usize::MAX)
+            .await
+            .expect("principles body");
+        let principles_json: serde_json::Value =
+            serde_json::from_slice(&principles_body).expect("principles json");
+        assert!(principles_json["data"]["principles"]
+            .as_array()
+            .map(|items| items.iter().any(|item| item == "transparent-audit"))
+            .unwrap_or(false));
+
+        let project_list_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/list")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let project_list_resp = router.oneshot(project_list_req).await.unwrap();
+        assert_eq!(project_list_resp.status(), StatusCode::OK);
+        let project_list_body = axum::body::to_bytes(project_list_resp.into_body(), usize::MAX)
+            .await
+            .expect("project list body");
+        let project_list_json: serde_json::Value =
+            serde_json::from_slice(&project_list_body).expect("project list json");
+        assert!(project_list_json["data"]["projects"].is_array());
+        assert!(project_list_json["data"]["count"].is_number());
+
+        let _ = std::fs::remove_dir_all(&store_root);
     }
 }
 
