@@ -12,8 +12,8 @@ use oris_kernel::identity::{RunId, Seq};
 
 use super::models::{
     AttemptDispatchRecord, AttemptExecutionStatus, BountyRecord, BountyStatus, DisputeRecord,
-    DisputeStatus, LeaseRecord, OrganismRecord, RecipeRecord, SessionMessageRecord,
-    SessionRecord, SwarmTaskRecord, WorkerRecord,
+    DisputeStatus, LeaseRecord, OrganismRecord, RecipeRecord, SessionMessageRecord, SessionRecord,
+    SwarmTaskRecord, WorkerRecord,
 };
 use super::repository::RuntimeRepository;
 
@@ -1746,7 +1746,11 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         Ok(None) // TODO: implement
     }
 
-    fn list_bounties(&self, _status: Option<&str>, _limit: usize) -> Result<Vec<BountyRecord>, KernelError> {
+    fn list_bounties(
+        &self,
+        _status: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<BountyRecord>, KernelError> {
         Ok(vec![]) // TODO: implement
     }
 
@@ -1764,7 +1768,10 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         Ok(()) // TODO: implement
     }
 
-    fn get_swarm_decomposition(&self, _parent_task_id: &str) -> Result<Option<SwarmTaskRecord>, KernelError> {
+    fn get_swarm_decomposition(
+        &self,
+        _parent_task_id: &str,
+    ) -> Result<Option<SwarmTaskRecord>, KernelError> {
         Ok(None) // TODO: implement
     }
 
@@ -1778,7 +1785,12 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         Ok(None) // TODO: implement
     }
 
-    fn list_workers(&self, _domain: Option<&str>, _status: Option<&str>, _limit: usize) -> Result<Vec<WorkerRecord>, KernelError> {
+    fn list_workers(
+        &self,
+        _domain: Option<&str>,
+        _status: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<WorkerRecord>, KernelError> {
         Ok(vec![]) // TODO: implement
     }
 
@@ -1796,11 +1808,20 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         Ok(None) // TODO: implement
     }
 
-    fn fork_recipe(&self, _original_id: &str, _new_id: &str, _new_author: &str) -> Result<Option<RecipeRecord>, KernelError> {
+    fn fork_recipe(
+        &self,
+        _original_id: &str,
+        _new_id: &str,
+        _new_author: &str,
+    ) -> Result<Option<RecipeRecord>, KernelError> {
         Ok(None) // TODO: implement
     }
 
-    fn list_recipes(&self, _author_id: Option<&str>, _limit: usize) -> Result<Vec<RecipeRecord>, KernelError> {
+    fn list_recipes(
+        &self,
+        _author_id: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<RecipeRecord>, KernelError> {
         Ok(vec![]) // TODO: implement
     }
 
@@ -1814,7 +1835,12 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         Ok(None) // TODO: implement
     }
 
-    fn update_organism(&self, _organism_id: &str, _current_step: i32, _status: &str) -> Result<(), KernelError> {
+    fn update_organism(
+        &self,
+        _organism_id: &str,
+        _current_step: i32,
+        _status: &str,
+    ) -> Result<(), KernelError> {
         Ok(()) // TODO: implement
     }
 
@@ -1832,7 +1858,11 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         Ok(()) // TODO: implement
     }
 
-    fn get_session_history(&self, _session_id: &str, _limit: usize) -> Result<Vec<SessionMessageRecord>, KernelError> {
+    fn get_session_history(
+        &self,
+        _session_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<SessionMessageRecord>, KernelError> {
         Ok(vec![]) // TODO: implement
     }
 
@@ -1850,7 +1880,12 @@ impl RuntimeRepository for PostgresRuntimeRepository {
         Ok(vec![]) // TODO: implement
     }
 
-    fn resolve_dispute(&self, _dispute_id: &str, _resolution: &str, _resolved_by: &str) -> Result<(), KernelError> {
+    fn resolve_dispute(
+        &self,
+        _dispute_id: &str,
+        _resolution: &str,
+        _resolved_by: &str,
+    ) -> Result<(), KernelError> {
         Ok(()) // TODO: implement
     }
 }

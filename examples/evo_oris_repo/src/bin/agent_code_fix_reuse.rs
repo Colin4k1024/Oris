@@ -87,10 +87,7 @@ async fn main() -> ExampleResult<()> {
     println!("  ✓ Capsule created: {}", capture_1.capsule.id);
     println!("  Signals: {:?}", capture_1.gene.signals);
     println!("  Strategy: {:?}", capture_1.gene.strategy);
-    println!(
-        "  Confidence: {:.2}",
-        capture_1.capsule.confidence
-    );
+    println!("  Confidence: {:.2}", capture_1.capsule.confidence);
     println!("  State: {:?}\n", capture_1.gene.state);
 
     // Store signals for replay test
@@ -138,14 +135,16 @@ async fn main() -> ExampleResult<()> {
     }
 
     // Get detailed feedback
-    let replay_feedback =
-        EvoKernel::<evo_oris_repo::ExampleState>::replay_feedback_for_agent(
-            &captured_signals,
-            &decision,
-        );
+    let replay_feedback = EvoKernel::<evo_oris_repo::ExampleState>::replay_feedback_for_agent(
+        &captured_signals,
+        &decision,
+    );
 
     println!("\n=== Replay Feedback ===");
-    println!("  Planner directive: {:?}", replay_feedback.planner_directive);
+    println!(
+        "  Planner directive: {:?}",
+        replay_feedback.planner_directive
+    );
     println!("  Used capsule: {}", replay_feedback.used_capsule);
     println!(
         "  Reasoning steps avoided: {}",

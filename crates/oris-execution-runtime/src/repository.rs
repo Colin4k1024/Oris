@@ -6,8 +6,8 @@ use oris_kernel::event::KernelError;
 use oris_kernel::identity::{RunId, Seq};
 
 use super::models::{
-    AttemptDispatchRecord, BountyRecord, DisputeRecord, LeaseRecord, OrganismRecord,
-    RecipeRecord, SessionMessageRecord, SessionRecord, SwarmTaskRecord, WorkerRecord,
+    AttemptDispatchRecord, BountyRecord, DisputeRecord, LeaseRecord, OrganismRecord, RecipeRecord,
+    SessionMessageRecord, SessionRecord, SwarmTaskRecord, WorkerRecord,
 };
 
 /// Runtime repository contract used by scheduler and lease manager.
@@ -64,7 +64,11 @@ pub trait RuntimeRepository: Send + Sync {
     fn get_bounty(&self, bounty_id: &str) -> Result<Option<BountyRecord>, KernelError>;
 
     /// List bounties by status
-    fn list_bounties(&self, status: Option<&str>, limit: usize) -> Result<Vec<BountyRecord>, KernelError>;
+    fn list_bounties(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BountyRecord>, KernelError>;
 
     /// Accept a bounty (transition to accepted)
     fn accept_bounty(&self, bounty_id: &str, accepted_by: &str) -> Result<(), KernelError>;
@@ -78,7 +82,10 @@ pub trait RuntimeRepository: Send + Sync {
     fn upsert_swarm_decomposition(&self, task: &SwarmTaskRecord) -> Result<(), KernelError>;
 
     /// Get swarm task decomposition
-    fn get_swarm_decomposition(&self, parent_task_id: &str) -> Result<Option<SwarmTaskRecord>, KernelError>;
+    fn get_swarm_decomposition(
+        &self,
+        parent_task_id: &str,
+    ) -> Result<Option<SwarmTaskRecord>, KernelError>;
 
     // ============== Worker Methods ==============
 
@@ -89,7 +96,12 @@ pub trait RuntimeRepository: Send + Sync {
     fn get_worker(&self, worker_id: &str) -> Result<Option<WorkerRecord>, KernelError>;
 
     /// List workers by domain and status
-    fn list_workers(&self, domain: Option<&str>, status: Option<&str>, limit: usize) -> Result<Vec<WorkerRecord>, KernelError>;
+    fn list_workers(
+        &self,
+        domain: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<WorkerRecord>, KernelError>;
 
     /// Update worker heartbeat
     fn heartbeat_worker(&self, worker_id: &str, heartbeat_at_ms: i64) -> Result<(), KernelError>;
@@ -103,10 +115,19 @@ pub trait RuntimeRepository: Send + Sync {
     fn get_recipe(&self, recipe_id: &str) -> Result<Option<RecipeRecord>, KernelError>;
 
     /// Fork a recipe (create a copy with new ID)
-    fn fork_recipe(&self, original_id: &str, new_id: &str, new_author: &str) -> Result<Option<RecipeRecord>, KernelError>;
+    fn fork_recipe(
+        &self,
+        original_id: &str,
+        new_id: &str,
+        new_author: &str,
+    ) -> Result<Option<RecipeRecord>, KernelError>;
 
     /// List recipes by author
-    fn list_recipes(&self, author_id: Option<&str>, limit: usize) -> Result<Vec<RecipeRecord>, KernelError>;
+    fn list_recipes(
+        &self,
+        author_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RecipeRecord>, KernelError>;
 
     // ============== Organism Methods ==============
 
@@ -117,7 +138,12 @@ pub trait RuntimeRepository: Send + Sync {
     fn get_organism(&self, organism_id: &str) -> Result<Option<OrganismRecord>, KernelError>;
 
     /// Update organism status (step progression)
-    fn update_organism(&self, organism_id: &str, current_step: i32, status: &str) -> Result<(), KernelError>;
+    fn update_organism(
+        &self,
+        organism_id: &str,
+        current_step: i32,
+        status: &str,
+    ) -> Result<(), KernelError>;
 
     // ============== Session Methods ==============
 
@@ -131,7 +157,11 @@ pub trait RuntimeRepository: Send + Sync {
     fn add_session_message(&self, message: &SessionMessageRecord) -> Result<(), KernelError>;
 
     /// Get session message history
-    fn get_session_history(&self, session_id: &str, limit: usize) -> Result<Vec<SessionMessageRecord>, KernelError>;
+    fn get_session_history(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionMessageRecord>, KernelError>;
 
     // ============== Dispute Methods ==============
 
@@ -145,5 +175,10 @@ pub trait RuntimeRepository: Send + Sync {
     fn get_disputes_for_bounty(&self, bounty_id: &str) -> Result<Vec<DisputeRecord>, KernelError>;
 
     /// Resolve a dispute
-    fn resolve_dispute(&self, dispute_id: &str, resolution: &str, resolved_by: &str) -> Result<(), KernelError>;
+    fn resolve_dispute(
+        &self,
+        dispute_id: &str,
+        resolution: &str,
+        resolved_by: &str,
+    ) -> Result<(), KernelError>;
 }

@@ -10,8 +10,8 @@ use oris_kernel::identity::{RunId, Seq};
 
 use super::models::{
     AttemptDispatchRecord, AttemptExecutionStatus, BountyRecord, BountyStatus, DisputeRecord,
-    DisputeStatus, LeaseRecord, OrganismRecord, RecipeRecord, SessionMessageRecord,
-    SessionRecord, SwarmTaskRecord, WorkerRecord,
+    DisputeStatus, LeaseRecord, OrganismRecord, RecipeRecord, SessionMessageRecord, SessionRecord,
+    SwarmTaskRecord, WorkerRecord,
 };
 use super::repository::RuntimeRepository;
 
@@ -3194,7 +3194,11 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         }
     }
 
-    fn list_bounties(&self, status: Option<&str>, limit: usize) -> Result<Vec<BountyRecord>, KernelError> {
+    fn list_bounties(
+        &self,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<BountyRecord>, KernelError> {
         let conn = self
             .conn
             .lock()
@@ -3205,44 +3209,48 @@ impl RuntimeRepository for SqliteRuntimeRepository {
                 let mut stmt = conn.prepare(
                     "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms FROM runtime_bounties WHERE status = ?1 ORDER BY created_at_ms DESC LIMIT ?2"
                 ).map_err(|e| KernelError::Driver(format!("prepare list bounties: {}", e)))?;
-                let x = stmt.query_map(params![s, limit as i64], |r| {
-                    Ok(BountyRecord {
-                        bounty_id: r.get(0)?,
-                        title: r.get(1)?,
-                        description: r.get(2)?,
-                        reward: r.get(3)?,
-                        status: BountyStatus::from_str(&r.get::<_, String>(4)?),
-                        created_by: r.get(5)?,
-                        created_at_ms: r.get(6)?,
-                        closed_at_ms: r.get(7)?,
-                        accepted_by: r.get(8)?,
-                        accepted_at_ms: r.get(9)?,
+                let x = stmt
+                    .query_map(params![s, limit as i64], |r| {
+                        Ok(BountyRecord {
+                            bounty_id: r.get(0)?,
+                            title: r.get(1)?,
+                            description: r.get(2)?,
+                            reward: r.get(3)?,
+                            status: BountyStatus::from_str(&r.get::<_, String>(4)?),
+                            created_by: r.get(5)?,
+                            created_at_ms: r.get(6)?,
+                            closed_at_ms: r.get(7)?,
+                            accepted_by: r.get(8)?,
+                            accepted_at_ms: r.get(9)?,
+                        })
                     })
-                }).map_err(|e| KernelError::Driver(format!("query bounties: {}", e)))?
-                .filter_map(|r| r.ok())
-                .collect();
+                    .map_err(|e| KernelError::Driver(format!("query bounties: {}", e)))?
+                    .filter_map(|r| r.ok())
+                    .collect();
                 x
             }
             None => {
                 let mut stmt = conn.prepare(
                     "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms FROM runtime_bounties ORDER BY created_at_ms DESC LIMIT ?1"
                 ).map_err(|e| KernelError::Driver(format!("prepare list bounties: {}", e)))?;
-                let x = stmt.query_map(params![limit as i64], |r| {
-                    Ok(BountyRecord {
-                        bounty_id: r.get(0)?,
-                        title: r.get(1)?,
-                        description: r.get(2)?,
-                        reward: r.get(3)?,
-                        status: BountyStatus::from_str(&r.get::<_, String>(4)?),
-                        created_by: r.get(5)?,
-                        created_at_ms: r.get(6)?,
-                        closed_at_ms: r.get(7)?,
-                        accepted_by: r.get(8)?,
-                        accepted_at_ms: r.get(9)?,
+                let x = stmt
+                    .query_map(params![limit as i64], |r| {
+                        Ok(BountyRecord {
+                            bounty_id: r.get(0)?,
+                            title: r.get(1)?,
+                            description: r.get(2)?,
+                            reward: r.get(3)?,
+                            status: BountyStatus::from_str(&r.get::<_, String>(4)?),
+                            created_by: r.get(5)?,
+                            created_at_ms: r.get(6)?,
+                            closed_at_ms: r.get(7)?,
+                            accepted_by: r.get(8)?,
+                            accepted_at_ms: r.get(9)?,
+                        })
                     })
-                }).map_err(|e| KernelError::Driver(format!("query bounties: {}", e)))?
-                .filter_map(|r| r.ok())
-                .collect();
+                    .map_err(|e| KernelError::Driver(format!("query bounties: {}", e)))?
+                    .filter_map(|r| r.ok())
+                    .collect();
                 x
             }
         };
@@ -3321,7 +3329,10 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         Ok(())
     }
 
-    fn get_swarm_decomposition(&self, parent_task_id: &str) -> Result<Option<SwarmTaskRecord>, KernelError> {
+    fn get_swarm_decomposition(
+        &self,
+        parent_task_id: &str,
+    ) -> Result<Option<SwarmTaskRecord>, KernelError> {
         let conn = self
             .conn
             .lock()
@@ -3409,7 +3420,12 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         }
     }
 
-    fn list_workers(&self, domain: Option<&str>, status: Option<&str>, limit: usize) -> Result<Vec<WorkerRecord>, KernelError> {
+    fn list_workers(
+        &self,
+        domain: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<WorkerRecord>, KernelError> {
         let conn = self
             .conn
             .lock()
@@ -3436,21 +3452,25 @@ impl RuntimeRepository for SqliteRuntimeRepository {
                 vec![Box::new(limit as i64)]
             ),
         };
-        let mut stmt = conn.prepare(&sql).map_err(|e| KernelError::Driver(format!("prepare list workers: {}", e)))?;
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| KernelError::Driver(format!("prepare list workers: {}", e)))?;
         let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let workers = stmt.query_map(params_refs.as_slice(), |r| {
-            Ok(WorkerRecord {
-                worker_id: r.get(0)?,
-                domains: r.get(1)?,
-                max_load: r.get(2)?,
-                metadata_json: r.get(3)?,
-                registered_at_ms: r.get(4)?,
-                last_heartbeat_ms: r.get(5)?,
-                status: r.get(6)?,
+        let workers = stmt
+            .query_map(params_refs.as_slice(), |r| {
+                Ok(WorkerRecord {
+                    worker_id: r.get(0)?,
+                    domains: r.get(1)?,
+                    max_load: r.get(2)?,
+                    metadata_json: r.get(3)?,
+                    registered_at_ms: r.get(4)?,
+                    last_heartbeat_ms: r.get(5)?,
+                    status: r.get(6)?,
+                })
             })
-        }).map_err(|e| KernelError::Driver(format!("query workers: {}", e)))?
-        .filter_map(|r| r.ok())
-        .collect();
+            .map_err(|e| KernelError::Driver(format!("query workers: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(workers)
     }
 
@@ -3530,13 +3550,17 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         }
     }
 
-    fn fork_recipe(&self, original_id: &str, new_id: &str, new_author: &str) -> Result<Option<RecipeRecord>, KernelError> {
+    fn fork_recipe(
+        &self,
+        original_id: &str,
+        new_id: &str,
+        new_author: &str,
+    ) -> Result<Option<RecipeRecord>, KernelError> {
         let original = self.get_recipe(original_id)?;
         if let Some(orig) = original {
-            let conn = self
-                .conn
-                .lock()
-                .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+            let conn = self.conn.lock().map_err(|_| {
+                KernelError::Driver("sqlite runtime repo lock poisoned".to_string())
+            })?;
             let now = Utc::now().timestamp_millis();
             conn.execute(
                 "INSERT INTO runtime_recipes (recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public)
@@ -3570,7 +3594,11 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         }
     }
 
-    fn list_recipes(&self, author_id: Option<&str>, limit: usize) -> Result<Vec<RecipeRecord>, KernelError> {
+    fn list_recipes(
+        &self,
+        author_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RecipeRecord>, KernelError> {
         let conn = self
             .conn
             .lock()
@@ -3581,42 +3609,46 @@ impl RuntimeRepository for SqliteRuntimeRepository {
                 let mut stmt = conn.prepare(
                     "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public FROM runtime_recipes WHERE author_id = ?1 ORDER BY created_at_ms DESC LIMIT ?2"
                 ).map_err(|e| KernelError::Driver(format!("prepare list recipes: {}", e)))?;
-                let result: Vec<RecipeRecord> = stmt.query_map(params![aid, limit as i64], |r| {
-                    Ok(RecipeRecord {
-                        recipe_id: r.get(0)?,
-                        name: r.get(1)?,
-                        description: r.get(2)?,
-                        gene_sequence_json: r.get(3)?,
-                        author_id: r.get(4)?,
-                        forked_from: r.get(5)?,
-                        created_at_ms: r.get(6)?,
-                        updated_at_ms: r.get(7)?,
-                        is_public: r.get::<_, i32>(8)? != 0,
+                let result: Vec<RecipeRecord> = stmt
+                    .query_map(params![aid, limit as i64], |r| {
+                        Ok(RecipeRecord {
+                            recipe_id: r.get(0)?,
+                            name: r.get(1)?,
+                            description: r.get(2)?,
+                            gene_sequence_json: r.get(3)?,
+                            author_id: r.get(4)?,
+                            forked_from: r.get(5)?,
+                            created_at_ms: r.get(6)?,
+                            updated_at_ms: r.get(7)?,
+                            is_public: r.get::<_, i32>(8)? != 0,
+                        })
                     })
-                }).map_err(|e| KernelError::Driver(format!("query recipes: {}", e)))?
-                .filter_map(|r| r.ok())
-                .collect();
+                    .map_err(|e| KernelError::Driver(format!("query recipes: {}", e)))?
+                    .filter_map(|r| r.ok())
+                    .collect();
                 result
             }
             None => {
                 let mut stmt = conn.prepare(
                     "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public FROM runtime_recipes ORDER BY created_at_ms DESC LIMIT ?1"
                 ).map_err(|e| KernelError::Driver(format!("prepare list recipes: {}", e)))?;
-                let result: Vec<RecipeRecord> = stmt.query_map(params![limit as i64], |r| {
-                    Ok(RecipeRecord {
-                        recipe_id: r.get(0)?,
-                        name: r.get(1)?,
-                        description: r.get(2)?,
-                        gene_sequence_json: r.get(3)?,
-                        author_id: r.get(4)?,
-                        forked_from: r.get(5)?,
-                        created_at_ms: r.get(6)?,
-                        updated_at_ms: r.get(7)?,
-                        is_public: r.get::<_, i32>(8)? != 0,
+                let result: Vec<RecipeRecord> = stmt
+                    .query_map(params![limit as i64], |r| {
+                        Ok(RecipeRecord {
+                            recipe_id: r.get(0)?,
+                            name: r.get(1)?,
+                            description: r.get(2)?,
+                            gene_sequence_json: r.get(3)?,
+                            author_id: r.get(4)?,
+                            forked_from: r.get(5)?,
+                            created_at_ms: r.get(6)?,
+                            updated_at_ms: r.get(7)?,
+                            is_public: r.get::<_, i32>(8)? != 0,
+                        })
                     })
-                }).map_err(|e| KernelError::Driver(format!("query recipes: {}", e)))?
-                .filter_map(|r| r.ok())
-                .collect();
+                    .map_err(|e| KernelError::Driver(format!("query recipes: {}", e)))?
+                    .filter_map(|r| r.ok())
+                    .collect();
                 result
             }
         };
@@ -3675,13 +3707,22 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         }
     }
 
-    fn update_organism(&self, organism_id: &str, current_step: i32, status: &str) -> Result<(), KernelError> {
+    fn update_organism(
+        &self,
+        organism_id: &str,
+        current_step: i32,
+        status: &str,
+    ) -> Result<(), KernelError> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
         let now = Utc::now().timestamp_millis();
-        let completed_at_ms: Option<i64> = if status == "completed" { Some(now) } else { None };
+        let completed_at_ms: Option<i64> = if status == "completed" {
+            Some(now)
+        } else {
+            None
+        };
         let updated = conn
             .execute(
                 "UPDATE runtime_organisms SET current_step = ?2, status = ?3, completed_at_ms = ?4 WHERE organism_id = ?1",
@@ -3768,27 +3809,35 @@ impl RuntimeRepository for SqliteRuntimeRepository {
         Ok(())
     }
 
-    fn get_session_history(&self, session_id: &str, limit: usize) -> Result<Vec<SessionMessageRecord>, KernelError> {
+    fn get_session_history(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionMessageRecord>, KernelError> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
-        let mut stmt = conn.prepare(
-            "SELECT message_id, session_id, sender_id, content, message_type, sent_at_ms
-             FROM runtime_collab_messages WHERE session_id = ?1 ORDER BY sent_at_ms DESC LIMIT ?2"
-        ).map_err(|e| KernelError::Driver(format!("prepare session history: {}", e)))?;
-        let messages = stmt.query_map(params![session_id, limit as i64], |r| {
-            Ok(SessionMessageRecord {
-                message_id: r.get(0)?,
-                session_id: r.get(1)?,
-                sender_id: r.get(2)?,
-                content: r.get(3)?,
-                message_type: r.get(4)?,
-                sent_at_ms: r.get(5)?,
+        let mut stmt = conn
+            .prepare(
+                "SELECT message_id, session_id, sender_id, content, message_type, sent_at_ms
+             FROM runtime_collab_messages WHERE session_id = ?1 ORDER BY sent_at_ms DESC LIMIT ?2",
+            )
+            .map_err(|e| KernelError::Driver(format!("prepare session history: {}", e)))?;
+        let messages = stmt
+            .query_map(params![session_id, limit as i64], |r| {
+                Ok(SessionMessageRecord {
+                    message_id: r.get(0)?,
+                    session_id: r.get(1)?,
+                    sender_id: r.get(2)?,
+                    content: r.get(3)?,
+                    message_type: r.get(4)?,
+                    sent_at_ms: r.get(5)?,
+                })
             })
-        }).map_err(|e| KernelError::Driver(format!("query session history: {}", e)))?
-        .filter_map(|r| r.ok())
-        .collect();
+            .map_err(|e| KernelError::Driver(format!("query session history: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(messages)
     }
 
@@ -3857,25 +3906,32 @@ impl RuntimeRepository for SqliteRuntimeRepository {
             "SELECT dispute_id, bounty_id, opened_by, status, evidence_json, resolution, resolved_by, resolved_at_ms, created_at_ms
              FROM runtime_disputes WHERE bounty_id = ?1 ORDER BY created_at_ms DESC"
         ).map_err(|e| KernelError::Driver(format!("prepare disputes: {}", e)))?;
-        let disputes = stmt.query_map(params![bounty_id], |r| {
-            Ok(DisputeRecord {
-                dispute_id: r.get(0)?,
-                bounty_id: r.get(1)?,
-                opened_by: r.get(2)?,
-                status: DisputeStatus::from_str(&r.get::<_, String>(3)?),
-                evidence_json: r.get(4)?,
-                resolution: r.get(5)?,
-                resolved_by: r.get(6)?,
-                resolved_at_ms: r.get(7)?,
-                created_at_ms: r.get(8)?,
+        let disputes = stmt
+            .query_map(params![bounty_id], |r| {
+                Ok(DisputeRecord {
+                    dispute_id: r.get(0)?,
+                    bounty_id: r.get(1)?,
+                    opened_by: r.get(2)?,
+                    status: DisputeStatus::from_str(&r.get::<_, String>(3)?),
+                    evidence_json: r.get(4)?,
+                    resolution: r.get(5)?,
+                    resolved_by: r.get(6)?,
+                    resolved_at_ms: r.get(7)?,
+                    created_at_ms: r.get(8)?,
+                })
             })
-        }).map_err(|e| KernelError::Driver(format!("query disputes: {}", e)))?
-        .filter_map(|r| r.ok())
-        .collect();
+            .map_err(|e| KernelError::Driver(format!("query disputes: {}", e)))?
+            .filter_map(|r| r.ok())
+            .collect();
         Ok(disputes)
     }
 
-    fn resolve_dispute(&self, dispute_id: &str, resolution: &str, resolved_by: &str) -> Result<(), KernelError> {
+    fn resolve_dispute(
+        &self,
+        dispute_id: &str,
+        resolution: &str,
+        resolved_by: &str,
+    ) -> Result<(), KernelError> {
         let conn = self
             .conn
             .lock()
