@@ -3361,6 +3361,31 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
                 resource_type: "asset",
                 resource_id: None,
             }),
+            ["a2a", "task", "submit"] => Some(AuditTarget {
+                action: "a2a.semantic.task.submit",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "task", "release"] => Some(AuditTarget {
+                action: "a2a.semantic.task.release",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "task", "accept-submission"] => Some(AuditTarget {
+                action: "a2a.semantic.task.accept_submission",
+                resource_type: "submission",
+                resource_id: None,
+            }),
+            ["a2a", "task", "swarm"] => Some(AuditTarget {
+                action: "a2a.semantic.task.swarm",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "ask"] => Some(AuditTarget {
+                action: "a2a.semantic.ask",
+                resource_type: "question",
+                resource_id: None,
+            }),
             ["a2a", "tasks", "distribute"] => Some(AuditTarget {
                 action: "a2a.compat.distribute",
                 resource_type: "task",
@@ -18216,6 +18241,291 @@ mod tests {
     }
 
     #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_task_lifecycle_supports_submit_report_accept_and_release_transitions() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-life-task-1",
+                    "sender_id": "sem-life-agent",
+                    "title": "Lifecycle task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+        let submit_body = axum::body::to_bytes(submit_resp.into_body(), usize::MAX)
+            .await
+            .expect("submit body");
+        let submit_json: serde_json::Value =
+            serde_json::from_slice(&submit_body).expect("submit json");
+        assert_eq!(submit_json["data"]["state"], "created");
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-life-task-1",
+                    "sender_id": "sem-life-agent",
+                    "summary": "submission for lifecycle"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .expect("report body");
+        let report_json: serde_json::Value =
+            serde_json::from_slice(&report_body).expect("report json");
+        let submission_id = report_json["data"]["submission_id"]
+            .as_str()
+            .expect("submission_id")
+            .to_string();
+        assert_eq!(report_json["data"]["status"], "submitted");
+
+        let get_after_report_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/sem-life-task-1")
+            .body(Body::empty())
+            .unwrap();
+        let get_after_report_resp = router.clone().oneshot(get_after_report_req).await.unwrap();
+        assert_eq!(get_after_report_resp.status(), StatusCode::OK);
+        let get_after_report_body =
+            axum::body::to_bytes(get_after_report_resp.into_body(), usize::MAX)
+                .await
+                .expect("get-after-report body");
+        let get_after_report_json: serde_json::Value =
+            serde_json::from_slice(&get_after_report_body).expect("get-after-report json");
+        assert_eq!(get_after_report_json["data"]["task"]["status"], "submitted");
+
+        let accept_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/accept-submission")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-life-task-1",
+                    "submission_id": submission_id,
+                    "sender_id": "sem-life-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let accept_resp = router.clone().oneshot(accept_req).await.unwrap();
+        assert_eq!(accept_resp.status(), StatusCode::OK);
+        let accept_body = axum::body::to_bytes(accept_resp.into_body(), usize::MAX)
+            .await
+            .expect("accept body");
+        let accept_json: serde_json::Value =
+            serde_json::from_slice(&accept_body).expect("accept json");
+        assert_eq!(accept_json["data"]["status"], "accepted");
+
+        let release_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/release")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-life-task-1",
+                    "sender_id": "sem-life-agent",
+                    "reason": "handoff to broader swarm"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let release_resp = router.clone().oneshot(release_req).await.unwrap();
+        assert_eq!(release_resp.status(), StatusCode::OK);
+        let release_body = axum::body::to_bytes(release_resp.into_body(), usize::MAX)
+            .await
+            .expect("release body");
+        let release_json: serde_json::Value =
+            serde_json::from_slice(&release_body).expect("release json");
+        assert_eq!(release_json["data"]["task"]["status"], "released");
+
+        let get_final_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/sem-life-task-1")
+            .body(Body::empty())
+            .unwrap();
+        let get_final_resp = router.oneshot(get_final_req).await.unwrap();
+        assert_eq!(get_final_resp.status(), StatusCode::OK);
+        let get_final_body = axum::body::to_bytes(get_final_resp.into_body(), usize::MAX)
+            .await
+            .expect("get-final body");
+        let get_final_json: serde_json::Value =
+            serde_json::from_slice(&get_final_body).expect("get-final json");
+        assert_eq!(get_final_json["data"]["task"]["status"], "released");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_task_accept_submission_requires_submitted_state() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-life-task-negative",
+                    "sender_id": "sem-life-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+
+        let accept_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/accept-submission")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-life-task-negative",
+                    "submission_id": "missing-submission",
+                    "sender_id": "sem-life-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let accept_resp = router.oneshot(accept_req).await.unwrap();
+        assert_eq!(accept_resp.status(), StatusCode::CONFLICT);
+        let accept_body = axum::body::to_bytes(accept_resp.into_body(), usize::MAX)
+            .await
+            .expect("accept conflict body");
+        let accept_json: serde_json::Value =
+            serde_json::from_slice(&accept_body).expect("accept conflict json");
+        assert_eq!(accept_json["error"]["code"], "conflict");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_task_submit_worker_role_is_forbidden() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "worker-task-key-1",
+                "worker-task-secret-1",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("x-api-key-id", "worker-task-key-1")
+            .header("x-api-key", "worker-task-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "worker-task-agent",
+                    "title": "worker should be denied"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("forbidden body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("forbidden json");
+        assert_eq!(json["error"]["code"], "forbidden");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_task_list_supports_status_pagination_and_stable_ordering() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            tasks.insert(
+                "sem-task-a".to_string(),
+                super::EvomapSemanticTaskRecord {
+                    task_id: "sem-task-a".to_string(),
+                    title: "Task A".to_string(),
+                    summary: "A".to_string(),
+                    status: super::EvomapSemanticTaskStatus::Open,
+                    created_by: "planner-a".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 10,
+                    updated_at_ms: 10,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "sem-task-b".to_string(),
+                super::EvomapSemanticTaskRecord {
+                    task_id: "sem-task-b".to_string(),
+                    title: "Task B".to_string(),
+                    summary: "B".to_string(),
+                    status: super::EvomapSemanticTaskStatus::Open,
+                    created_by: "planner-b".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 10,
+                    updated_at_ms: 10,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "sem-task-c".to_string(),
+                super::EvomapSemanticTaskRecord {
+                    task_id: "sem-task-c".to_string(),
+                    title: "Task C".to_string(),
+                    summary: "C".to_string(),
+                    status: super::EvomapSemanticTaskStatus::Released,
+                    created_by: "planner-c".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 10,
+                    updated_at_ms: 10,
+                    last_submission_id: None,
+                },
+            );
+        }
+        let router = build_router(state);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/list?status=open&limit=1&offset=1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("list body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("list json");
+        assert_eq!(json["data"]["total"], 2);
+        assert_eq!(json["data"]["limit"], 1);
+        assert_eq!(json["data"]["offset"], 1);
+        let tasks = json["data"]["tasks"].as_array().expect("tasks array");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["task_id"], "sem-task-b");
+    }
+
+    #[cfg(all(
         feature = "sqlite-persistence",
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
@@ -18366,6 +18676,153 @@ mod tests {
             ("req-sem-report", "a2a.semantic.report"),
             ("req-sem-decision", "a2a.semantic.decision"),
             ("req-sem-revoke", "a2a.semantic.revoke"),
+        ] {
+            assert!(logs.iter().any(|log| {
+                log.request_id == request_id && log.action == action && log.result == "success"
+            }));
+        }
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn audit_logs_capture_semantic_task_lifecycle_write_actions() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_with_role("sem-task-audit-key", ApiRole::Operator);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("x-request-id", "req-task-submit")
+            .header("x-api-key", "sem-task-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-audit-task-lifecycle",
+                    "sender_id": "sem-audit-agent",
+                    "title": "Audit lifecycle task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("x-request-id", "req-task-report")
+            .header("x-api-key", "sem-task-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-audit-task-lifecycle",
+                    "sender_id": "sem-audit-agent",
+                    "summary": "audit submission"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .expect("report body");
+        let report_json: serde_json::Value =
+            serde_json::from_slice(&report_body).expect("report json");
+        let submission_id = report_json["data"]["submission_id"]
+            .as_str()
+            .expect("submission_id")
+            .to_string();
+
+        let accept_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/accept-submission")
+            .header("x-request-id", "req-task-accept-submission")
+            .header("x-api-key", "sem-task-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-audit-task-lifecycle",
+                    "submission_id": submission_id,
+                    "sender_id": "sem-audit-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let accept_resp = router.clone().oneshot(accept_req).await.unwrap();
+        assert_eq!(accept_resp.status(), StatusCode::OK);
+
+        let release_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/release")
+            .header("x-request-id", "req-task-release")
+            .header("x-api-key", "sem-task-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-audit-task-lifecycle",
+                    "sender_id": "sem-audit-agent",
+                    "reason": "audit release"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let release_resp = router.clone().oneshot(release_req).await.unwrap();
+        assert_eq!(release_resp.status(), StatusCode::OK);
+
+        let swarm_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/swarm")
+            .header("x-request-id", "req-task-swarm")
+            .header("x-api-key", "sem-task-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-audit-task-lifecycle",
+                    "sender_id": "sem-audit-agent",
+                    "summary": "swarm split"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let swarm_resp = router.clone().oneshot(swarm_req).await.unwrap();
+        assert_eq!(swarm_resp.status(), StatusCode::OK);
+
+        let ask_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/ask")
+            .header("x-request-id", "req-task-ask")
+            .header("x-api-key", "sem-task-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-audit-agent",
+                    "question": "Need reviewer for release candidate?"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let ask_resp = router.clone().oneshot(ask_req).await.unwrap();
+        assert_eq!(ask_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(500).expect("list audit logs");
+        for (request_id, action) in [
+            ("req-task-submit", "a2a.semantic.task.submit"),
+            ("req-task-report", "a2a.semantic.report"),
+            (
+                "req-task-accept-submission",
+                "a2a.semantic.task.accept_submission",
+            ),
+            ("req-task-release", "a2a.semantic.task.release"),
+            ("req-task-swarm", "a2a.semantic.task.swarm"),
+            ("req-task-ask", "a2a.semantic.ask"),
         ] {
             assert!(logs.iter().any(|log| {
                 log.request_id == request_id && log.action == action && log.result == "success"
