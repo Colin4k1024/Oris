@@ -2440,13 +2440,13 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/task/swarm", post(evomap_task_swarm))
         .route("/a2a/ask", post(evomap_task_ask))
         // EvoMap assets and discovery surface
-        .route("/a2a/assets/search", get(evomap_surface_get))
-        .route("/a2a/assets/ranked", get(evomap_surface_get))
-        .route("/a2a/assets/explore", get(evomap_surface_get))
-        .route("/a2a/assets/recommended", get(evomap_surface_get))
-        .route("/a2a/assets/daily-discovery", get(evomap_surface_get))
-        .route("/a2a/assets/trending", get(evomap_surface_get))
-        .route("/a2a/assets/categories", get(evomap_surface_get))
+        .route("/a2a/assets/search", get(evomap_assets_search))
+        .route("/a2a/assets/ranked", get(evomap_assets_ranked))
+        .route("/a2a/assets/explore", get(evomap_assets_explore))
+        .route("/a2a/assets/recommended", get(evomap_assets_recommended))
+        .route("/a2a/assets/daily-discovery", get(evomap_assets_explore))
+        .route("/a2a/assets/trending", get(evomap_assets_trending))
+        .route("/a2a/assets/categories", get(evomap_assets_categories))
         .route("/a2a/assets/:id", get(evomap_surface_get))
         .route("/a2a/assets/:id/branches", get(evomap_surface_get))
         .route("/a2a/assets/:id/timeline", get(evomap_surface_get))
@@ -17949,6 +17949,163 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evomap_asset_discovery_ranked_and_categories_are_deterministic_and_idempotent() {
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evomap-asset-discovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&store_root);
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_evolution_store(Arc::new(
+                crate::evolution::JsonlEvolutionStore::new(&store_root),
+            )),
+        );
+
+        let handshake =
+            handshake_agent_with_caps(&router, "evomap-discovery-agent", &["EvolutionFetch"]).await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let ranked_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=evomap-discovery-agent&limit=1&offset=0")
+            .body(Body::empty())
+            .unwrap();
+        let ranked_resp = router.clone().oneshot(ranked_req).await.unwrap();
+        assert_eq!(ranked_resp.status(), StatusCode::OK);
+        let ranked_body = axum::body::to_bytes(ranked_resp.into_body(), usize::MAX)
+            .await
+            .expect("ranked body");
+        let ranked_json: serde_json::Value =
+            serde_json::from_slice(&ranked_body).expect("ranked json");
+        assert_eq!(ranked_json["data"]["mode"], "ranked");
+        assert_eq!(ranked_json["data"]["idempotent"], true);
+        assert_eq!(ranked_json["data"]["total"], 2);
+        assert_eq!(ranked_json["data"]["limit"], 1);
+        assert_eq!(ranked_json["data"]["offset"], 0);
+        assert_eq!(
+            ranked_json["data"]["results"][0]["asset_id"],
+            "builtin-experience-ci-fix-v1"
+        );
+
+        let ranked_repeat_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=evomap-discovery-agent&limit=1&offset=0")
+            .body(Body::empty())
+            .unwrap();
+        let ranked_repeat_resp = router.clone().oneshot(ranked_repeat_req).await.unwrap();
+        assert_eq!(ranked_repeat_resp.status(), StatusCode::OK);
+        let ranked_repeat_body = axum::body::to_bytes(ranked_repeat_resp.into_body(), usize::MAX)
+            .await
+            .expect("ranked repeat body");
+        let ranked_repeat_json: serde_json::Value =
+            serde_json::from_slice(&ranked_repeat_body).expect("ranked repeat json");
+        assert_eq!(ranked_repeat_json["data"], ranked_json["data"]);
+
+        let ranked_page2_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=evomap-discovery-agent&limit=1&offset=1")
+            .body(Body::empty())
+            .unwrap();
+        let ranked_page2_resp = router.clone().oneshot(ranked_page2_req).await.unwrap();
+        assert_eq!(ranked_page2_resp.status(), StatusCode::OK);
+        let ranked_page2_body = axum::body::to_bytes(ranked_page2_resp.into_body(), usize::MAX)
+            .await
+            .expect("ranked page2 body");
+        let ranked_page2_json: serde_json::Value =
+            serde_json::from_slice(&ranked_page2_body).expect("ranked page2 json");
+        assert_eq!(
+            ranked_page2_json["data"]["results"][0]["asset_id"],
+            "builtin-experience-docs-rewrite-v1"
+        );
+
+        let categories_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/categories?sender_id=evomap-discovery-agent")
+            .body(Body::empty())
+            .unwrap();
+        let categories_resp = router.clone().oneshot(categories_req).await.unwrap();
+        assert_eq!(categories_resp.status(), StatusCode::OK);
+        let categories_body = axum::body::to_bytes(categories_resp.into_body(), usize::MAX)
+            .await
+            .expect("categories body");
+        let categories_json: serde_json::Value =
+            serde_json::from_slice(&categories_body).expect("categories json");
+        assert_eq!(categories_json["data"]["mode"], "categories");
+        assert_eq!(categories_json["data"]["total_categories"], 2);
+        assert_eq!(
+            categories_json["data"]["categories"][0]["category"],
+            "ci.fix"
+        );
+
+        let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_asset_discovery_rejects_invalid_asset_type() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake =
+            handshake_agent_with_caps(&router, "evomap-discovery-invalid", &["EvolutionFetch"])
+                .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=evomap-discovery-invalid&asset_type=invalid")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("invalid asset_type body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("invalid asset_type json");
+        assert_eq!(json["error"]["code"], "invalid_argument");
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("asset_type must be one of"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_asset_discovery_search_worker_role_is_forbidden() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "worker-asset-discovery-key",
+                "worker-asset-discovery-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=worker-asset-discovery-agent")
+            .header("x-api-key-id", "worker-asset-discovery-key")
+            .header("x-api-key", "worker-asset-discovery-secret")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("worker forbidden body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("worker forbidden json");
+        assert_eq!(json["error"]["code"], "forbidden");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evomap_governance_route_surface_includes_council_and_project_endpoints() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let checks = vec![
@@ -19237,6 +19394,626 @@ struct EvomapTaskListQuery {
     offset: Option<usize>,
     status: Option<String>,
     sender_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapAssetDiscoveryQuery {
+    sender_id: Option<String>,
+    q: Option<String>,
+    signals: Option<String>,
+    asset_type: Option<String>,
+    category: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Copy, Debug)]
+enum EvomapAssetDiscoveryMode {
+    Search,
+    Ranked,
+    Explore,
+    Recommended,
+    Trending,
+    Categories,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl EvomapAssetDiscoveryMode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Ranked => "ranked",
+            Self::Explore => "explore",
+            Self::Recommended => "recommended",
+            Self::Trending => "trending",
+            Self::Categories => "categories",
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug)]
+struct EvomapAssetDiscoveryItem {
+    asset_id: String,
+    asset_type: &'static str,
+    type_label: &'static str,
+    title: String,
+    summary: String,
+    category: String,
+    source: String,
+    matched_signals: Vec<String>,
+    term_hits: usize,
+    signal_hits: usize,
+    score: f64,
+    content_hash: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_parse_discovery_tokens(raw: Option<&str>) -> Vec<String> {
+    let mut tokens = Vec::new();
+    if let Some(raw) = raw {
+        for token in raw
+            .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            let normalized = token.to_ascii_lowercase();
+            if !tokens.contains(&normalized) {
+                tokens.push(normalized);
+            }
+        }
+    }
+    tokens
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_strategy_metadata_value(entries: &[String], key: &str) -> Option<String> {
+    entries.iter().find_map(|entry| {
+        let (entry_key, entry_value) = entry.split_once('=')?;
+        if entry_key.trim().eq_ignore_ascii_case(key) {
+            let value = entry_value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_discovery_term_hits(candidate: &str, terms: &[String]) -> usize {
+    let candidate = candidate.to_ascii_lowercase();
+    terms
+        .iter()
+        .filter(|term| candidate.contains(term.as_str()))
+        .count()
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_discovery_signal_hits(candidates: &[String], query_signals: &[String]) -> Vec<String> {
+    let mut matched = Vec::new();
+    for signal in query_signals {
+        if candidates
+            .iter()
+            .any(|candidate| candidate.to_ascii_lowercase().contains(signal.as_str()))
+            && !matched.contains(signal)
+        {
+            matched.push(signal.clone());
+        }
+    }
+    matched
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_normalize_asset_type(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "gene" => Some("gene"),
+        "capsule" => Some("capsule"),
+        "event" | "evolution_event" => Some("event"),
+        _ => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_discovery_source_rank(source: &str) -> i32 {
+    if source.eq_ignore_ascii_case("reported_experience") {
+        3
+    } else if source.eq_ignore_ascii_case("builtin") {
+        2
+    } else if source.eq_ignore_ascii_case("capsule") {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_build_discovery_item(
+    asset: &crate::evolution_network::NetworkAsset,
+    query_terms: &[String],
+    query_signals: &[String],
+) -> EvomapAssetDiscoveryItem {
+    let content_hash = compat_asset_content_hash(asset);
+    match asset {
+        crate::evolution_network::NetworkAsset::Gene { gene } => {
+            let title = evomap_strategy_metadata_value(&gene.strategy, "task_label")
+                .unwrap_or_else(|| gene.id.clone());
+            let summary = evomap_strategy_metadata_value(&gene.strategy, "summary")
+                .unwrap_or_else(|| format!("signals: {}", gene.signals.join(", ")));
+            let category = evomap_strategy_metadata_value(&gene.strategy, "task_class")
+                .or_else(|| gene.signals.first().cloned())
+                .unwrap_or_else(|| "uncategorized".to_string());
+            let source = evomap_strategy_metadata_value(&gene.strategy, "asset_origin")
+                .unwrap_or_else(|| "unknown".to_string());
+            let candidate = format!(
+                "{} {} {} {} {}",
+                gene.id,
+                title,
+                summary,
+                category,
+                gene.signals.join(" ")
+            );
+            let term_hits = evomap_discovery_term_hits(&candidate, query_terms);
+            let matched_signals = evomap_discovery_signal_hits(&gene.signals, query_signals);
+            let signal_hits = matched_signals.len();
+            let score = 1.0 + term_hits as f64 * 0.7 + signal_hits as f64 * 0.3;
+            EvomapAssetDiscoveryItem {
+                asset_id: gene.id.clone(),
+                asset_type: "gene",
+                type_label: "Gene",
+                title,
+                summary,
+                category,
+                source,
+                matched_signals,
+                term_hits,
+                signal_hits,
+                score,
+                content_hash,
+            }
+        }
+        crate::evolution_network::NetworkAsset::Capsule { capsule } => {
+            let title = capsule.id.clone();
+            let summary = format!("capsule for gene {}", capsule.gene_id);
+            let category = capsule.gene_id.clone();
+            let candidate = format!(
+                "{} {} {} {}",
+                capsule.id, capsule.gene_id, capsule.mutation_id, summary
+            );
+            let term_hits = evomap_discovery_term_hits(&candidate, query_terms);
+            let score = capsule.confidence as f64 + term_hits as f64 * 0.4;
+            EvomapAssetDiscoveryItem {
+                asset_id: capsule.id.clone(),
+                asset_type: "capsule",
+                type_label: "Capsule",
+                title,
+                summary,
+                category,
+                source: "capsule".to_string(),
+                matched_signals: Vec::new(),
+                term_hits,
+                signal_hits: 0,
+                score,
+                content_hash,
+            }
+        }
+        crate::evolution_network::NetworkAsset::EvolutionEvent { event } => {
+            let payload = serde_json::to_value(event).unwrap_or(Value::Null);
+            let kind = payload
+                .get("kind")
+                .and_then(Value::as_str)
+                .unwrap_or("event")
+                .to_string();
+            let event_id = payload
+                .pointer("/mutation/intent/id")
+                .and_then(Value::as_str)
+                .or_else(|| payload.get("mutation_id").and_then(Value::as_str))
+                .or_else(|| payload.get("gene_id").and_then(Value::as_str))
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    content_hash
+                        .as_deref()
+                        .map(|hash| format!("event-{}", &hash[..hash.len().min(12)]))
+                })
+                .unwrap_or_else(|| format!("event-{}", uuid::Uuid::new_v4()));
+            let summary = payload
+                .get("spec_id")
+                .and_then(Value::as_str)
+                .map(|spec_id| format!("event {} linked spec {}", kind, spec_id))
+                .unwrap_or_else(|| format!("evolution event {}", kind));
+            let candidate = format!("{event_id} {kind} {summary}");
+            let term_hits = evomap_discovery_term_hits(&candidate, query_terms);
+            let score = 0.2 + term_hits as f64 * 0.3;
+            EvomapAssetDiscoveryItem {
+                asset_id: event_id,
+                asset_type: "event",
+                type_label: "EvolutionEvent",
+                title: kind.clone(),
+                summary,
+                category: kind,
+                source: "event".to_string(),
+                matched_signals: Vec::new(),
+                term_hits,
+                signal_hits: 0,
+                score,
+                content_hash,
+            }
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn evomap_assets_discovery(
+    state: ExecutionApiState,
+    headers: HeaderMap,
+    q: EvomapAssetDiscoveryQuery,
+    mode: EvomapAssetDiscoveryMode,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = q
+        .sender_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("sender_id is required for asset discovery")
+                .with_request_id(rid.clone())
+        })?
+        .to_string();
+    validate_sender_id(&sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+
+    let limit = q.limit.unwrap_or(20).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let requested_asset_type = match q
+        .asset_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(
+            evomap_normalize_asset_type(value)
+                .ok_or_else(|| {
+                    ApiError::bad_request("asset_type must be one of: gene|capsule|event")
+                        .with_request_id(rid.clone())
+                })?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let requested_category = q
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let query_terms = evomap_parse_discovery_tokens(q.q.as_deref());
+    let query_signals = evomap_parse_discovery_tokens(q.signals.as_deref());
+    let fetch_signals = if query_signals.is_empty() {
+        query_terms.clone()
+    } else {
+        query_signals.clone()
+    };
+
+    let principal = resolve_a2a_principal(&headers, &state);
+    ensure_a2a_authorized_action(
+        &state,
+        &sender_id,
+        A2aCapability::EvolutionFetch,
+        A2aPrivilegeAction::EvolutionFetch,
+        principal.as_ref(),
+        &rid,
+    )
+    .await?;
+
+    state
+        .evolution_node
+        .ensure_builtin_experience_assets(sender_id.clone())
+        .map_err(|e| {
+            ApiError::internal(format!("ensure builtin experience assets: {e}"))
+                .with_request_id(rid.clone())
+        })?;
+
+    let fetch = state
+        .evolution_node
+        .fetch_assets(
+            "execution-api",
+            &FetchQuery {
+                sender_id: sender_id.clone(),
+                signals: fetch_signals.clone(),
+            },
+        )
+        .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
+
+    let mut items = fetch
+        .assets
+        .iter()
+        .map(|asset| evomap_build_discovery_item(asset, &query_terms, &query_signals))
+        .collect::<Vec<_>>();
+
+    if let Some(asset_type) = requested_asset_type.as_deref() {
+        items.retain(|item| item.asset_type == asset_type);
+    }
+    if let Some(category) = requested_category.as_deref() {
+        items.retain(|item| item.category.to_ascii_lowercase() == *category);
+    }
+    if matches!(mode, EvomapAssetDiscoveryMode::Search) && !query_terms.is_empty() {
+        items.retain(|item| item.term_hits > 0);
+    }
+
+    match mode {
+        EvomapAssetDiscoveryMode::Search | EvomapAssetDiscoveryMode::Ranked => {
+            items.sort_by(|left, right| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.asset_id.cmp(&right.asset_id))
+            });
+        }
+        EvomapAssetDiscoveryMode::Explore => {
+            items.sort_by(|left, right| {
+                left.category
+                    .cmp(&right.category)
+                    .then_with(|| {
+                        right
+                            .score
+                            .partial_cmp(&left.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.asset_id.cmp(&right.asset_id))
+            });
+        }
+        EvomapAssetDiscoveryMode::Recommended => {
+            items.sort_by(|left, right| {
+                evomap_discovery_source_rank(&right.source)
+                    .cmp(&evomap_discovery_source_rank(&left.source))
+                    .then_with(|| {
+                        right
+                            .score
+                            .partial_cmp(&left.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.asset_id.cmp(&right.asset_id))
+            });
+        }
+        EvomapAssetDiscoveryMode::Trending => {
+            items.sort_by(|left, right| {
+                right
+                    .signal_hits
+                    .cmp(&left.signal_hits)
+                    .then_with(|| {
+                        right
+                            .score
+                            .partial_cmp(&left.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .then_with(|| left.asset_id.cmp(&right.asset_id))
+            });
+        }
+        EvomapAssetDiscoveryMode::Categories => {
+            items.sort_by(|left, right| {
+                left.category
+                    .cmp(&right.category)
+                    .then_with(|| left.asset_id.cmp(&right.asset_id))
+            });
+        }
+    }
+
+    if matches!(mode, EvomapAssetDiscoveryMode::Categories) {
+        let mut buckets: HashMap<String, (usize, f64, String)> = HashMap::new();
+        for item in &items {
+            let entry = buckets
+                .entry(item.category.clone())
+                .or_insert_with(|| (0, item.score, item.asset_id.clone()));
+            entry.0 += 1;
+            let keep_existing =
+                item.score < entry.1 || (item.score == entry.1 && item.asset_id > entry.2);
+            if !keep_existing {
+                entry.1 = item.score;
+                entry.2 = item.asset_id.clone();
+            }
+        }
+        let mut categories = buckets
+            .into_iter()
+            .map(|(category, (asset_count, top_score, top_asset_id))| {
+                serde_json::json!({
+                    "category": category,
+                    "asset_count": asset_count,
+                    "top_asset_id": top_asset_id,
+                    "top_score": top_score
+                })
+            })
+            .collect::<Vec<_>>();
+        categories.sort_by(|left, right| {
+            right["asset_count"]
+                .as_u64()
+                .cmp(&left["asset_count"].as_u64())
+                .then_with(|| {
+                    left["category"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .cmp(right["category"].as_str().unwrap_or_default())
+                })
+        });
+        let total_categories = categories.len();
+        let categories = categories
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        return Ok(evomap_value_response(
+            rid,
+            serde_json::json!({
+                "mode": mode.as_str(),
+                "sender_id": sender_id,
+                "query": {
+                    "q": q.q,
+                    "signals": query_signals,
+                    "asset_type": requested_asset_type,
+                    "category": requested_category,
+                },
+                "categories": categories,
+                "total_categories": total_categories,
+                "limit": limit,
+                "offset": offset,
+                "idempotent": true
+            }),
+        ));
+    }
+
+    let total = items.len();
+    let results = items
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .enumerate()
+        .map(|(index, item)| {
+            serde_json::json!({
+                "rank": offset + index + 1,
+                "asset_id": item.asset_id,
+                "asset_type": item.asset_type,
+                "type": item.type_label,
+                "title": item.title,
+                "summary": item.summary,
+                "category": item.category,
+                "source": item.source,
+                "score": item.score,
+                "matched_signals": item.matched_signals,
+                "content_hash": item.content_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "mode": mode.as_str(),
+            "sender_id": sender_id,
+            "query": {
+                "q": q.q,
+                "signals": query_signals,
+                "asset_type": requested_asset_type,
+                "category": requested_category,
+            },
+            "results": results,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_assets_search(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapAssetDiscoveryQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    evomap_assets_discovery(state, headers, q, EvomapAssetDiscoveryMode::Search).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_assets_ranked(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapAssetDiscoveryQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    evomap_assets_discovery(state, headers, q, EvomapAssetDiscoveryMode::Ranked).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_assets_explore(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapAssetDiscoveryQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    evomap_assets_discovery(state, headers, q, EvomapAssetDiscoveryMode::Explore).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_assets_recommended(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapAssetDiscoveryQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    evomap_assets_discovery(state, headers, q, EvomapAssetDiscoveryMode::Recommended).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_assets_trending(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapAssetDiscoveryQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    evomap_assets_discovery(state, headers, q, EvomapAssetDiscoveryMode::Trending).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_assets_categories(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapAssetDiscoveryQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    evomap_assets_discovery(state, headers, q, EvomapAssetDiscoveryMode::Categories).await
 }
 
 #[cfg(all(
