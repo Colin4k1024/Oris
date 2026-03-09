@@ -557,6 +557,66 @@ struct EvomapAssetVoteRecord {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum EvomapCouncilSessionStatus {
+    Open,
+    Closed,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl EvomapCouncilSessionStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapCouncilSessionRecord {
+    session_id: String,
+    status: EvomapCouncilSessionStatus,
+    opened_by: String,
+    opened_at_ms: i64,
+    closed_at_ms: Option<i64>,
+    quorum: u32,
+    min_yes: u32,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapCouncilProposalRecord {
+    proposal_id: String,
+    session_id: String,
+    title: String,
+    summary: Option<String>,
+    proposer_id: String,
+    status: String,
+    votes_yes: u32,
+    votes_no: u32,
+    votes_abstain: u32,
+    voters: HashMap<String, String>,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    executed_at_ms: Option<i64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 const A2A_SESSION_TTL_HOURS: i64 = 24;
 
 #[cfg(all(
@@ -2101,6 +2161,21 @@ pub struct ExecutionApiState {
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
     ))]
+    evomap_council_sessions: Arc<RwLock<HashMap<String, EvomapCouncilSessionRecord>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_council_active_session_id: Arc<RwLock<Option<String>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_council_proposals: Arc<RwLock<HashMap<String, EvomapCouncilProposalRecord>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
     evomap_decision_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
         feature = "agent-contract-experimental",
@@ -2186,6 +2261,21 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             evomap_asset_votes: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_council_sessions: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_council_active_session_id: Arc::new(RwLock::new(None)),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_council_proposals: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
                 feature = "agent-contract-experimental",
                 feature = "evolution-network-experimental"
@@ -2544,10 +2634,10 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/stats", get(evomap_stats))
         .route("/a2a/nodes", get(evomap_nodes))
         .route("/a2a/trending", get(evomap_surface_get))
-        .route("/a2a/council/propose", post(evomap_surface_post))
-        .route("/a2a/council/vote", post(evomap_surface_post))
-        .route("/a2a/council/execute", post(evomap_surface_post))
-        .route("/a2a/council/session", post(evomap_surface_post))
+        .route("/a2a/council/propose", post(evomap_council_propose))
+        .route("/a2a/council/vote", post(evomap_council_vote))
+        .route("/a2a/council/execute", post(evomap_council_execute))
+        .route("/a2a/council/session", post(evomap_council_session))
         .route("/a2a/project/propose", post(evomap_surface_post))
         .route("/a2a/project/:id/claim", post(evomap_surface_post))
         .route("/a2a/project/:id/progress", post(evomap_surface_post))
@@ -18633,6 +18723,339 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evomap_council_workflow_semantics_support_session_propose_vote_execute_and_idempotency(
+    ) {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let sender_id = "council-sem-agent";
+
+        let open_session_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "action": "open",
+                    "session_id": "council-sem-session",
+                    "quorum": 1,
+                    "min_yes": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let open_session_resp = router.clone().oneshot(open_session_req).await.unwrap();
+        assert_eq!(open_session_resp.status(), StatusCode::OK);
+        let open_session_body = axum::body::to_bytes(open_session_resp.into_body(), usize::MAX)
+            .await
+            .expect("open session body");
+        let open_session_json: serde_json::Value =
+            serde_json::from_slice(&open_session_body).expect("open session json");
+        assert_eq!(
+            open_session_json["data"]["session"]["status"],
+            serde_json::json!("open")
+        );
+
+        let propose_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "proposal_id": "council-sem-proposal-1",
+                    "session_id": "council-sem-session",
+                    "title": "Adopt deterministic council semantics"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let propose_resp = router.clone().oneshot(propose_req).await.unwrap();
+        assert_eq!(propose_resp.status(), StatusCode::OK);
+        let propose_body = axum::body::to_bytes(propose_resp.into_body(), usize::MAX)
+            .await
+            .expect("propose body");
+        let propose_json: serde_json::Value =
+            serde_json::from_slice(&propose_body).expect("propose json");
+        assert_eq!(
+            propose_json["data"]["proposal"]["status"],
+            serde_json::json!("proposed")
+        );
+
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "proposal_id": "council-sem-proposal-1",
+                    "vote": "yes"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let vote_resp = router.clone().oneshot(vote_req).await.unwrap();
+        assert_eq!(vote_resp.status(), StatusCode::OK);
+        let vote_body = axum::body::to_bytes(vote_resp.into_body(), usize::MAX)
+            .await
+            .expect("vote body");
+        let vote_json: serde_json::Value = serde_json::from_slice(&vote_body).expect("vote json");
+        assert_eq!(
+            vote_json["data"]["proposal"]["votes"]["yes"],
+            serde_json::json!(1)
+        );
+
+        let vote_repeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "proposal_id": "council-sem-proposal-1",
+                    "vote": "yes"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let vote_repeat_resp = router.clone().oneshot(vote_repeat_req).await.unwrap();
+        assert_eq!(vote_repeat_resp.status(), StatusCode::OK);
+        let vote_repeat_body = axum::body::to_bytes(vote_repeat_resp.into_body(), usize::MAX)
+            .await
+            .expect("vote repeat body");
+        let vote_repeat_json: serde_json::Value =
+            serde_json::from_slice(&vote_repeat_body).expect("vote repeat json");
+        assert_eq!(vote_repeat_json["data"]["idempotent"], true);
+
+        let execute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "proposal_id": "council-sem-proposal-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let execute_resp = router.clone().oneshot(execute_req).await.unwrap();
+        assert_eq!(execute_resp.status(), StatusCode::OK);
+        let execute_body = axum::body::to_bytes(execute_resp.into_body(), usize::MAX)
+            .await
+            .expect("execute body");
+        let execute_json: serde_json::Value =
+            serde_json::from_slice(&execute_body).expect("execute json");
+        assert_eq!(
+            execute_json["data"]["proposal"]["status"],
+            serde_json::json!("executed")
+        );
+        assert_eq!(execute_json["data"]["idempotent"], false);
+
+        let execute_repeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "proposal_id": "council-sem-proposal-1"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let execute_repeat_resp = router.clone().oneshot(execute_repeat_req).await.unwrap();
+        assert_eq!(execute_repeat_resp.status(), StatusCode::OK);
+        let execute_repeat_body = axum::body::to_bytes(execute_repeat_resp.into_body(), usize::MAX)
+            .await
+            .expect("execute repeat body");
+        let execute_repeat_json: serde_json::Value =
+            serde_json::from_slice(&execute_repeat_body).expect("execute repeat json");
+        assert_eq!(execute_repeat_json["data"]["idempotent"], true);
+
+        let close_session_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "action": "close",
+                    "session_id": "council-sem-session"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let close_session_resp = router.oneshot(close_session_req).await.unwrap();
+        assert_eq!(close_session_resp.status(), StatusCode::OK);
+        let close_session_body = axum::body::to_bytes(close_session_resp.into_body(), usize::MAX)
+            .await
+            .expect("close session body");
+        let close_session_json: serde_json::Value =
+            serde_json::from_slice(&close_session_body).expect("close session json");
+        assert_eq!(
+            close_session_json["data"]["session"]["status"],
+            serde_json::json!("closed")
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_council_execution_preconditions_and_vote_conflicts_are_deterministic() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let open_session_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-sem-agent-a",
+                    "action": "open",
+                    "session_id": "council-sem-session-neg",
+                    "quorum": 2,
+                    "min_yes": 2
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let open_session_resp = router.clone().oneshot(open_session_req).await.unwrap();
+        assert_eq!(open_session_resp.status(), StatusCode::OK);
+
+        let propose_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-sem-agent-a",
+                    "proposal_id": "council-sem-proposal-neg",
+                    "session_id": "council-sem-session-neg",
+                    "title": "Need quorum check"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let propose_resp = router.clone().oneshot(propose_req).await.unwrap();
+        assert_eq!(propose_resp.status(), StatusCode::OK);
+
+        let vote_yes_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-sem-agent-a",
+                    "proposal_id": "council-sem-proposal-neg",
+                    "vote": "yes"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let vote_yes_resp = router.clone().oneshot(vote_yes_req).await.unwrap();
+        assert_eq!(vote_yes_resp.status(), StatusCode::OK);
+
+        let vote_conflict_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-sem-agent-a",
+                    "proposal_id": "council-sem-proposal-neg",
+                    "vote": "no"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let vote_conflict_resp = router.clone().oneshot(vote_conflict_req).await.unwrap();
+        assert_eq!(vote_conflict_resp.status(), StatusCode::CONFLICT);
+        let vote_conflict_body = axum::body::to_bytes(vote_conflict_resp.into_body(), usize::MAX)
+            .await
+            .expect("vote conflict body");
+        let vote_conflict_json: serde_json::Value =
+            serde_json::from_slice(&vote_conflict_body).expect("vote conflict json");
+        assert_eq!(
+            vote_conflict_json["error"]["code"],
+            serde_json::json!("conflict")
+        );
+        assert_eq!(
+            vote_conflict_json["error"]["details"]["reason"],
+            serde_json::json!("vote_conflict")
+        );
+
+        let execute_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-sem-agent-a",
+                    "proposal_id": "council-sem-proposal-neg"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let execute_resp = router.oneshot(execute_req).await.unwrap();
+        assert_eq!(execute_resp.status(), StatusCode::CONFLICT);
+        let execute_body = axum::body::to_bytes(execute_resp.into_body(), usize::MAX)
+            .await
+            .expect("execute conflict body");
+        let execute_json: serde_json::Value =
+            serde_json::from_slice(&execute_body).expect("execute conflict json");
+        assert_eq!(execute_json["error"]["code"], serde_json::json!("conflict"));
+        assert_eq!(
+            execute_json["error"]["details"]["reason"],
+            serde_json::json!("insufficient_quorum")
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_council_propose_worker_role_is_forbidden() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "worker-council-key",
+                "worker-council-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("x-api-key-id", "worker-council-key")
+            .header("x-api-key", "worker-council-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "worker-council-agent",
+                    "title": "worker should be denied"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("worker council forbidden body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("worker council forbidden json");
+        assert_eq!(json["error"]["code"], "forbidden");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evomap_governance_route_surface_includes_council_and_project_endpoints() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let checks = vec![
@@ -19549,25 +19972,42 @@ mod tests {
                 "req-council-propose",
                 "/a2a/council/propose",
                 "a2a.semantic.council.propose",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "proposal_id": "council-audit-proposal",
+                    "title": "Audit council proposal"
+                }),
             ),
             (
                 "req-council-vote",
                 "/a2a/council/vote",
                 "a2a.semantic.council.vote",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "proposal_id": "council-audit-proposal",
+                    "vote": "yes"
+                }),
             ),
             (
                 "req-council-execute",
                 "/a2a/council/execute",
                 "a2a.semantic.council.execute",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "proposal_id": "council-audit-proposal"
+                }),
             ),
             (
                 "req-council-session",
                 "/a2a/council/session",
                 "a2a.semantic.council.session",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "action": "open",
+                    "session_id": "council-audit-session",
+                    "quorum": 1,
+                    "min_yes": 1
+                }),
             ),
             (
                 "req-project-propose",
@@ -20791,6 +21231,54 @@ struct EvomapAssetVoteRequest {
     vote: Option<String>,
     choice: Option<String>,
     reason: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapCouncilSessionRequest {
+    sender_id: Option<String>,
+    action: Option<String>,
+    session_id: Option<String>,
+    quorum: Option<u32>,
+    min_yes: Option<u32>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapCouncilProposeRequest {
+    sender_id: Option<String>,
+    proposal_id: Option<String>,
+    session_id: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapCouncilVoteRequest {
+    sender_id: Option<String>,
+    proposal_id: Option<String>,
+    vote: Option<String>,
+    choice: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapCouncilExecuteRequest {
+    sender_id: Option<String>,
+    proposal_id: Option<String>,
 }
 
 #[cfg(all(
@@ -22381,6 +22869,635 @@ pub async fn evomap_governance_principles(
                 "capability-gated-evolution",
                 "deterministic-replay-first"
             ]
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_normalize_council_id(value: &str, field: &str, rid: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(
+            ApiError::bad_request(format!("{field} must not be empty")).with_request_id(rid)
+        );
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        return Err(
+            ApiError::bad_request(format!("{field} contains invalid characters"))
+                .with_request_id(rid),
+        );
+    }
+    Ok(value.to_string())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_council_vote_value(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "yes" | "up" | "approve" | "approved" => Some("yes"),
+        "no" | "down" | "reject" | "rejected" => Some("no"),
+        "abstain" => Some("abstain"),
+        _ => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_council_session_json(session: &EvomapCouncilSessionRecord) -> Value {
+    serde_json::json!({
+        "session_id": session.session_id,
+        "status": session.status.as_str(),
+        "opened_by": session.opened_by,
+        "opened_at_ms": session.opened_at_ms,
+        "closed_at_ms": session.closed_at_ms,
+        "quorum": session.quorum,
+        "min_yes": session.min_yes
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_council_proposal_json(proposal: &EvomapCouncilProposalRecord) -> Value {
+    serde_json::json!({
+        "proposal_id": proposal.proposal_id,
+        "session_id": proposal.session_id,
+        "title": proposal.title,
+        "summary": proposal.summary,
+        "proposer_id": proposal.proposer_id,
+        "status": proposal.status,
+        "votes": {
+            "yes": proposal.votes_yes,
+            "no": proposal.votes_no,
+            "abstain": proposal.votes_abstain,
+            "total": proposal.votes_yes + proposal.votes_no + proposal.votes_abstain
+        },
+        "created_at_ms": proposal.created_at_ms,
+        "updated_at_ms": proposal.updated_at_ms,
+        "executed_at_ms": proposal.executed_at_ms
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn evomap_resolve_council_session_for_proposal(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    requested_session_id: Option<String>,
+    rid: &str,
+) -> Result<EvomapCouncilSessionRecord, ApiError> {
+    if let Some(session_id_raw) = requested_session_id {
+        let session_id = evomap_normalize_council_id(&session_id_raw, "session_id", rid)?;
+        let sessions = state.evomap_council_sessions.read().await;
+        let session = sessions.get(&session_id).cloned().ok_or_else(|| {
+            ApiError::not_found(format!("council session not found: {session_id}"))
+                .with_request_id(rid.to_string())
+        })?;
+        if session.status != EvomapCouncilSessionStatus::Open {
+            return Err(ApiError::conflict("council session is closed")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "session_id": session_id,
+                    "reason": "session_closed"
+                })));
+        }
+        return Ok(session);
+    }
+
+    if let Some(active_session_id) = state.evomap_council_active_session_id.read().await.clone() {
+        if let Some(active) = state
+            .evomap_council_sessions
+            .read()
+            .await
+            .get(&active_session_id)
+            .cloned()
+        {
+            if active.status == EvomapCouncilSessionStatus::Open {
+                return Ok(active);
+            }
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let session = EvomapCouncilSessionRecord {
+        session_id: format!("council-session-{}", uuid::Uuid::new_v4()),
+        status: EvomapCouncilSessionStatus::Open,
+        opened_by: sender_id.to_string(),
+        opened_at_ms: now_ms,
+        closed_at_ms: None,
+        quorum: 1,
+        min_yes: 1,
+    };
+    state
+        .evomap_council_sessions
+        .write()
+        .await
+        .insert(session.session_id.clone(), session.clone());
+    *state.evomap_council_active_session_id.write().await = Some(session.session_id.clone());
+    Ok(session)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_council_session(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapCouncilSessionRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/council/session",
+    )?;
+    let action = req
+        .action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("open")
+        .to_ascii_lowercase();
+    match action.as_str() {
+        "open" => {
+            let session_id = req
+                .session_id
+                .as_deref()
+                .map(|value| evomap_normalize_council_id(value, "session_id", &rid))
+                .transpose()?
+                .unwrap_or_else(|| format!("council-session-{}", uuid::Uuid::new_v4()));
+            let quorum = req.quorum.unwrap_or(1).max(1);
+            let min_yes = req.min_yes.unwrap_or(quorum).max(1);
+            if min_yes > quorum {
+                return Err(ApiError::bad_request("min_yes must be <= quorum").with_request_id(rid));
+            }
+            let now_ms = Utc::now().timestamp_millis();
+            let mut idempotent = false;
+            let session = {
+                let mut sessions = state.evomap_council_sessions.write().await;
+                if let Some(existing) = sessions.get(&session_id).cloned() {
+                    if existing.status != EvomapCouncilSessionStatus::Open {
+                        return Err(ApiError::conflict("council session is already closed")
+                            .with_request_id(rid));
+                    }
+                    if existing.quorum != quorum || existing.min_yes != min_yes {
+                        return Err(ApiError::conflict(
+                            "existing open session has different quorum settings",
+                        )
+                        .with_request_id(rid)
+                        .with_details(serde_json::json!({
+                            "session_id": session_id,
+                            "existing_quorum": existing.quorum,
+                            "existing_min_yes": existing.min_yes
+                        })));
+                    }
+                    idempotent = true;
+                    existing
+                } else {
+                    let session = EvomapCouncilSessionRecord {
+                        session_id: session_id.clone(),
+                        status: EvomapCouncilSessionStatus::Open,
+                        opened_by: sender_id.clone(),
+                        opened_at_ms: now_ms,
+                        closed_at_ms: None,
+                        quorum,
+                        min_yes,
+                    };
+                    sessions.insert(session_id.clone(), session.clone());
+                    session
+                }
+            };
+            *state.evomap_council_active_session_id.write().await = Some(session_id);
+            Ok(evomap_value_response(
+                rid,
+                serde_json::json!({
+                    "action": "open",
+                    "idempotent": idempotent,
+                    "session": evomap_council_session_json(&session)
+                }),
+            ))
+        }
+        "close" => {
+            let target_session_id = match req.session_id.as_deref() {
+                Some(value) => evomap_normalize_council_id(value, "session_id", &rid)?,
+                None => state
+                    .evomap_council_active_session_id
+                    .read()
+                    .await
+                    .clone()
+                    .ok_or_else(|| {
+                        ApiError::bad_request(
+                            "session_id is required when there is no active session",
+                        )
+                        .with_request_id(rid.clone())
+                    })?,
+            };
+            let mut idempotent = false;
+            let session = {
+                let mut sessions = state.evomap_council_sessions.write().await;
+                let entry = sessions.get_mut(&target_session_id).ok_or_else(|| {
+                    ApiError::not_found(format!("council session not found: {target_session_id}"))
+                        .with_request_id(rid.clone())
+                })?;
+                if entry.status == EvomapCouncilSessionStatus::Closed {
+                    idempotent = true;
+                } else {
+                    entry.status = EvomapCouncilSessionStatus::Closed;
+                    entry.closed_at_ms = Some(Utc::now().timestamp_millis());
+                }
+                entry.clone()
+            };
+            {
+                let mut active = state.evomap_council_active_session_id.write().await;
+                if active.as_deref() == Some(target_session_id.as_str())
+                    && session.status == EvomapCouncilSessionStatus::Closed
+                {
+                    *active = None;
+                }
+            }
+            Ok(evomap_value_response(
+                rid,
+                serde_json::json!({
+                    "action": "close",
+                    "idempotent": idempotent,
+                    "session": evomap_council_session_json(&session)
+                }),
+            ))
+        }
+        _ => Err(ApiError::bad_request("action must be one of: open|close").with_request_id(rid)),
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_council_propose(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapCouncilProposeRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/council/propose",
+    )?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("title is required for /a2a/council/propose")
+                .with_request_id(rid.clone())
+        })?
+        .to_string();
+    let summary = req
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let proposal_id = req
+        .proposal_id
+        .as_deref()
+        .map(|value| evomap_normalize_council_id(value, "proposal_id", &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("council-proposal-{}", uuid::Uuid::new_v4()));
+    let session =
+        evomap_resolve_council_session_for_proposal(&state, &sender_id, req.session_id, &rid)
+            .await?;
+
+    let mut idempotent = false;
+    let proposal = {
+        let mut proposals = state.evomap_council_proposals.write().await;
+        if let Some(existing) = proposals.get(&proposal_id).cloned() {
+            if existing.proposer_id == sender_id
+                && existing.title == title
+                && existing.summary == summary
+                && existing.session_id == session.session_id
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "proposal_id already exists with different payload: {proposal_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let now_ms = Utc::now().timestamp_millis();
+            let proposal = EvomapCouncilProposalRecord {
+                proposal_id: proposal_id.clone(),
+                session_id: session.session_id.clone(),
+                title,
+                summary,
+                proposer_id: sender_id.clone(),
+                status: "proposed".to_string(),
+                votes_yes: 0,
+                votes_no: 0,
+                votes_abstain: 0,
+                voters: HashMap::new(),
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                executed_at_ms: None,
+            };
+            proposals.insert(proposal_id.clone(), proposal.clone());
+            proposal
+        }
+    };
+
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "proposal": evomap_council_proposal_json(&proposal),
+            "session": evomap_council_session_json(&session),
+            "idempotent": idempotent
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_council_vote(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapCouncilVoteRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/council/vote",
+    )?;
+    let proposal_id = req
+        .proposal_id
+        .as_deref()
+        .map(|value| evomap_normalize_council_id(value, "proposal_id", &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("proposal_id is required for /a2a/council/vote")
+                .with_request_id(rid.clone())
+        })?;
+    let vote_raw = req.vote.or(req.choice).ok_or_else(|| {
+        ApiError::bad_request("vote is required for /a2a/council/vote").with_request_id(rid.clone())
+    })?;
+    let vote = evomap_council_vote_value(&vote_raw).ok_or_else(|| {
+        ApiError::bad_request("vote must be one of: yes|no|abstain").with_request_id(rid.clone())
+    })?;
+
+    let session_id = {
+        let proposals = state.evomap_council_proposals.read().await;
+        let proposal = proposals.get(&proposal_id).ok_or_else(|| {
+            ApiError::not_found(format!("council proposal not found: {proposal_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if proposal.status == "executed" {
+            return Err(ApiError::conflict("cannot vote on executed proposal")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "reason": "proposal_already_executed"
+                })));
+        }
+        proposal.session_id.clone()
+    };
+
+    {
+        let sessions = state.evomap_council_sessions.read().await;
+        let session = sessions.get(&session_id).ok_or_else(|| {
+            ApiError::not_found(format!("council session not found: {session_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if session.status != EvomapCouncilSessionStatus::Open {
+            return Err(
+                ApiError::conflict("cannot vote when council session is closed")
+                    .with_request_id(rid.clone())
+                    .with_details(serde_json::json!({
+                        "proposal_id": proposal_id,
+                        "session_id": session_id,
+                        "reason": "session_closed"
+                    })),
+            );
+        }
+    }
+
+    let mut idempotent = false;
+    let proposal = {
+        let mut proposals = state.evomap_council_proposals.write().await;
+        let proposal = proposals.get_mut(&proposal_id).ok_or_else(|| {
+            ApiError::not_found(format!("council proposal not found: {proposal_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if proposal.status == "executed" {
+            return Err(ApiError::conflict("cannot vote on executed proposal")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "reason": "proposal_already_executed"
+                })));
+        }
+        match proposal.voters.get(sender_id.as_str()) {
+            Some(existing) if existing == vote => {
+                idempotent = true;
+            }
+            Some(_) => {
+                return Err(
+                    ApiError::conflict("vote already recorded with different value")
+                        .with_request_id(rid)
+                        .with_details(serde_json::json!({
+                            "proposal_id": proposal_id,
+                            "sender_id": sender_id,
+                            "reason": "vote_conflict"
+                        })),
+                );
+            }
+            None => {
+                proposal.voters.insert(sender_id.clone(), vote.to_string());
+                match vote {
+                    "yes" => proposal.votes_yes += 1,
+                    "no" => proposal.votes_no += 1,
+                    "abstain" => proposal.votes_abstain += 1,
+                    _ => {}
+                }
+                proposal.updated_at_ms = Utc::now().timestamp_millis();
+            }
+        }
+        proposal.clone()
+    };
+
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "proposal": evomap_council_proposal_json(&proposal),
+            "vote": vote,
+            "sender_id": sender_id,
+            "idempotent": idempotent
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_council_execute(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapCouncilExecuteRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/council/execute",
+    )?;
+    let proposal_id = req
+        .proposal_id
+        .as_deref()
+        .map(|value| evomap_normalize_council_id(value, "proposal_id", &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("proposal_id is required for /a2a/council/execute")
+                .with_request_id(rid.clone())
+        })?;
+
+    let proposal = {
+        let proposals = state.evomap_council_proposals.read().await;
+        proposals.get(&proposal_id).cloned().ok_or_else(|| {
+            ApiError::not_found(format!("council proposal not found: {proposal_id}"))
+                .with_request_id(rid.clone())
+        })?
+    };
+
+    if proposal.status == "executed" {
+        return Ok(evomap_value_response(
+            rid,
+            serde_json::json!({
+                "proposal": evomap_council_proposal_json(&proposal),
+                "executed_by": sender_id,
+                "idempotent": true
+            }),
+        ));
+    }
+
+    let session = {
+        let sessions = state.evomap_council_sessions.read().await;
+        sessions.get(&proposal.session_id).cloned().ok_or_else(|| {
+            ApiError::not_found(format!(
+                "council session not found: {}",
+                proposal.session_id
+            ))
+            .with_request_id(rid.clone())
+        })?
+    };
+    if session.status != EvomapCouncilSessionStatus::Open {
+        return Err(
+            ApiError::conflict("cannot execute proposal because session is closed")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "session_id": proposal.session_id,
+                    "reason": "session_closed"
+                })),
+        );
+    }
+
+    let total_votes = proposal.votes_yes + proposal.votes_no + proposal.votes_abstain;
+    if total_votes < session.quorum {
+        return Err(
+            ApiError::conflict("execution precondition failed: quorum not reached")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "reason": "insufficient_quorum",
+                    "quorum": session.quorum,
+                    "votes_total": total_votes
+                })),
+        );
+    }
+    if proposal.votes_yes < session.min_yes {
+        return Err(
+            ApiError::conflict("execution precondition failed: yes votes below threshold")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "reason": "insufficient_yes_votes",
+                    "min_yes": session.min_yes,
+                    "votes_yes": proposal.votes_yes
+                })),
+        );
+    }
+    if proposal.votes_yes <= proposal.votes_no {
+        return Err(
+            ApiError::conflict("execution precondition failed: proposal not approved")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "proposal_id": proposal_id,
+                    "reason": "not_approved",
+                    "votes_yes": proposal.votes_yes,
+                    "votes_no": proposal.votes_no
+                })),
+        );
+    }
+
+    let proposal = {
+        let mut proposals = state.evomap_council_proposals.write().await;
+        let proposal = proposals.get_mut(&proposal_id).ok_or_else(|| {
+            ApiError::not_found(format!("council proposal not found: {proposal_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if proposal.status == "executed" {
+            return Ok(evomap_value_response(
+                rid,
+                serde_json::json!({
+                    "proposal": evomap_council_proposal_json(proposal),
+                    "executed_by": sender_id,
+                    "idempotent": true
+                }),
+            ));
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        proposal.status = "executed".to_string();
+        proposal.updated_at_ms = now_ms;
+        proposal.executed_at_ms = Some(now_ms);
+        proposal.clone()
+    };
+
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "proposal": evomap_council_proposal_json(&proposal),
+            "executed_by": sender_id,
+            "idempotent": false
         }),
     ))
 }
