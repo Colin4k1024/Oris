@@ -10,7 +10,11 @@ use sqlx::{postgres::PgPoolOptions, PgPool, Row};
 use oris_kernel::event::KernelError;
 use oris_kernel::identity::{RunId, Seq};
 
-use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
+use super::models::{
+    AttemptDispatchRecord, AttemptExecutionStatus, BountyRecord, BountyStatus, DisputeRecord,
+    DisputeStatus, LeaseRecord, OrganismRecord, RecipeRecord, SessionMessageRecord,
+    SessionRecord, SwarmTaskRecord, WorkerRecord,
+};
 use super::repository::RuntimeRepository;
 
 const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 4;
@@ -1730,6 +1734,124 @@ impl RuntimeRepository for PostgresRuntimeRepository {
 
     fn latest_seq_for_run(&self, _run_id: &RunId) -> Result<Seq, KernelError> {
         Ok(0)
+    }
+
+    // ============== Bounty Methods ==============
+
+    fn upsert_bounty(&self, _bounty: &BountyRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_bounty(&self, _bounty_id: &str) -> Result<Option<BountyRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    fn list_bounties(&self, _status: Option<&str>, _limit: usize) -> Result<Vec<BountyRecord>, KernelError> {
+        Ok(vec![]) // TODO: implement
+    }
+
+    fn accept_bounty(&self, _bounty_id: &str, _accepted_by: &str) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn close_bounty(&self, _bounty_id: &str) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    // ============== Swarm Methods ==============
+
+    fn upsert_swarm_decomposition(&self, _task: &SwarmTaskRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_swarm_decomposition(&self, _parent_task_id: &str) -> Result<Option<SwarmTaskRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    // ============== Worker Methods ==============
+
+    fn register_worker(&self, _worker: &WorkerRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_worker(&self, _worker_id: &str) -> Result<Option<WorkerRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    fn list_workers(&self, _domain: Option<&str>, _status: Option<&str>, _limit: usize) -> Result<Vec<WorkerRecord>, KernelError> {
+        Ok(vec![]) // TODO: implement
+    }
+
+    fn heartbeat_worker(&self, _worker_id: &str, _heartbeat_at_ms: i64) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    // ============== Recipe Methods ==============
+
+    fn create_recipe(&self, _recipe: &RecipeRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_recipe(&self, _recipe_id: &str) -> Result<Option<RecipeRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    fn fork_recipe(&self, _original_id: &str, _new_id: &str, _new_author: &str) -> Result<Option<RecipeRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    fn list_recipes(&self, _author_id: Option<&str>, _limit: usize) -> Result<Vec<RecipeRecord>, KernelError> {
+        Ok(vec![]) // TODO: implement
+    }
+
+    // ============== Organism Methods ==============
+
+    fn express_organism(&self, _organism: &OrganismRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_organism(&self, _organism_id: &str) -> Result<Option<OrganismRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    fn update_organism(&self, _organism_id: &str, _current_step: i32, _status: &str) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    // ============== Session Methods ==============
+
+    fn create_session(&self, _session: &SessionRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_session(&self, _session_id: &str) -> Result<Option<SessionRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    fn add_session_message(&self, _message: &SessionMessageRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_session_history(&self, _session_id: &str, _limit: usize) -> Result<Vec<SessionMessageRecord>, KernelError> {
+        Ok(vec![]) // TODO: implement
+    }
+
+    // ============== Dispute Methods ==============
+
+    fn open_dispute(&self, _dispute: &DisputeRecord) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
+    }
+
+    fn get_dispute(&self, _dispute_id: &str) -> Result<Option<DisputeRecord>, KernelError> {
+        Ok(None) // TODO: implement
+    }
+
+    fn get_disputes_for_bounty(&self, _bounty_id: &str) -> Result<Vec<DisputeRecord>, KernelError> {
+        Ok(vec![]) // TODO: implement
+    }
+
+    fn resolve_dispute(&self, _dispute_id: &str, _resolution: &str, _resolved_by: &str) -> Result<(), KernelError> {
+        Ok(()) // TODO: implement
     }
 }
 

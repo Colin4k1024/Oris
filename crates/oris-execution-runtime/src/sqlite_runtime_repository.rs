@@ -8,7 +8,11 @@ use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
 use oris_kernel::event::KernelError;
 use oris_kernel::identity::{RunId, Seq};
 
-use super::models::{AttemptDispatchRecord, AttemptExecutionStatus, LeaseRecord};
+use super::models::{
+    AttemptDispatchRecord, AttemptExecutionStatus, BountyRecord, BountyStatus, DisputeRecord,
+    DisputeStatus, LeaseRecord, OrganismRecord, RecipeRecord, SessionMessageRecord,
+    SessionRecord, SwarmTaskRecord, WorkerRecord,
+};
 use super::repository::RuntimeRepository;
 
 const SQLITE_RUNTIME_SCHEMA_VERSION: i64 = 13;
@@ -3122,6 +3126,774 @@ impl RuntimeRepository for SqliteRuntimeRepository {
 
     fn latest_seq_for_run(&self, _run_id: &RunId) -> Result<Seq, KernelError> {
         Ok(0)
+    }
+
+    // ============== Bounty Methods ==============
+
+    fn upsert_bounty(&self, bounty: &BountyRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_bounties (bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(bounty_id) DO UPDATE SET
+               title = excluded.title,
+               description = excluded.description,
+               reward = excluded.reward,
+               status = excluded.status,
+               closed_at_ms = excluded.closed_at_ms,
+               accepted_by = excluded.accepted_by,
+               accepted_at_ms = excluded.accepted_at_ms",
+            params![
+                bounty.bounty_id,
+                bounty.title,
+                bounty.description,
+                bounty.reward,
+                bounty.status.as_str(),
+                bounty.created_by,
+                bounty.created_at_ms,
+                bounty.closed_at_ms,
+                bounty.accepted_by,
+                bounty.accepted_at_ms,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("upsert bounty: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_bounty(&self, bounty_id: &str) -> Result<Option<BountyRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let result = conn.query_row(
+            "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms
+             FROM runtime_bounties WHERE bounty_id = ?1",
+            params![bounty_id],
+            |r| {
+                Ok(BountyRecord {
+                    bounty_id: r.get(0)?,
+                    title: r.get(1)?,
+                    description: r.get(2)?,
+                    reward: r.get(3)?,
+                    status: BountyStatus::from_str(&r.get::<_, String>(4)?),
+                    created_by: r.get(5)?,
+                    created_at_ms: r.get(6)?,
+                    closed_at_ms: r.get(7)?,
+                    accepted_by: r.get(8)?,
+                    accepted_at_ms: r.get(9)?,
+                })
+            },
+        );
+        match result {
+            Ok(bounty) => Ok(Some(bounty)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(KernelError::Driver(format!("get bounty: {}", e))),
+        }
+    }
+
+    fn list_bounties(&self, status: Option<&str>, limit: usize) -> Result<Vec<BountyRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+
+        let bounties: Vec<BountyRecord> = match status {
+            Some(s) => {
+                let mut stmt = conn.prepare(
+                    "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms FROM runtime_bounties WHERE status = ?1 ORDER BY created_at_ms DESC LIMIT ?2"
+                ).map_err(|e| KernelError::Driver(format!("prepare list bounties: {}", e)))?;
+                let x = stmt.query_map(params![s, limit as i64], |r| {
+                    Ok(BountyRecord {
+                        bounty_id: r.get(0)?,
+                        title: r.get(1)?,
+                        description: r.get(2)?,
+                        reward: r.get(3)?,
+                        status: BountyStatus::from_str(&r.get::<_, String>(4)?),
+                        created_by: r.get(5)?,
+                        created_at_ms: r.get(6)?,
+                        closed_at_ms: r.get(7)?,
+                        accepted_by: r.get(8)?,
+                        accepted_at_ms: r.get(9)?,
+                    })
+                }).map_err(|e| KernelError::Driver(format!("query bounties: {}", e)))?
+                .filter_map(|r| r.ok())
+                .collect();
+                x
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms FROM runtime_bounties ORDER BY created_at_ms DESC LIMIT ?1"
+                ).map_err(|e| KernelError::Driver(format!("prepare list bounties: {}", e)))?;
+                let x = stmt.query_map(params![limit as i64], |r| {
+                    Ok(BountyRecord {
+                        bounty_id: r.get(0)?,
+                        title: r.get(1)?,
+                        description: r.get(2)?,
+                        reward: r.get(3)?,
+                        status: BountyStatus::from_str(&r.get::<_, String>(4)?),
+                        created_by: r.get(5)?,
+                        created_at_ms: r.get(6)?,
+                        closed_at_ms: r.get(7)?,
+                        accepted_by: r.get(8)?,
+                        accepted_at_ms: r.get(9)?,
+                    })
+                }).map_err(|e| KernelError::Driver(format!("query bounties: {}", e)))?
+                .filter_map(|r| r.ok())
+                .collect();
+                x
+            }
+        };
+        Ok(bounties)
+    }
+
+    fn accept_bounty(&self, bounty_id: &str, accepted_by: &str) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let now = Utc::now().timestamp_millis();
+        let updated = conn
+            .execute(
+                "UPDATE runtime_bounties SET status = 'accepted', accepted_by = ?2, accepted_at_ms = ?3 WHERE bounty_id = ?1 AND status = 'open'",
+                params![bounty_id, accepted_by, now],
+            )
+            .map_err(|e| KernelError::Driver(format!("accept bounty: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "bounty not found or not in open status: {}",
+                bounty_id
+            )));
+        }
+        Ok(())
+    }
+
+    fn close_bounty(&self, bounty_id: &str) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let now = Utc::now().timestamp_millis();
+        let updated = conn
+            .execute(
+                "UPDATE runtime_bounties SET status = 'closed', closed_at_ms = ?2 WHERE bounty_id = ?1 AND status IN ('open', 'accepted')",
+                params![bounty_id, now],
+            )
+            .map_err(|e| KernelError::Driver(format!("close bounty: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "bounty not found or already closed: {}",
+                bounty_id
+            )));
+        }
+        Ok(())
+    }
+
+    // ============== Swarm Methods ==============
+
+    fn upsert_swarm_decomposition(&self, task: &SwarmTaskRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_swarm_tasks (parent_task_id, decomposition_json, proposer_id, proposer_reward_pct, solver_reward_pct, aggregator_reward_pct, status, created_at_ms, completed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(parent_task_id) DO UPDATE SET
+               decomposition_json = excluded.decomposition_json,
+               status = excluded.status,
+               completed_at_ms = excluded.completed_at_ms",
+            params![
+                task.parent_task_id,
+                task.decomposition_json,
+                task.proposer_id,
+                task.proposer_reward_pct,
+                task.solver_reward_pct,
+                task.aggregator_reward_pct,
+                task.status,
+                task.created_at_ms,
+                task.completed_at_ms,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("upsert swarm: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_swarm_decomposition(&self, parent_task_id: &str) -> Result<Option<SwarmTaskRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let result = conn.query_row(
+            "SELECT parent_task_id, decomposition_json, proposer_id, proposer_reward_pct, solver_reward_pct, aggregator_reward_pct, status, created_at_ms, completed_at_ms
+             FROM runtime_swarm_tasks WHERE parent_task_id = ?1",
+            params![parent_task_id],
+            |r| {
+                Ok(SwarmTaskRecord {
+                    parent_task_id: r.get(0)?,
+                    decomposition_json: r.get(1)?,
+                    proposer_id: r.get(2)?,
+                    proposer_reward_pct: r.get(3)?,
+                    solver_reward_pct: r.get(4)?,
+                    aggregator_reward_pct: r.get(5)?,
+                    status: r.get(6)?,
+                    created_at_ms: r.get(7)?,
+                    completed_at_ms: r.get(8)?,
+                })
+            },
+        );
+        match result {
+            Ok(task) => Ok(Some(task)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(KernelError::Driver(format!("get swarm: {}", e))),
+        }
+    }
+
+    // ============== Worker Methods ==============
+
+    fn register_worker(&self, worker: &WorkerRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_workers_registry (worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(worker_id) DO UPDATE SET
+               domains = excluded.domains,
+               max_load = excluded.max_load,
+               metadata_json = excluded.metadata_json,
+               last_heartbeat_ms = excluded.last_heartbeat_ms,
+               status = excluded.status",
+            params![
+                worker.worker_id,
+                worker.domains,
+                worker.max_load,
+                worker.metadata_json,
+                worker.registered_at_ms,
+                worker.last_heartbeat_ms,
+                worker.status,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("register worker: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_worker(&self, worker_id: &str) -> Result<Option<WorkerRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let result = conn.query_row(
+            "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+             FROM runtime_workers_registry WHERE worker_id = ?1",
+            params![worker_id],
+            |r| {
+                Ok(WorkerRecord {
+                    worker_id: r.get(0)?,
+                    domains: r.get(1)?,
+                    max_load: r.get(2)?,
+                    metadata_json: r.get(3)?,
+                    registered_at_ms: r.get(4)?,
+                    last_heartbeat_ms: r.get(5)?,
+                    status: r.get(6)?,
+                })
+            },
+        );
+        match result {
+            Ok(worker) => Ok(Some(worker)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(KernelError::Driver(format!("get worker: {}", e))),
+        }
+    }
+
+    fn list_workers(&self, domain: Option<&str>, status: Option<&str>, limit: usize) -> Result<Vec<WorkerRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match (&domain, &status) {
+            (Some(d), Some(s)) => (
+                "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                 FROM runtime_workers_registry WHERE domains LIKE ?1 AND status = ?2 ORDER BY registered_at_ms DESC LIMIT ?3".to_string(),
+                vec![Box::new(format!("%{}%", d)), Box::new(s.to_string()), Box::new(limit as i64)]
+            ),
+            (Some(d), None) => (
+                "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                 FROM runtime_workers_registry WHERE domains LIKE ?1 ORDER BY registered_at_ms DESC LIMIT ?2".to_string(),
+                vec![Box::new(format!("%{}%", d)), Box::new(limit as i64)]
+            ),
+            (None, Some(s)) => (
+                "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                 FROM runtime_workers_registry WHERE status = ?1 ORDER BY registered_at_ms DESC LIMIT ?2".to_string(),
+                vec![Box::new(s.to_string()), Box::new(limit as i64)]
+            ),
+            (None, None) => (
+                "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                 FROM runtime_workers_registry ORDER BY registered_at_ms DESC LIMIT ?1".to_string(),
+                vec![Box::new(limit as i64)]
+            ),
+        };
+        let mut stmt = conn.prepare(&sql).map_err(|e| KernelError::Driver(format!("prepare list workers: {}", e)))?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let workers = stmt.query_map(params_refs.as_slice(), |r| {
+            Ok(WorkerRecord {
+                worker_id: r.get(0)?,
+                domains: r.get(1)?,
+                max_load: r.get(2)?,
+                metadata_json: r.get(3)?,
+                registered_at_ms: r.get(4)?,
+                last_heartbeat_ms: r.get(5)?,
+                status: r.get(6)?,
+            })
+        }).map_err(|e| KernelError::Driver(format!("query workers: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(workers)
+    }
+
+    fn heartbeat_worker(&self, worker_id: &str, heartbeat_at_ms: i64) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let updated = conn
+            .execute(
+                "UPDATE runtime_workers_registry SET last_heartbeat_ms = ?2, status = 'active' WHERE worker_id = ?1",
+                params![worker_id, heartbeat_at_ms],
+            )
+            .map_err(|e| KernelError::Driver(format!("heartbeat worker: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "worker not found: {}",
+                worker_id
+            )));
+        }
+        Ok(())
+    }
+
+    // ============== Recipe Methods ==============
+
+    fn create_recipe(&self, recipe: &RecipeRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_recipes (recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                recipe.recipe_id,
+                recipe.name,
+                recipe.description,
+                recipe.gene_sequence_json,
+                recipe.author_id,
+                recipe.forked_from,
+                recipe.created_at_ms,
+                recipe.updated_at_ms,
+                recipe.is_public as i32,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("create recipe: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_recipe(&self, recipe_id: &str) -> Result<Option<RecipeRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let result = conn.query_row(
+            "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public
+             FROM runtime_recipes WHERE recipe_id = ?1",
+            params![recipe_id],
+            |r| {
+                Ok(RecipeRecord {
+                    recipe_id: r.get(0)?,
+                    name: r.get(1)?,
+                    description: r.get(2)?,
+                    gene_sequence_json: r.get(3)?,
+                    author_id: r.get(4)?,
+                    forked_from: r.get(5)?,
+                    created_at_ms: r.get(6)?,
+                    updated_at_ms: r.get(7)?,
+                    is_public: r.get::<_, i32>(8)? != 0,
+                })
+            },
+        );
+        match result {
+            Ok(recipe) => Ok(Some(recipe)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(KernelError::Driver(format!("get recipe: {}", e))),
+        }
+    }
+
+    fn fork_recipe(&self, original_id: &str, new_id: &str, new_author: &str) -> Result<Option<RecipeRecord>, KernelError> {
+        let original = self.get_recipe(original_id)?;
+        if let Some(orig) = original {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+            let now = Utc::now().timestamp_millis();
+            conn.execute(
+                "INSERT INTO runtime_recipes (recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    new_id,
+                    format!("Fork of {}", orig.name),
+                    orig.description,
+                    orig.gene_sequence_json,
+                    new_author,
+                    Some(original_id),
+                    now,
+                    now,
+                    orig.is_public as i32,
+                ],
+            )
+            .map_err(|e| KernelError::Driver(format!("fork recipe: {}", e)))?;
+            Ok(Some(RecipeRecord {
+                recipe_id: new_id.to_string(),
+                name: format!("Fork of {}", orig.name),
+                description: orig.description,
+                gene_sequence_json: orig.gene_sequence_json,
+                author_id: new_author.to_string(),
+                forked_from: Some(original_id.to_string()),
+                created_at_ms: now,
+                updated_at_ms: now,
+                is_public: orig.is_public,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn list_recipes(&self, author_id: Option<&str>, limit: usize) -> Result<Vec<RecipeRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+
+        let rows: Vec<RecipeRecord> = match author_id {
+            Some(aid) => {
+                let mut stmt = conn.prepare(
+                    "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public FROM runtime_recipes WHERE author_id = ?1 ORDER BY created_at_ms DESC LIMIT ?2"
+                ).map_err(|e| KernelError::Driver(format!("prepare list recipes: {}", e)))?;
+                let result: Vec<RecipeRecord> = stmt.query_map(params![aid, limit as i64], |r| {
+                    Ok(RecipeRecord {
+                        recipe_id: r.get(0)?,
+                        name: r.get(1)?,
+                        description: r.get(2)?,
+                        gene_sequence_json: r.get(3)?,
+                        author_id: r.get(4)?,
+                        forked_from: r.get(5)?,
+                        created_at_ms: r.get(6)?,
+                        updated_at_ms: r.get(7)?,
+                        is_public: r.get::<_, i32>(8)? != 0,
+                    })
+                }).map_err(|e| KernelError::Driver(format!("query recipes: {}", e)))?
+                .filter_map(|r| r.ok())
+                .collect();
+                result
+            }
+            None => {
+                let mut stmt = conn.prepare(
+                    "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public FROM runtime_recipes ORDER BY created_at_ms DESC LIMIT ?1"
+                ).map_err(|e| KernelError::Driver(format!("prepare list recipes: {}", e)))?;
+                let result: Vec<RecipeRecord> = stmt.query_map(params![limit as i64], |r| {
+                    Ok(RecipeRecord {
+                        recipe_id: r.get(0)?,
+                        name: r.get(1)?,
+                        description: r.get(2)?,
+                        gene_sequence_json: r.get(3)?,
+                        author_id: r.get(4)?,
+                        forked_from: r.get(5)?,
+                        created_at_ms: r.get(6)?,
+                        updated_at_ms: r.get(7)?,
+                        is_public: r.get::<_, i32>(8)? != 0,
+                    })
+                }).map_err(|e| KernelError::Driver(format!("query recipes: {}", e)))?
+                .filter_map(|r| r.ok())
+                .collect();
+                result
+            }
+        };
+        Ok(rows)
+    }
+
+    // ============== Organism Methods ==============
+
+    fn express_organism(&self, organism: &OrganismRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_organisms (organism_id, recipe_id, status, current_step, total_steps, created_at_ms, completed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                organism.organism_id,
+                organism.recipe_id,
+                organism.status,
+                organism.current_step,
+                organism.total_steps,
+                organism.created_at_ms,
+                organism.completed_at_ms,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("express organism: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_organism(&self, organism_id: &str) -> Result<Option<OrganismRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let result = conn.query_row(
+            "SELECT organism_id, recipe_id, status, current_step, total_steps, created_at_ms, completed_at_ms
+             FROM runtime_organisms WHERE organism_id = ?1",
+            params![organism_id],
+            |r| {
+                Ok(OrganismRecord {
+                    organism_id: r.get(0)?,
+                    recipe_id: r.get(1)?,
+                    status: r.get(2)?,
+                    current_step: r.get(3)?,
+                    total_steps: r.get(4)?,
+                    created_at_ms: r.get(5)?,
+                    completed_at_ms: r.get(6)?,
+                })
+            },
+        );
+        match result {
+            Ok(organism) => Ok(Some(organism)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(KernelError::Driver(format!("get organism: {}", e))),
+        }
+    }
+
+    fn update_organism(&self, organism_id: &str, current_step: i32, status: &str) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let now = Utc::now().timestamp_millis();
+        let completed_at_ms: Option<i64> = if status == "completed" { Some(now) } else { None };
+        let updated = conn
+            .execute(
+                "UPDATE runtime_organisms SET current_step = ?2, status = ?3, completed_at_ms = ?4 WHERE organism_id = ?1",
+                params![organism_id, current_step, status, completed_at_ms],
+            )
+            .map_err(|e| KernelError::Driver(format!("update organism: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "organism not found: {}",
+                organism_id
+            )));
+        }
+        Ok(())
+    }
+
+    // ============== Session Methods ==============
+
+    fn create_session(&self, session: &SessionRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_collab_sessions (session_id, session_type, creator_id, status, created_at_ms, ended_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                session.session_id,
+                session.session_type,
+                session.creator_id,
+                session.status,
+                session.created_at_ms,
+                session.ended_at_ms,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("create session: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_session(&self, session_id: &str) -> Result<Option<SessionRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let result = conn.query_row(
+            "SELECT session_id, session_type, creator_id, status, created_at_ms, ended_at_ms
+             FROM runtime_collab_sessions WHERE session_id = ?1",
+            params![session_id],
+            |r| {
+                Ok(SessionRecord {
+                    session_id: r.get(0)?,
+                    session_type: r.get(1)?,
+                    creator_id: r.get(2)?,
+                    status: r.get(3)?,
+                    created_at_ms: r.get(4)?,
+                    ended_at_ms: r.get(5)?,
+                })
+            },
+        );
+        match result {
+            Ok(session) => Ok(Some(session)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(KernelError::Driver(format!("get session: {}", e))),
+        }
+    }
+
+    fn add_session_message(&self, message: &SessionMessageRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_collab_messages (message_id, session_id, sender_id, content, message_type, sent_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                message.message_id,
+                message.session_id,
+                message.sender_id,
+                message.content,
+                message.message_type,
+                message.sent_at_ms,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("add session message: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_session_history(&self, session_id: &str, limit: usize) -> Result<Vec<SessionMessageRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT message_id, session_id, sender_id, content, message_type, sent_at_ms
+             FROM runtime_collab_messages WHERE session_id = ?1 ORDER BY sent_at_ms DESC LIMIT ?2"
+        ).map_err(|e| KernelError::Driver(format!("prepare session history: {}", e)))?;
+        let messages = stmt.query_map(params![session_id, limit as i64], |r| {
+            Ok(SessionMessageRecord {
+                message_id: r.get(0)?,
+                session_id: r.get(1)?,
+                sender_id: r.get(2)?,
+                content: r.get(3)?,
+                message_type: r.get(4)?,
+                sent_at_ms: r.get(5)?,
+            })
+        }).map_err(|e| KernelError::Driver(format!("query session history: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(messages)
+    }
+
+    // ============== Dispute Methods ==============
+
+    fn open_dispute(&self, dispute: &DisputeRecord) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        conn.execute(
+            "INSERT INTO runtime_disputes (dispute_id, bounty_id, opened_by, status, evidence_json, resolution, resolved_by, resolved_at_ms, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                dispute.dispute_id,
+                dispute.bounty_id,
+                dispute.opened_by,
+                dispute.status.as_str(),
+                dispute.evidence_json,
+                dispute.resolution,
+                dispute.resolved_by,
+                dispute.resolved_at_ms,
+                dispute.created_at_ms,
+            ],
+        )
+        .map_err(|e| KernelError::Driver(format!("open dispute: {}", e)))?;
+        Ok(())
+    }
+
+    fn get_dispute(&self, dispute_id: &str) -> Result<Option<DisputeRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let result = conn.query_row(
+            "SELECT dispute_id, bounty_id, opened_by, status, evidence_json, resolution, resolved_by, resolved_at_ms, created_at_ms
+             FROM runtime_disputes WHERE dispute_id = ?1",
+            params![dispute_id],
+            |r| {
+                Ok(DisputeRecord {
+                    dispute_id: r.get(0)?,
+                    bounty_id: r.get(1)?,
+                    opened_by: r.get(2)?,
+                    status: DisputeStatus::from_str(&r.get::<_, String>(3)?),
+                    evidence_json: r.get(4)?,
+                    resolution: r.get(5)?,
+                    resolved_by: r.get(6)?,
+                    resolved_at_ms: r.get(7)?,
+                    created_at_ms: r.get(8)?,
+                })
+            },
+        );
+        match result {
+            Ok(dispute) => Ok(Some(dispute)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(KernelError::Driver(format!("get dispute: {}", e))),
+        }
+    }
+
+    fn get_disputes_for_bounty(&self, bounty_id: &str) -> Result<Vec<DisputeRecord>, KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let mut stmt = conn.prepare(
+            "SELECT dispute_id, bounty_id, opened_by, status, evidence_json, resolution, resolved_by, resolved_at_ms, created_at_ms
+             FROM runtime_disputes WHERE bounty_id = ?1 ORDER BY created_at_ms DESC"
+        ).map_err(|e| KernelError::Driver(format!("prepare disputes: {}", e)))?;
+        let disputes = stmt.query_map(params![bounty_id], |r| {
+            Ok(DisputeRecord {
+                dispute_id: r.get(0)?,
+                bounty_id: r.get(1)?,
+                opened_by: r.get(2)?,
+                status: DisputeStatus::from_str(&r.get::<_, String>(3)?),
+                evidence_json: r.get(4)?,
+                resolution: r.get(5)?,
+                resolved_by: r.get(6)?,
+                resolved_at_ms: r.get(7)?,
+                created_at_ms: r.get(8)?,
+            })
+        }).map_err(|e| KernelError::Driver(format!("query disputes: {}", e)))?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok(disputes)
+    }
+
+    fn resolve_dispute(&self, dispute_id: &str, resolution: &str, resolved_by: &str) -> Result<(), KernelError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| KernelError::Driver("sqlite runtime repo lock poisoned".to_string()))?;
+        let now = Utc::now().timestamp_millis();
+        let updated = conn
+            .execute(
+                "UPDATE runtime_disputes SET status = 'resolved', resolution = ?2, resolved_by = ?3, resolved_at_ms = ?4 WHERE dispute_id = ?1 AND status = 'open'",
+                params![dispute_id, resolution, resolved_by, now],
+            )
+            .map_err(|e| KernelError::Driver(format!("resolve dispute: {}", e)))?;
+        if updated == 0 {
+            return Err(KernelError::Driver(format!(
+                "dispute not found or already resolved: {}",
+                dispute_id
+            )));
+        }
+        Ok(())
     }
 }
 
