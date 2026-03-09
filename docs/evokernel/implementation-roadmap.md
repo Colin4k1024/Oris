@@ -51,47 +51,33 @@ Completed stage-tracking issue split (all closed and shipped in `oris-runtime v0
 - `#90` `EVO-04`: introduce supervised DEVLOOP orchestration for bounded tasks
 - `#91` `EVO-05`: harden federated evolution attribution, economics, and revocation
 
-## EvoMap Compatibility Delta Stream (March 5, 2026)
+## EvoMap Compatibility Delta Stream
 
-External baseline snapshot (as of March 5, 2026):
+### Historical phase (March 5 to March 29, 2026)
 
-- `evomap.ai` public onboarding and `autogame-17/evolver` currently center runtime calls on `/a2a/*`
-- active task flow is `fetch(include_tasks) -> task/work claim -> complete`, plus `/a2a/heartbeat`
-- protocol envelopes in `evolver` are `gep-a2a@1.0.0`, not `oris.a2a`
+The original delta stream focused on foundation compatibility:
 
-Current Oris state:
+- `/a2a/*` namespace facade
+- `fetch -> task/work claim -> complete`
+- `/a2a/heartbeat` keepalive payload
+- `gep-a2a` envelope compatibility
+- observability/docs parity for compatibility endpoints
 
-- compatibility routes are available under `/evolution/a2a/*` with `hello`, `tasks/distribute`, `tasks/claim`, `tasks/report`
-- native session routes remain under `/v1/evolution/a2a/sessions/*`
-- protocol handling is `oris.a2a` dual-stack (`1.0.0` + `0.1.0-experimental`)
+That phase corresponds to the earlier EvoMap alignment issues (`#110` to `#119`), which are now closed.
 
-High-priority compatibility gaps to close:
+### Active phase (as of March 9, 2026)
 
-1. `/a2a/*` namespace compatibility facade is missing.
-2. `fetch -> task/work claim -> complete` flow is not exposed as first-class compatibility API.
-3. `/a2a/heartbeat` worker keepalive and `available_work` shape are missing.
-4. `gep-a2a` envelope compatibility and auth/identity bridging are missing.
-5. observability and docs currently target `/evolution/a2a/*` flow only.
+Current gap closure is tracked by semantic parity issues:
 
-Execution window:
+- `#148` to `#155` (label: `evomap-gap`, milestone: `EvoMap Gap Closure`)
 
-- Sprint 1: March 9, 2026 to March 15, 2026
-- Sprint 2: March 16, 2026 to March 22, 2026
-- Sprint 3: March 23, 2026 to March 29, 2026
+Use this document as source-of-truth for unified code-to-issue mapping:
 
-Delivery sequencing:
+- `docs/evomap-gap-unified-alignment.md`
 
-| Sprint | Focus | Target outcomes |
-| --- | --- | --- |
-| Sprint 1 | Transport and namespace compatibility | `/a2a/hello`, `/a2a/fetch`, `/a2a/task/claim`, `/a2a/task/complete` compatibility paths in place with regression coverage |
-| Sprint 2 | Worker-pool and keepalive compatibility | `/a2a/work/claim`, `/a2a/work/complete`, `/a2a/heartbeat` plus lease-safe task ownership semantics |
-| Sprint 3 | Hardening and operability | auth bridging, metrics and audit parity, docs and runbook parity, evolver-style end-to-end harness |
+Issue import/sync path remains:
 
-Issue tracking:
-
-- issue seeds for this stream are tracked in `docs/issues-roadmap.csv`
-- use `roadmap_track=evomap-alignment` and `roadmap_status=planned` rows as source-of-truth backlog
-- import path remains `bash scripts/import_issues_from_csv.sh --repo Colin4k1024/Oris --create-milestones --create-labels`
+- `bash scripts/import_issues_from_csv.sh --repo Colin4k1024/Oris --create-milestones --create-labels`
 
 ## 1. Objective
 
