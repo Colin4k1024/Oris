@@ -529,6 +529,34 @@ struct EvomapSemanticSubmissionRecord {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapAssetVerificationRecord {
+    verification_id: String,
+    asset_id: String,
+    sender_id: String,
+    status: String,
+    note: Option<String>,
+    verified_at_ms: i64,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapAssetVoteRecord {
+    vote_id: String,
+    asset_id: String,
+    sender_id: String,
+    vote: String,
+    reason: Option<String>,
+    voted_at_ms: i64,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 const A2A_SESSION_TTL_HOURS: i64 = 24;
 
 #[cfg(all(
@@ -2062,6 +2090,17 @@ pub struct ExecutionApiState {
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
     ))]
+    evomap_asset_verifications:
+        Arc<RwLock<HashMap<String, HashMap<String, EvomapAssetVerificationRecord>>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_asset_votes: Arc<RwLock<HashMap<String, HashMap<String, EvomapAssetVoteRecord>>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
     evomap_decision_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
         feature = "agent-contract-experimental",
@@ -2137,6 +2176,16 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             evomap_semantic_submissions: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_asset_verifications: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_asset_votes: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
                 feature = "agent-contract-experimental",
                 feature = "evolution-network-experimental"
@@ -2447,15 +2496,15 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/assets/daily-discovery", get(evomap_assets_explore))
         .route("/a2a/assets/trending", get(evomap_assets_trending))
         .route("/a2a/assets/categories", get(evomap_assets_categories))
-        .route("/a2a/assets/:id", get(evomap_surface_get))
-        .route("/a2a/assets/:id/branches", get(evomap_surface_get))
-        .route("/a2a/assets/:id/timeline", get(evomap_surface_get))
-        .route("/a2a/assets/:id/related", get(evomap_surface_get))
-        .route("/a2a/assets/:id/verify", post(evomap_surface_post))
-        .route("/a2a/assets/:id/audit-trail", get(evomap_surface_get))
-        .route("/a2a/assets/my-usage", get(evomap_surface_get))
-        .route("/a2a/assets/:id/vote", post(evomap_surface_post))
-        .route("/a2a/assets/:id/reviews", get(evomap_surface_get))
+        .route("/a2a/assets/:id", get(evomap_asset_detail))
+        .route("/a2a/assets/:id/branches", get(evomap_asset_branches))
+        .route("/a2a/assets/:id/timeline", get(evomap_asset_timeline))
+        .route("/a2a/assets/:id/related", get(evomap_asset_related))
+        .route("/a2a/assets/:id/verify", post(evomap_asset_verify))
+        .route("/a2a/assets/:id/audit-trail", get(evomap_asset_audit_trail))
+        .route("/a2a/assets/my-usage", get(evomap_asset_my_usage))
+        .route("/a2a/assets/:id/vote", post(evomap_asset_vote))
+        .route("/a2a/assets/:id/reviews", get(evomap_asset_reviews))
         // EvoMap: Bounty endpoints
         .route("/a2a/bounty/create", post(evomap_bounty_create))
         .route("/a2a/bounty/:id/accept", post(evomap_bounty_accept))
@@ -18206,6 +18255,384 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evomap_asset_governance_semantics_cover_detail_timeline_related_and_usage() {
+        let store_root = std::env::temp_dir().join(format!(
+            "oris-evomap-asset-governance-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&store_root);
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_evolution_store(Arc::new(
+                crate::evolution::JsonlEvolutionStore::new(&store_root),
+            )),
+        );
+        let sender_id = "evomap-asset-governance-agent";
+        let handshake = handshake_agent_with_caps(&router, sender_id, &["EvolutionFetch"]).await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let verify_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "status": "verified",
+                    "note": "pipeline stability improved"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let verify_resp = router.clone().oneshot(verify_req).await.unwrap();
+        assert_eq!(verify_resp.status(), StatusCode::OK);
+        let verify_body = axum::body::to_bytes(verify_resp.into_body(), usize::MAX)
+            .await
+            .expect("verify body");
+        let verify_json: serde_json::Value =
+            serde_json::from_slice(&verify_body).expect("verify json");
+        assert_eq!(
+            verify_json["data"]["verification"]["status"],
+            serde_json::json!("verified")
+        );
+        assert_eq!(
+            verify_json["data"]["summary"]["total"],
+            serde_json::json!(1)
+        );
+
+        let verify_repeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "status": "verified",
+                    "note": "pipeline stability improved"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let verify_repeat_resp = router.clone().oneshot(verify_repeat_req).await.unwrap();
+        assert_eq!(verify_repeat_resp.status(), StatusCode::OK);
+        let verify_repeat_body = axum::body::to_bytes(verify_repeat_resp.into_body(), usize::MAX)
+            .await
+            .expect("verify repeat body");
+        let verify_repeat_json: serde_json::Value =
+            serde_json::from_slice(&verify_repeat_body).expect("verify repeat json");
+        assert_eq!(verify_repeat_json["data"]["idempotent"], true);
+
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "vote": "up",
+                    "reason": "high confidence"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let vote_resp = router.clone().oneshot(vote_req).await.unwrap();
+        assert_eq!(vote_resp.status(), StatusCode::OK);
+        let vote_body = axum::body::to_bytes(vote_resp.into_body(), usize::MAX)
+            .await
+            .expect("vote body");
+        let vote_json: serde_json::Value = serde_json::from_slice(&vote_body).expect("vote json");
+        assert_eq!(vote_json["data"]["summary"]["up"], serde_json::json!(1));
+
+        let detail_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/a2a/assets/builtin-experience-ci-fix-v1?sender_id={sender_id}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let detail_resp = router.clone().oneshot(detail_req).await.unwrap();
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = axum::body::to_bytes(detail_resp.into_body(), usize::MAX)
+            .await
+            .expect("detail body");
+        let detail_json: serde_json::Value =
+            serde_json::from_slice(&detail_body).expect("detail json");
+        assert_eq!(
+            detail_json["data"]["asset"]["asset_id"],
+            serde_json::json!("builtin-experience-ci-fix-v1")
+        );
+        assert_eq!(
+            detail_json["data"]["governance"]["verification"]["total"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            detail_json["data"]["governance"]["votes"]["up"],
+            serde_json::json!(1)
+        );
+
+        let branches_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/a2a/assets/builtin-experience-ci-fix-v1/branches?sender_id={sender_id}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let branches_resp = router.clone().oneshot(branches_req).await.unwrap();
+        assert_eq!(branches_resp.status(), StatusCode::OK);
+        let branches_body = axum::body::to_bytes(branches_resp.into_body(), usize::MAX)
+            .await
+            .expect("branches body");
+        let branches_json: serde_json::Value =
+            serde_json::from_slice(&branches_body).expect("branches json");
+        assert!(
+            branches_json["data"]["branches"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0)
+                >= 1
+        );
+
+        let timeline_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/a2a/assets/builtin-experience-ci-fix-v1/timeline?sender_id={sender_id}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let timeline_resp = router.clone().oneshot(timeline_req).await.unwrap();
+        assert_eq!(timeline_resp.status(), StatusCode::OK);
+        let timeline_body = axum::body::to_bytes(timeline_resp.into_body(), usize::MAX)
+            .await
+            .expect("timeline body");
+        let timeline_json: serde_json::Value =
+            serde_json::from_slice(&timeline_body).expect("timeline json");
+        assert!(timeline_json["data"]["total"].as_u64().unwrap_or(0) >= 2);
+
+        let audit_trail_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/a2a/assets/builtin-experience-ci-fix-v1/audit-trail?sender_id={sender_id}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let audit_trail_resp = router.clone().oneshot(audit_trail_req).await.unwrap();
+        assert_eq!(audit_trail_resp.status(), StatusCode::OK);
+        let audit_trail_body = axum::body::to_bytes(audit_trail_resp.into_body(), usize::MAX)
+            .await
+            .expect("audit trail body");
+        let audit_trail_json: serde_json::Value =
+            serde_json::from_slice(&audit_trail_body).expect("audit trail json");
+        assert!(audit_trail_json["data"]["total"].as_u64().unwrap_or(0) >= 2);
+
+        let reviews_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/a2a/assets/builtin-experience-ci-fix-v1/reviews?sender_id={sender_id}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let reviews_resp = router.clone().oneshot(reviews_req).await.unwrap();
+        assert_eq!(reviews_resp.status(), StatusCode::OK);
+        let reviews_body = axum::body::to_bytes(reviews_resp.into_body(), usize::MAX)
+            .await
+            .expect("reviews body");
+        let reviews_json: serde_json::Value =
+            serde_json::from_slice(&reviews_body).expect("reviews json");
+        assert!(reviews_json["data"]["total"].as_u64().unwrap_or(0) >= 2);
+
+        let related_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/a2a/assets/builtin-experience-ci-fix-v1/related?sender_id={sender_id}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let related_resp = router.clone().oneshot(related_req).await.unwrap();
+        assert_eq!(related_resp.status(), StatusCode::OK);
+        let related_body = axum::body::to_bytes(related_resp.into_body(), usize::MAX)
+            .await
+            .expect("related body");
+        let related_json: serde_json::Value =
+            serde_json::from_slice(&related_body).expect("related json");
+        assert!(related_json["data"]["total"].as_u64().unwrap_or(0) >= 1);
+
+        let usage_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/a2a/assets/my-usage?sender_id={sender_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let usage_resp = router.clone().oneshot(usage_req).await.unwrap();
+        assert_eq!(usage_resp.status(), StatusCode::OK);
+        let usage_body = axum::body::to_bytes(usage_resp.into_body(), usize::MAX)
+            .await
+            .expect("usage body");
+        let usage_json: serde_json::Value =
+            serde_json::from_slice(&usage_body).expect("usage json");
+        assert!(usage_json["data"]["count"].as_u64().unwrap_or(0) >= 1);
+
+        let _ = std::fs::remove_dir_all(&store_root);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_asset_governance_semantics_return_deterministic_reference_errors() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let sender_id = "evomap-asset-governance-negative-agent";
+        let handshake = handshake_agent_with_caps(&router, sender_id, &["EvolutionFetch"]).await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let invalid_id_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/a2a/assets/%20?sender_id={sender_id}"))
+            .body(Body::empty())
+            .unwrap();
+        let invalid_id_resp = router.clone().oneshot(invalid_id_req).await.unwrap();
+        assert_eq!(invalid_id_resp.status(), StatusCode::BAD_REQUEST);
+        let invalid_id_body = axum::body::to_bytes(invalid_id_resp.into_body(), usize::MAX)
+            .await
+            .expect("invalid id body");
+        let invalid_id_json: serde_json::Value =
+            serde_json::from_slice(&invalid_id_body).expect("invalid id json");
+        assert_eq!(
+            invalid_id_json["error"]["code"],
+            serde_json::json!("invalid_argument")
+        );
+
+        let missing_req = Request::builder()
+            .method(Method::GET)
+            .uri(format!(
+                "/a2a/assets/asset-does-not-exist?sender_id={sender_id}"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        let missing_resp = router.clone().oneshot(missing_req).await.unwrap();
+        assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
+        let missing_body = axum::body::to_bytes(missing_resp.into_body(), usize::MAX)
+            .await
+            .expect("missing body");
+        let missing_json: serde_json::Value =
+            serde_json::from_slice(&missing_body).expect("missing json");
+        assert_eq!(
+            missing_json["error"]["code"],
+            serde_json::json!("not_found")
+        );
+        assert_eq!(
+            missing_json["error"]["details"]["reason"],
+            serde_json::json!("unknown_asset_reference")
+        );
+
+        let invalid_vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "vote": "invalid-choice"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let invalid_vote_resp = router.oneshot(invalid_vote_req).await.unwrap();
+        assert_eq!(invalid_vote_resp.status(), StatusCode::BAD_REQUEST);
+        let invalid_vote_body = axum::body::to_bytes(invalid_vote_resp.into_body(), usize::MAX)
+            .await
+            .expect("invalid vote body");
+        let invalid_vote_json: serde_json::Value =
+            serde_json::from_slice(&invalid_vote_body).expect("invalid vote json");
+        assert_eq!(
+            invalid_vote_json["error"]["code"],
+            serde_json::json!("invalid_argument")
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_asset_governance_verify_and_vote_worker_role_is_forbidden() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await)
+                .with_static_api_key_record_with_role(
+                    "asset-operator-key",
+                    "asset-operator-secret",
+                    true,
+                    ApiRole::Operator,
+                )
+                .with_static_api_key_record_with_role(
+                    "asset-worker-key",
+                    "asset-worker-secret",
+                    true,
+                    ApiRole::Worker,
+                ),
+        );
+
+        let operator_verify_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("x-api-key-id", "asset-operator-key")
+            .header("x-api-key", "asset-operator-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "asset-operator-agent",
+                    "status": "verified"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let operator_verify_resp = router.clone().oneshot(operator_verify_req).await.unwrap();
+        assert_eq!(operator_verify_resp.status(), StatusCode::OK);
+
+        let worker_verify_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("x-api-key-id", "asset-worker-key")
+            .header("x-api-key", "asset-worker-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "asset-worker-agent",
+                    "status": "verified"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let worker_verify_resp = router.clone().oneshot(worker_verify_req).await.unwrap();
+        assert_eq!(worker_verify_resp.status(), StatusCode::FORBIDDEN);
+        let worker_verify_body = axum::body::to_bytes(worker_verify_resp.into_body(), usize::MAX)
+            .await
+            .expect("worker verify body");
+        let worker_verify_json: serde_json::Value =
+            serde_json::from_slice(&worker_verify_body).expect("worker verify json");
+        assert_eq!(worker_verify_json["error"]["code"], "forbidden");
+
+        let worker_vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("x-api-key-id", "asset-worker-key")
+            .header("x-api-key", "asset-worker-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "asset-worker-agent",
+                    "vote": "up"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let worker_vote_resp = router.oneshot(worker_vote_req).await.unwrap();
+        assert_eq!(worker_vote_resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evomap_governance_route_surface_includes_council_and_project_endpoints() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let checks = vec![
@@ -19075,81 +19502,102 @@ mod tests {
         let repo = state.runtime_repo.clone().expect("runtime repo");
         let router = build_router(state);
 
-        for (request_id, uri, action) in [
+        for (request_id, uri, action, payload) in [
             (
                 "req-asset-verify",
-                "/a2a/assets/asset-1/verify",
+                "/a2a/assets/builtin-experience-ci-fix-v1/verify",
                 "a2a.semantic.asset.verify",
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "status": "verified"
+                }),
             ),
             (
                 "req-asset-vote",
-                "/a2a/assets/asset-1/vote",
+                "/a2a/assets/builtin-experience-ci-fix-v1/vote",
                 "a2a.semantic.asset.vote",
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "vote": "up"
+                }),
             ),
             (
                 "req-service-publish",
                 "/a2a/service/publish",
                 "a2a.semantic.service.publish",
+                serde_json::json!({}),
             ),
             (
                 "req-bid-create",
                 "/a2a/bid/create",
                 "a2a.semantic.bid.create",
+                serde_json::json!({}),
             ),
             (
                 "req-bid-accept",
                 "/a2a/bid/bid-1/accept",
                 "a2a.semantic.bid.accept",
+                serde_json::json!({}),
             ),
             (
                 "req-dispute-rule",
                 "/a2a/dispute/rule",
                 "a2a.semantic.dispute.rule",
+                serde_json::json!({}),
             ),
             (
                 "req-council-propose",
                 "/a2a/council/propose",
                 "a2a.semantic.council.propose",
+                serde_json::json!({}),
             ),
             (
                 "req-council-vote",
                 "/a2a/council/vote",
                 "a2a.semantic.council.vote",
+                serde_json::json!({}),
             ),
             (
                 "req-council-execute",
                 "/a2a/council/execute",
                 "a2a.semantic.council.execute",
+                serde_json::json!({}),
             ),
             (
                 "req-council-session",
                 "/a2a/council/session",
                 "a2a.semantic.council.session",
+                serde_json::json!({}),
             ),
             (
                 "req-project-propose",
                 "/a2a/project/propose",
                 "a2a.semantic.project.propose",
+                serde_json::json!({}),
             ),
             (
                 "req-project-claim",
                 "/a2a/project/project-1/claim",
                 "a2a.semantic.project.claim",
+                serde_json::json!({}),
             ),
             (
                 "req-project-progress",
                 "/a2a/project/project-1/progress",
                 "a2a.semantic.project.progress",
+                serde_json::json!({}),
             ),
             (
                 "req-project-review",
                 "/a2a/project/project-1/review",
                 "a2a.semantic.project.review",
+                serde_json::json!({}),
             ),
             (
                 "req-project-merge",
                 "/a2a/project/project-1/merge",
                 "a2a.semantic.project.merge",
+                serde_json::json!({}),
             ),
         ] {
             let req = Request::builder()
@@ -19158,7 +19606,7 @@ mod tests {
                 .header("x-request-id", request_id)
                 .header("x-api-key", "sem-market-audit-key")
                 .header("content-type", "application/json")
-                .body(Body::from("{}"))
+                .body(Body::from(payload.to_string()))
                 .unwrap();
             let resp = router.clone().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "unexpected status for {uri}");
@@ -19168,7 +19616,7 @@ mod tests {
                 .expect("market/governance write body");
             let json: serde_json::Value =
                 serde_json::from_slice(&body).expect("market/governance write json");
-            assert_eq!(json["data"]["status"], "planned");
+            assert!(json["data"].is_object());
 
             let logs = repo.list_audit_logs(1000).expect("list audit logs");
             assert!(logs.iter().any(|log| {
@@ -20307,6 +20755,42 @@ struct EvomapAssetDiscoveryQuery {
     category: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapAssetGovernanceQuery {
+    sender_id: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapAssetVerifyRequest {
+    sender_id: Option<String>,
+    status: Option<String>,
+    verdict: Option<String>,
+    note: Option<String>,
+    reason: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapAssetVoteRequest {
+    sender_id: Option<String>,
+    vote: Option<String>,
+    choice: Option<String>,
+    reason: Option<String>,
 }
 
 #[cfg(all(
@@ -21897,6 +22381,800 @@ pub async fn evomap_governance_principles(
                 "capability-gated-evolution",
                 "deterministic-replay-first"
             ]
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_required_sender(
+    sender_id: Option<String>,
+    rid: &str,
+    route_hint: &str,
+) -> Result<String, ApiError> {
+    let sender_id = sender_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("sender_id is required for {route_hint}"))
+                .with_request_id(rid.to_string())
+        })?
+        .to_string();
+    validate_sender_id(&sender_id).map_err(|e| e.with_request_id(rid.to_string()))?;
+    Ok(sender_id)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_normalize_asset_id(asset_id: &str, rid: &str) -> Result<String, ApiError> {
+    let asset_id = asset_id.trim();
+    if asset_id.is_empty() {
+        return Err(ApiError::bad_request("asset_id must not be empty").with_request_id(rid));
+    }
+    if !asset_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        return Err(
+            ApiError::bad_request("asset_id contains invalid characters").with_request_id(rid),
+        );
+    }
+    Ok(asset_id.to_string())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn evomap_fetch_assets_for_sender(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    rid: &str,
+) -> Result<Vec<crate::evolution_network::NetworkAsset>, ApiError> {
+    state
+        .evolution_node
+        .ensure_builtin_experience_assets(sender_id.to_string())
+        .map_err(|e| {
+            ApiError::internal(format!("ensure builtin experience assets: {e}"))
+                .with_request_id(rid.to_string())
+        })?;
+    let fetch = state
+        .evolution_node
+        .fetch_assets(
+            "execution-api",
+            &FetchQuery {
+                sender_id: sender_id.to_string(),
+                signals: Vec::new(),
+            },
+        )
+        .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?;
+    Ok(fetch.assets)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn evomap_fetch_asset_by_id(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    asset_id: &str,
+    rid: &str,
+) -> Result<crate::evolution_network::NetworkAsset, ApiError> {
+    let asset_id = evomap_normalize_asset_id(asset_id, rid)?;
+    let assets = evomap_fetch_assets_for_sender(state, sender_id, rid).await?;
+    assets
+        .into_iter()
+        .find(|asset| compat_asset_id(asset) == Some(asset_id.as_str()))
+        .ok_or_else(|| {
+            ApiError::not_found(format!("semantic asset not found: {asset_id}"))
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "asset_id": asset_id,
+                    "sender_id": sender_id,
+                    "reason": "unknown_asset_reference"
+                }))
+        })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_asset_summary_json(asset: &crate::evolution_network::NetworkAsset) -> Value {
+    let item = evomap_build_discovery_item(asset, &[], &[]);
+    let mut base = serde_json::json!({
+        "asset_id": item.asset_id,
+        "asset_type": item.asset_type,
+        "title": item.title,
+        "summary": item.summary,
+        "category": item.category,
+        "source": item.source,
+        "content_hash": item.content_hash
+    });
+    match asset {
+        crate::evolution_network::NetworkAsset::Gene { gene } => {
+            base["signals"] = serde_json::json!(gene.signals);
+            base["strategy"] = serde_json::json!(gene.strategy);
+        }
+        crate::evolution_network::NetworkAsset::Capsule { capsule } => {
+            base["gene_id"] = serde_json::json!(capsule.gene_id);
+            base["mutation_id"] = serde_json::json!(capsule.mutation_id);
+            base["confidence"] = serde_json::json!(capsule.confidence);
+        }
+        crate::evolution_network::NetworkAsset::EvolutionEvent { event } => {
+            base["event"] = serde_json::to_value(event).unwrap_or(Value::Null);
+        }
+    }
+    base
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_vote_value(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "up" | "yes" | "approve" | "approved" => Some("up"),
+        "down" | "no" | "reject" | "rejected" => Some("down"),
+        "abstain" => Some("abstain"),
+        _ => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_verify_status(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "verify" | "verified" | "approve" | "approved" => Some("verified"),
+        "reject" | "rejected" => Some("rejected"),
+        _ => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+async fn evomap_asset_governance_records(
+    state: &ExecutionApiState,
+    asset_id: &str,
+) -> (
+    Vec<EvomapAssetVerificationRecord>,
+    Vec<EvomapAssetVoteRecord>,
+) {
+    let verifications = state
+        .evomap_asset_verifications
+        .read()
+        .await
+        .get(asset_id)
+        .map(|items| items.values().cloned().collect())
+        .unwrap_or_default();
+    let votes = state
+        .evomap_asset_votes
+        .read()
+        .await
+        .get(asset_id)
+        .map(|items| items.values().cloned().collect())
+        .unwrap_or_default();
+    (verifications, votes)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_asset_timeline_events(
+    verifications: &[EvomapAssetVerificationRecord],
+    votes: &[EvomapAssetVoteRecord],
+) -> Vec<Value> {
+    let mut events = verifications
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "event_id": item.verification_id,
+                "event_type": "verification",
+                "asset_id": item.asset_id,
+                "sender_id": item.sender_id,
+                "status": item.status,
+                "note": item.note,
+                "occurred_at_ms": item.verified_at_ms
+            })
+        })
+        .chain(votes.iter().map(|item| {
+            serde_json::json!({
+                "event_id": item.vote_id,
+                "event_type": "vote",
+                "asset_id": item.asset_id,
+                "sender_id": item.sender_id,
+                "vote": item.vote,
+                "reason": item.reason,
+                "occurred_at_ms": item.voted_at_ms
+            })
+        }))
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left["occurred_at_ms"]
+            .as_i64()
+            .cmp(&right["occurred_at_ms"].as_i64())
+            .then_with(|| {
+                left["event_type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["event_type"].as_str().unwrap_or_default())
+            })
+            .then_with(|| {
+                left["sender_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["sender_id"].as_str().unwrap_or_default())
+            })
+    });
+    events
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_detail(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Query(q): Query<EvomapAssetGovernanceQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/assets/:id")?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let asset = evomap_fetch_asset_by_id(&state, &sender_id, &asset_id, &rid).await?;
+    let (verifications, votes) = evomap_asset_governance_records(&state, &asset_id).await;
+    let verified = verifications
+        .iter()
+        .filter(|item| item.status == "verified")
+        .count();
+    let rejected = verifications
+        .iter()
+        .filter(|item| item.status == "rejected")
+        .count();
+    let up = votes.iter().filter(|item| item.vote == "up").count();
+    let down = votes.iter().filter(|item| item.vote == "down").count();
+    let abstain = votes.iter().filter(|item| item.vote == "abstain").count();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset": evomap_asset_summary_json(&asset),
+            "governance": {
+                "verification": {
+                    "total": verifications.len(),
+                    "verified": verified,
+                    "rejected": rejected
+                },
+                "votes": {
+                    "total": votes.len(),
+                    "up": up,
+                    "down": down,
+                    "abstain": abstain
+                }
+            }
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_branches(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Query(q): Query<EvomapAssetGovernanceQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/assets/:id/branches")?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let asset = evomap_fetch_asset_by_id(&state, &sender_id, &asset_id, &rid).await?;
+    let mut branches = Vec::new();
+    match &asset {
+        crate::evolution_network::NetworkAsset::Gene { gene } => {
+            branches.push(serde_json::json!({
+                "branch_id": format!("{}:main", gene.id),
+                "name": "main",
+                "status": "active"
+            }));
+            for signal in gene.signals.iter().take(3) {
+                branches.push(serde_json::json!({
+                    "branch_id": format!("{}:signal:{}", gene.id, signal),
+                    "name": format!("signal/{signal}"),
+                    "status": "candidate"
+                }));
+            }
+        }
+        crate::evolution_network::NetworkAsset::Capsule { capsule } => {
+            branches.push(serde_json::json!({
+                "branch_id": format!("{}:capsule", capsule.id),
+                "name": "capsule",
+                "status": "active",
+                "gene_id": capsule.gene_id
+            }));
+        }
+        crate::evolution_network::NetworkAsset::EvolutionEvent { .. } => {}
+    }
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset_id": asset_id,
+            "branches": branches,
+            "count": branches.len()
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_timeline(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Query(q): Query<EvomapAssetGovernanceQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/assets/:id/timeline")?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let _asset = evomap_fetch_asset_by_id(&state, &sender_id, &asset_id, &rid).await?;
+    let (verifications, votes) = evomap_asset_governance_records(&state, &asset_id).await;
+    let events = evomap_asset_timeline_events(&verifications, &votes);
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let total = events.len();
+    let events = events
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset_id": asset_id,
+            "timeline": events,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_related(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Query(q): Query<EvomapAssetGovernanceQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/assets/:id/related")?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let assets = evomap_fetch_assets_for_sender(&state, &sender_id, &rid).await?;
+    let limit = q.limit.unwrap_or(10).clamp(1, 100);
+    let offset = q.offset.unwrap_or(0);
+
+    let current = assets
+        .iter()
+        .find(|asset| compat_asset_id(asset) == Some(asset_id.as_str()))
+        .ok_or_else(|| {
+            ApiError::not_found(format!("semantic asset not found: {asset_id}"))
+                .with_request_id(rid.clone())
+                .with_details(serde_json::json!({
+                    "asset_id": asset_id,
+                    "sender_id": sender_id,
+                    "reason": "unknown_asset_reference"
+                }))
+        })?;
+    let current_item = evomap_build_discovery_item(current, &[], &[]);
+
+    let mut related = assets
+        .iter()
+        .filter_map(|asset| {
+            let id = compat_asset_id(asset)?;
+            if id == asset_id {
+                return None;
+            }
+            let item = evomap_build_discovery_item(asset, &[], &[]);
+            let same_category = item.category == current_item.category;
+            let same_type = item.asset_type == current_item.asset_type;
+            if !same_category && !same_type {
+                return None;
+            }
+            Some(serde_json::json!({
+                "asset_id": id,
+                "asset_type": item.asset_type,
+                "title": item.title,
+                "summary": item.summary,
+                "category": item.category,
+                "score": item.score
+            }))
+        })
+        .collect::<Vec<_>>();
+    related.sort_by(|left, right| {
+        right["score"]
+            .as_f64()
+            .partial_cmp(&left["score"].as_f64())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left["asset_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["asset_id"].as_str().unwrap_or_default())
+            })
+    });
+    let total = related.len();
+    let related = related
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset_id": asset_id,
+            "related": related,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_verify(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapAssetVerifyRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/assets/:id/verify",
+    )?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let _asset = evomap_fetch_asset_by_id(&state, &sender_id, &asset_id, &rid).await?;
+    let status_raw = req
+        .status
+        .or(req.verdict)
+        .unwrap_or_else(|| "verified".to_string());
+    let status = evomap_verify_status(&status_raw).ok_or_else(|| {
+        ApiError::bad_request("status must be one of: verified|rejected")
+            .with_request_id(rid.clone())
+    })?;
+    let note = req
+        .note
+        .or(req.reason)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+
+    let mut verifications = state.evomap_asset_verifications.write().await;
+    let sender_records = verifications.entry(asset_id.clone()).or_default();
+    let verification = match sender_records.get(sender_id.as_str()) {
+        Some(existing) if existing.status == status && existing.note == note => {
+            idempotent = true;
+            existing.clone()
+        }
+        _ => {
+            let record = EvomapAssetVerificationRecord {
+                verification_id: format!("verify-{asset_id}-{sender_id}"),
+                asset_id: asset_id.clone(),
+                sender_id: sender_id.clone(),
+                status: status.to_string(),
+                note,
+                verified_at_ms: now_ms,
+            };
+            sender_records.insert(sender_id.clone(), record.clone());
+            record
+        }
+    };
+    let verified = sender_records
+        .values()
+        .filter(|item| item.status == "verified")
+        .count();
+    let rejected = sender_records
+        .values()
+        .filter(|item| item.status == "rejected")
+        .count();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset_id": asset_id,
+            "verification": verification,
+            "idempotent": idempotent,
+            "summary": {
+                "total": sender_records.len(),
+                "verified": verified,
+                "rejected": rejected
+            }
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_audit_trail(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Query(q): Query<EvomapAssetGovernanceQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/assets/:id/audit-trail")?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let _asset = evomap_fetch_asset_by_id(&state, &sender_id, &asset_id, &rid).await?;
+    let (verifications, votes) = evomap_asset_governance_records(&state, &asset_id).await;
+    let trail = evomap_asset_timeline_events(&verifications, &votes);
+    let limit = q.limit.unwrap_or(100).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let total = trail.len();
+    let trail = trail
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset_id": asset_id,
+            "trail": trail,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_my_usage(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapAssetGovernanceQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/assets/my-usage")?;
+    let mut usage = HashMap::<String, (bool, bool, i64)>::new();
+
+    {
+        let verifications = state.evomap_asset_verifications.read().await;
+        for (asset_id, records) in verifications.iter() {
+            if let Some(record) = records.get(sender_id.as_str()) {
+                let entry =
+                    usage
+                        .entry(asset_id.clone())
+                        .or_insert((false, false, record.verified_at_ms));
+                entry.0 = true;
+                entry.2 = entry.2.max(record.verified_at_ms);
+            }
+        }
+    }
+
+    {
+        let votes = state.evomap_asset_votes.read().await;
+        for (asset_id, records) in votes.iter() {
+            if let Some(record) = records.get(sender_id.as_str()) {
+                let entry =
+                    usage
+                        .entry(asset_id.clone())
+                        .or_insert((false, false, record.voted_at_ms));
+                entry.1 = true;
+                entry.2 = entry.2.max(record.voted_at_ms);
+            }
+        }
+    }
+
+    let mut entries = usage
+        .into_iter()
+        .map(|(asset_id, (verified, voted, last_interaction_at_ms))| {
+            serde_json::json!({
+                "asset_id": asset_id,
+                "verified": verified,
+                "voted": voted,
+                "last_interaction_at_ms": last_interaction_at_ms
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right["last_interaction_at_ms"]
+            .as_i64()
+            .cmp(&left["last_interaction_at_ms"].as_i64())
+            .then_with(|| {
+                left["asset_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["asset_id"].as_str().unwrap_or_default())
+            })
+    });
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "sender_id": sender_id,
+            "usage": entries,
+            "count": entries.len()
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_vote(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapAssetVoteRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/assets/:id/vote",
+    )?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let _asset = evomap_fetch_asset_by_id(&state, &sender_id, &asset_id, &rid).await?;
+    let vote_raw = req
+        .vote
+        .or(req.choice)
+        .ok_or_else(|| ApiError::bad_request("vote is required").with_request_id(rid.clone()))?;
+    let vote = evomap_vote_value(&vote_raw).ok_or_else(|| {
+        ApiError::bad_request("vote must be one of: up|down|abstain").with_request_id(rid.clone())
+    })?;
+    let reason = req
+        .reason
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+
+    let mut votes = state.evomap_asset_votes.write().await;
+    let sender_records = votes.entry(asset_id.clone()).or_default();
+    let vote_record = match sender_records.get(sender_id.as_str()) {
+        Some(existing) if existing.vote == vote && existing.reason == reason => {
+            idempotent = true;
+            existing.clone()
+        }
+        _ => {
+            let record = EvomapAssetVoteRecord {
+                vote_id: format!("vote-{asset_id}-{sender_id}"),
+                asset_id: asset_id.clone(),
+                sender_id: sender_id.clone(),
+                vote: vote.to_string(),
+                reason,
+                voted_at_ms: now_ms,
+            };
+            sender_records.insert(sender_id.clone(), record.clone());
+            record
+        }
+    };
+    let up = sender_records
+        .values()
+        .filter(|item| item.vote == "up")
+        .count();
+    let down = sender_records
+        .values()
+        .filter(|item| item.vote == "down")
+        .count();
+    let abstain = sender_records
+        .values()
+        .filter(|item| item.vote == "abstain")
+        .count();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset_id": asset_id,
+            "vote": vote_record,
+            "idempotent": idempotent,
+            "summary": {
+                "total": sender_records.len(),
+                "up": up,
+                "down": down,
+                "abstain": abstain
+            }
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_asset_reviews(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(asset_id): Path<String>,
+    Query(q): Query<EvomapAssetGovernanceQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/assets/:id/reviews")?;
+    let asset_id = evomap_normalize_asset_id(&asset_id, &rid)?;
+    let _asset = evomap_fetch_asset_by_id(&state, &sender_id, &asset_id, &rid).await?;
+    let (verifications, votes) = evomap_asset_governance_records(&state, &asset_id).await;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let mut reviews = verifications
+        .iter()
+        .map(|item| {
+            serde_json::json!({
+                "review_id": format!("review-{}", item.verification_id),
+                "asset_id": item.asset_id,
+                "reviewer_id": item.sender_id,
+                "type": "verification",
+                "status": item.status,
+                "comment": item.note.clone().unwrap_or_else(|| format!("verification marked {}", item.status)),
+                "created_at_ms": item.verified_at_ms
+            })
+        })
+        .chain(votes.iter().map(|item| {
+            serde_json::json!({
+                "review_id": format!("review-{}", item.vote_id),
+                "asset_id": item.asset_id,
+                "reviewer_id": item.sender_id,
+                "type": "vote",
+                "status": item.vote,
+                "comment": item.reason.clone().unwrap_or_else(|| format!("vote {}", item.vote)),
+                "created_at_ms": item.voted_at_ms
+            })
+        }))
+        .collect::<Vec<_>>();
+    reviews.sort_by(|left, right| {
+        right["created_at_ms"]
+            .as_i64()
+            .cmp(&left["created_at_ms"].as_i64())
+            .then_with(|| {
+                left["review_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["review_id"].as_str().unwrap_or_default())
+            })
+    });
+    let total = reviews.len();
+    let reviews = reviews
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "asset_id": asset_id,
+            "reviews": reviews,
+            "total": total,
+            "limit": limit,
+            "offset": offset
         }),
     ))
 }
