@@ -693,6 +693,95 @@ struct EvomapProjectRecord {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapServiceRecord {
+    service_id: String,
+    title: String,
+    summary: Option<String>,
+    category: String,
+    tags: Vec<String>,
+    status: String,
+    price: f64,
+    currency: String,
+    published_by: String,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum EvomapBidStatus {
+    Open,
+    Accepted,
+    Rejected,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl EvomapBidStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+        }
+    }
+
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "open" => Some(Self::Open),
+            "accepted" | "accept" => Some(Self::Accepted),
+            "rejected" | "reject" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapBidRecord {
+    bid_id: String,
+    service_id: String,
+    bidder_id: String,
+    amount: f64,
+    currency: String,
+    note: Option<String>,
+    status: EvomapBidStatus,
+    accepted_by: Option<String>,
+    rejected_reason: Option<String>,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    accepted_at_ms: Option<i64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapDisputeRuleRecord {
+    dispute_id: String,
+    bid_id: Option<String>,
+    decision: String,
+    penalty_pct: Option<u8>,
+    note: Option<String>,
+    ruled_by: String,
+    ruled_at_ms: i64,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 const A2A_SESSION_TTL_HOURS: i64 = 24;
 
 #[cfg(all(
@@ -2262,6 +2351,26 @@ pub struct ExecutionApiState {
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
     ))]
+    evomap_services: Arc<RwLock<HashMap<String, EvomapServiceRecord>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_bids: Arc<RwLock<HashMap<String, EvomapBidRecord>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_dispute_rules: Arc<RwLock<HashMap<String, EvomapDisputeRuleRecord>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_market_idempotency: Arc<RwLock<HashMap<String, Value>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
     evomap_decision_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
         feature = "agent-contract-experimental",
@@ -2372,6 +2481,26 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             evomap_project_idempotency: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_services: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_bids: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_dispute_rules: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_market_idempotency: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
                 feature = "agent-contract-experimental",
                 feature = "evolution-network-experimental"
@@ -2713,10 +2842,10 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/organism/active", get(evomap_organism_active))
         .route("/a2a/organism/:id", get(evomap_organism_get))
         // EvoMap service/bid/dispute extensions
-        .route("/a2a/service/publish", post(evomap_surface_post))
-        .route("/a2a/bid/create", post(evomap_surface_post))
-        .route("/a2a/bid/list", get(evomap_surface_get))
-        .route("/a2a/bid/:id/accept", post(evomap_surface_post))
+        .route("/a2a/service/publish", post(evomap_service_publish))
+        .route("/a2a/bid/create", post(evomap_bid_create))
+        .route("/a2a/bid/list", get(evomap_bid_list))
+        .route("/a2a/bid/:id/accept", post(evomap_bid_accept))
         // EvoMap: Session endpoints
         .route("/a2a/session/join", post(evomap_session_join))
         .route("/a2a/session/message", post(evomap_session_message))
@@ -2724,7 +2853,7 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         // EvoMap: Dispute endpoints
         .route("/a2a/dispute/open", post(evomap_dispute_open))
         .route("/a2a/dispute/evidence", post(evomap_dispute_evidence))
-        .route("/a2a/dispute/rule", post(evomap_surface_post))
+        .route("/a2a/dispute/rule", post(evomap_dispute_rule))
         .route("/a2a/dispute/resolve", post(evomap_dispute_resolve))
         // EvoMap governance/project surface
         .route("/a2a/stats", get(evomap_stats))
@@ -19508,6 +19637,264 @@ mod tests {
         feature = "evolution-network-experimental"
     ))]
     #[tokio::test]
+    async fn evomap_service_bid_dispute_semantics_support_publish_bid_list_accept_and_rule() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "service-owner-agent",
+                    "service_id": "svc-sem-1",
+                    "title": "Semantic Runtime Review",
+                    "summary": "Review runtime API semantic contracts",
+                    "category": "engineering",
+                    "price": 120.0,
+                    "currency": "USD",
+                    "tags": ["semantic", "review"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let publish_resp = router.clone().oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::OK);
+        let publish_body = axum::body::to_bytes(publish_resp.into_body(), usize::MAX)
+            .await
+            .expect("service publish body");
+        let publish_json: serde_json::Value =
+            serde_json::from_slice(&publish_body).expect("service publish json");
+        assert_eq!(
+            publish_json["data"]["service"]["service_id"],
+            serde_json::json!("svc-sem-1")
+        );
+        assert_eq!(publish_json["data"]["service"]["status"], "open");
+
+        for (bid_id, bidder, amount) in [
+            ("bid-sem-1", "bidder-alpha", 110.5),
+            ("bid-sem-2", "bidder-beta", 130.0),
+        ] {
+            let create_bid_req = Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/bid/create")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "sender_id": bidder,
+                        "bid_id": bid_id,
+                        "service_id": "svc-sem-1",
+                        "amount": amount,
+                        "currency": "USD",
+                        "note": "semantic bid"
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let create_bid_resp = router.clone().oneshot(create_bid_req).await.unwrap();
+            assert_eq!(create_bid_resp.status(), StatusCode::OK);
+            let create_bid_body = axum::body::to_bytes(create_bid_resp.into_body(), usize::MAX)
+                .await
+                .expect("create bid body");
+            let create_bid_json: serde_json::Value =
+                serde_json::from_slice(&create_bid_body).expect("create bid json");
+            assert_eq!(create_bid_json["data"]["bid"]["status"], "open");
+        }
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/bid/list?service_id=svc-sem-1&sort=amount_desc&limit=10")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .expect("bid list body");
+        let list_json: serde_json::Value = serde_json::from_slice(&list_body).expect("bid list");
+        assert_eq!(list_json["data"]["total"], 2);
+        assert_eq!(list_json["data"]["bids"][0]["bid_id"], "bid-sem-2");
+
+        let accept_payload = serde_json::json!({
+            "sender_id": "service-owner-agent",
+            "idempotency_key": "sem-bid-accept-1"
+        });
+        let accept_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/bid-sem-2/accept")
+            .header("content-type", "application/json")
+            .body(Body::from(accept_payload.to_string()))
+            .unwrap();
+        let accept_resp = router.clone().oneshot(accept_req).await.unwrap();
+        assert_eq!(accept_resp.status(), StatusCode::OK);
+        let accept_body = axum::body::to_bytes(accept_resp.into_body(), usize::MAX)
+            .await
+            .expect("bid accept body");
+        let accept_json: serde_json::Value = serde_json::from_slice(&accept_body).expect("accept");
+        assert_eq!(accept_json["data"]["accepted_bid"]["status"], "accepted");
+        assert_eq!(accept_json["data"]["idempotent"], false);
+        assert!(accept_json["data"]["rejected_bid_ids"]
+            .as_array()
+            .map(|items| items.iter().any(|value| value == "bid-sem-1"))
+            .unwrap_or(false));
+
+        let accept_repeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/bid-sem-2/accept")
+            .header("content-type", "application/json")
+            .body(Body::from(accept_payload.to_string()))
+            .unwrap();
+        let accept_repeat_resp = router.clone().oneshot(accept_repeat_req).await.unwrap();
+        assert_eq!(accept_repeat_resp.status(), StatusCode::OK);
+        let accept_repeat_body = axum::body::to_bytes(accept_repeat_resp.into_body(), usize::MAX)
+            .await
+            .expect("bid accept repeat body");
+        let accept_repeat_json: serde_json::Value =
+            serde_json::from_slice(&accept_repeat_body).expect("accept repeat");
+        assert_eq!(accept_repeat_json["data"]["idempotent"], true);
+
+        let dispute_rule_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/dispute/rule")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "arbiter-sem-agent",
+                    "dispute_id": "dispute-sem-1",
+                    "bid_id": "bid-sem-2",
+                    "decision": "refund_buyer",
+                    "penalty_pct": 25,
+                    "note": "service-level breach"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let dispute_rule_resp = router.oneshot(dispute_rule_req).await.unwrap();
+        assert_eq!(dispute_rule_resp.status(), StatusCode::OK);
+        let dispute_rule_body = axum::body::to_bytes(dispute_rule_resp.into_body(), usize::MAX)
+            .await
+            .expect("dispute rule body");
+        let dispute_rule_json: serde_json::Value =
+            serde_json::from_slice(&dispute_rule_body).expect("dispute rule json");
+        assert_eq!(
+            dispute_rule_json["data"]["rule"]["dispute_id"],
+            "dispute-sem-1"
+        );
+        assert_eq!(
+            dispute_rule_json["data"]["rule"]["decision"],
+            "refund_buyer"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_bid_accept_requires_service_owner() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "service-owner-negative",
+                    "service_id": "svc-sem-negative",
+                    "title": "Negative service"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let publish_resp = router.clone().oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::OK);
+
+        let create_bid_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/create")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "bidder-negative",
+                    "bid_id": "bid-sem-negative",
+                    "service_id": "svc-sem-negative",
+                    "amount": 99
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let create_bid_resp = router.clone().oneshot(create_bid_req).await.unwrap();
+        assert_eq!(create_bid_resp.status(), StatusCode::OK);
+
+        let accept_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/bid-sem-negative/accept")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "intruder-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let accept_resp = router.oneshot(accept_req).await.unwrap();
+        assert_eq!(accept_resp.status(), StatusCode::FORBIDDEN);
+        let accept_body = axum::body::to_bytes(accept_resp.into_body(), usize::MAX)
+            .await
+            .expect("bid accept forbidden body");
+        let accept_json: serde_json::Value =
+            serde_json::from_slice(&accept_body).expect("bid accept forbidden json");
+        assert_eq!(accept_json["error"]["code"], "forbidden");
+        assert_eq!(
+            accept_json["error"]["details"]["reason"],
+            serde_json::json!("service_owner_required")
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_service_publish_worker_role_is_forbidden() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "worker-service-key",
+                "worker-service-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/publish")
+            .header("x-api-key-id", "worker-service-key")
+            .header("x-api-key", "worker-service-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "worker-service-agent",
+                    "title": "worker should be denied"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("service publish worker forbidden body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("service publish worker forbidden json");
+        assert_eq!(json["error"]["code"], "forbidden");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
     async fn evomap_protocol_validate_returns_tier_gate_and_capability_contract() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
         let req = Request::builder()
@@ -20356,25 +20743,42 @@ mod tests {
                 "req-service-publish",
                 "/a2a/service/publish",
                 "a2a.semantic.service.publish",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "service_id": "sem-service-audit",
+                    "title": "Audit semantic service"
+                }),
             ),
             (
                 "req-bid-create",
                 "/a2a/bid/create",
                 "a2a.semantic.bid.create",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-bidder",
+                    "bid_id": "bid-audit-1",
+                    "service_id": "sem-service-audit",
+                    "amount": 88.5
+                }),
             ),
             (
                 "req-bid-accept",
-                "/a2a/bid/bid-1/accept",
+                "/a2a/bid/bid-audit-1/accept",
                 "a2a.semantic.bid.accept",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent"
+                }),
             ),
             (
                 "req-dispute-rule",
                 "/a2a/dispute/rule",
                 "a2a.semantic.dispute.rule",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "dispute_id": "dispute-audit-1",
+                    "bid_id": "bid-audit-1",
+                    "decision": "refund_buyer",
+                    "penalty_pct": 20
+                }),
             ),
             (
                 "req-council-propose",
@@ -20701,6 +21105,70 @@ mod tests {
             serde_json::from_slice(&asset_search_body).expect("asset search json");
         assert_eq!(asset_search_json["data"]["mode"], "search");
         assert!(asset_search_json["data"]["results"].is_array());
+
+        let service_publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-e2e-agent",
+                    "service_id": "sem-e2e-service",
+                    "title": "E2E semantic service"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let service_publish_resp = router.clone().oneshot(service_publish_req).await.unwrap();
+        assert_eq!(service_publish_resp.status(), StatusCode::OK);
+
+        let bid_create_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/create")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-e2e-bidder",
+                    "bid_id": "sem-e2e-bid-1",
+                    "service_id": "sem-e2e-service",
+                    "amount": 77.7
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let bid_create_resp = router.clone().oneshot(bid_create_req).await.unwrap();
+        assert_eq!(bid_create_resp.status(), StatusCode::OK);
+
+        let bid_accept_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/sem-e2e-bid-1/accept")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-e2e-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let bid_accept_resp = router.clone().oneshot(bid_accept_req).await.unwrap();
+        assert_eq!(bid_accept_resp.status(), StatusCode::OK);
+
+        let dispute_rule_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/dispute/rule")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-e2e-agent",
+                    "dispute_id": "sem-e2e-dispute",
+                    "bid_id": "sem-e2e-bid-1",
+                    "decision": "refund_buyer"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let dispute_rule_resp = router.clone().oneshot(dispute_rule_req).await.unwrap();
+        assert_eq!(dispute_rule_resp.status(), StatusCode::OK);
 
         let principles_req = Request::builder()
             .method(Method::POST)
@@ -21789,6 +22257,80 @@ struct EvomapProjectSuggestionsQuery {
     status: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapServicePublishRequest {
+    sender_id: Option<String>,
+    service_id: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    category: Option<String>,
+    tags: Option<Vec<String>>,
+    price: Option<f64>,
+    currency: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapBidCreateRequest {
+    sender_id: Option<String>,
+    bid_id: Option<String>,
+    service_id: Option<String>,
+    amount: Option<f64>,
+    currency: Option<String>,
+    note: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapBidAcceptRequest {
+    sender_id: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapBidListQuery {
+    sender_id: Option<String>,
+    service_id: Option<String>,
+    bidder_id: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapDisputeRuleRequest {
+    sender_id: Option<String>,
+    dispute_id: Option<String>,
+    bid_id: Option<String>,
+    decision: Option<String>,
+    outcome: Option<String>,
+    rule: Option<String>,
+    penalty_pct: Option<u8>,
+    note: Option<String>,
+    idempotency_key: Option<String>,
 }
 
 #[cfg(all(
@@ -25613,6 +26155,793 @@ pub async fn evomap_asset_reviews(
             "offset": offset
         }),
     ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_normalize_market_id(raw: &str, field: &str, rid: &str) -> Result<String, ApiError> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(
+            ApiError::bad_request(format!("{field} must not be empty")).with_request_id(rid)
+        );
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        return Err(
+            ApiError::bad_request(format!("{field} contains invalid characters"))
+                .with_request_id(rid),
+        );
+    }
+    Ok(value.to_string())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_normalize_service_id(raw: &str, rid: &str) -> Result<String, ApiError> {
+    evomap_normalize_market_id(raw, "service_id", rid)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_normalize_bid_id(raw: &str, rid: &str) -> Result<String, ApiError> {
+    evomap_normalize_market_id(raw, "bid_id", rid)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_normalize_dispute_id(raw: &str, rid: &str) -> Result<String, ApiError> {
+    evomap_normalize_market_id(raw, "dispute_id", rid)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_service_json(service: &EvomapServiceRecord) -> Value {
+    serde_json::json!({
+        "service_id": service.service_id,
+        "title": service.title,
+        "summary": service.summary,
+        "category": service.category,
+        "tags": service.tags,
+        "status": service.status,
+        "price": service.price,
+        "currency": service.currency,
+        "published_by": service.published_by,
+        "created_at_ms": service.created_at_ms,
+        "updated_at_ms": service.updated_at_ms
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_bid_json(bid: &EvomapBidRecord) -> Value {
+    serde_json::json!({
+        "bid_id": bid.bid_id,
+        "service_id": bid.service_id,
+        "bidder_id": bid.bidder_id,
+        "amount": bid.amount,
+        "currency": bid.currency,
+        "note": bid.note,
+        "status": bid.status.as_str(),
+        "accepted_by": bid.accepted_by,
+        "rejected_reason": bid.rejected_reason,
+        "created_at_ms": bid.created_at_ms,
+        "updated_at_ms": bid.updated_at_ms,
+        "accepted_at_ms": bid.accepted_at_ms
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_dispute_decision(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "uphold_bid" | "uphold" | "accept_bid" => Some("uphold_bid"),
+        "refund_buyer" | "refund" => Some("refund_buyer"),
+        "split_award" | "split" => Some("split_award"),
+        "slash_provider" | "slash" => Some("slash_provider"),
+        _ => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_dispute_rule_json(rule: &EvomapDisputeRuleRecord) -> Value {
+    serde_json::json!({
+        "dispute_id": rule.dispute_id,
+        "bid_id": rule.bid_id,
+        "decision": rule.decision,
+        "penalty_pct": rule.penalty_pct,
+        "note": rule.note,
+        "ruled_by": rule.ruled_by,
+        "ruled_at_ms": rule.ruled_at_ms
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_service_publish(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapServicePublishRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/service/publish",
+    )?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("title is required for /a2a/service/publish")
+                .with_request_id(rid.clone())
+        })?
+        .to_string();
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|value| evomap_normalize_service_id(value, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("service-{}", uuid::Uuid::new_v4()));
+    let summary = req
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let category = req
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_else(|| "general".to_string());
+    let price = req.price.unwrap_or(0.0);
+    if !price.is_finite() || price < 0.0 {
+        return Err(
+            ApiError::bad_request("price must be a finite number >= 0").with_request_id(rid)
+        );
+    }
+    let currency = req
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase())
+        .unwrap_or_else(|| "USD".to_string());
+    let mut tags = req.tags.unwrap_or_default();
+    tags = tags
+        .into_iter()
+        .map(|item| item.trim().to_ascii_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("market.service.publish:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            let mut cached = cached;
+            if let Some(obj) = cached.as_object_mut() {
+                obj.insert("idempotent".to_string(), Value::Bool(true));
+            }
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let service = {
+        let mut services = state.evomap_services.write().await;
+        if let Some(existing) = services.get(&service_id).cloned() {
+            let same_price = (existing.price - price).abs() < f64::EPSILON;
+            if existing.published_by == sender_id
+                && existing.title == title
+                && existing.summary == summary
+                && existing.category == category
+                && existing.tags == tags
+                && existing.currency == currency
+                && same_price
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "service_id already exists with different payload: {service_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let service = EvomapServiceRecord {
+                service_id: service_id.clone(),
+                title,
+                summary,
+                category,
+                tags,
+                status: "open".to_string(),
+                price,
+                currency,
+                published_by: sender_id.clone(),
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+            };
+            services.insert(service_id.clone(), service.clone());
+            service
+        }
+    };
+
+    let data = serde_json::json!({
+        "service": evomap_service_json(&service),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_create(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapBidCreateRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/bid/create",
+    )?;
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|value| evomap_normalize_service_id(value, &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("service_id is required for /a2a/bid/create")
+                .with_request_id(rid.clone())
+        })?;
+    let amount = req.amount.ok_or_else(|| {
+        ApiError::bad_request("amount is required for /a2a/bid/create").with_request_id(rid.clone())
+    })?;
+    if !amount.is_finite() || amount <= 0.0 {
+        return Err(
+            ApiError::bad_request("amount must be a finite number > 0").with_request_id(rid)
+        );
+    }
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let bid_id = req
+        .bid_id
+        .as_deref()
+        .map(|value| evomap_normalize_bid_id(value, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("bid-{}", uuid::Uuid::new_v4()));
+
+    let service = state
+        .evomap_services
+        .read()
+        .await
+        .get(service_id.as_str())
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::not_found(format!("service not found: {service_id}"))
+                .with_request_id(rid.clone())
+        })?;
+    if service.published_by == sender_id {
+        return Err(
+            ApiError::forbidden("service publisher cannot create bids for own service")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "service_id": service_id,
+                    "reason": "owner_cannot_bid"
+                })),
+        );
+    }
+    let currency = req
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase())
+        .unwrap_or_else(|| service.currency.clone());
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("market.bid.create:{service_id}:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            let mut cached = cached;
+            if let Some(obj) = cached.as_object_mut() {
+                obj.insert("idempotent".to_string(), Value::Bool(true));
+            }
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let bid = {
+        let mut bids = state.evomap_bids.write().await;
+        if let Some(existing) = bids.get(&bid_id).cloned() {
+            let same_amount = (existing.amount - amount).abs() < f64::EPSILON;
+            if existing.bidder_id == sender_id
+                && existing.service_id == service_id
+                && existing.currency == currency
+                && existing.note == note
+                && existing.status == EvomapBidStatus::Open
+                && same_amount
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "bid_id already exists with different payload: {bid_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let bid = EvomapBidRecord {
+                bid_id: bid_id.clone(),
+                service_id: service_id.clone(),
+                bidder_id: sender_id.clone(),
+                amount,
+                currency,
+                note,
+                status: EvomapBidStatus::Open,
+                accepted_by: None,
+                rejected_reason: None,
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                accepted_at_ms: None,
+            };
+            bids.insert(bid_id.clone(), bid.clone());
+            bid
+        }
+    };
+
+    let data = serde_json::json!({
+        "service": evomap_service_json(&service),
+        "bid": evomap_bid_json(&bid),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_list(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapBidListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    if let Some(sender_id) = q.sender_id.as_deref() {
+        validate_sender_id(sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    }
+    let service_filter = q
+        .service_id
+        .as_deref()
+        .map(|value| evomap_normalize_service_id(value, &rid))
+        .transpose()?;
+    let bidder_filter = q
+        .bidder_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let status_filter = q
+        .status
+        .as_deref()
+        .map(|raw| {
+            EvomapBidStatus::from_str(raw).ok_or_else(|| {
+                ApiError::bad_request("status must be one of: open|accepted|rejected")
+                    .with_request_id(rid.clone())
+            })
+        })
+        .transpose()?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("created_asc")
+        .to_ascii_lowercase();
+
+    let bids = state.evomap_bids.read().await;
+    let mut values = bids.values().cloned().collect::<Vec<_>>();
+    if let Some(service_id) = service_filter.as_deref() {
+        values.retain(|bid| bid.service_id == service_id);
+    }
+    if let Some(bidder_id) = bidder_filter.as_deref() {
+        values.retain(|bid| bid.bidder_id == bidder_id);
+    }
+    if let Some(status) = status_filter {
+        values.retain(|bid| bid.status == status);
+    }
+    match sort.as_str() {
+        "amount_desc" => values.sort_by(|left, right| {
+            right
+                .amount
+                .partial_cmp(&left.amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.bid_id.cmp(&right.bid_id))
+        }),
+        "amount_asc" => values.sort_by(|left, right| {
+            left.amount
+                .partial_cmp(&right.amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.bid_id.cmp(&right.bid_id))
+        }),
+        "updated_desc" => values.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.bid_id.cmp(&right.bid_id))
+        }),
+        "created_desc" => values.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| left.bid_id.cmp(&right.bid_id))
+        }),
+        _ => values.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.bid_id.cmp(&right.bid_id))
+        }),
+    }
+    let total = values.len();
+    let bids = values
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|bid| evomap_bid_json(&bid))
+        .collect::<Vec<_>>();
+    let count = bids.len();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "bids": bids,
+            "total": total,
+            "count": count,
+            "limit": limit,
+            "offset": offset,
+            "sort": sort,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_accept(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(bid_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let bid_id = evomap_normalize_bid_id(&bid_id, &rid)?;
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapBidAcceptRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/bid/:id/accept",
+    )?;
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("market.bid.accept:{bid_id}:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            let mut cached = cached;
+            if let Some(obj) = cached.as_object_mut() {
+                obj.insert("idempotent".to_string(), Value::Bool(true));
+            }
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let service = {
+        let bids = state.evomap_bids.read().await;
+        let bid = bids.get(&bid_id).ok_or_else(|| {
+            ApiError::not_found(format!("bid not found: {bid_id}")).with_request_id(rid.clone())
+        })?;
+        let services = state.evomap_services.read().await;
+        services
+            .get(bid.service_id.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::not_found(format!("service not found: {}", bid.service_id))
+                    .with_request_id(rid.clone())
+            })?
+    };
+    if service.published_by != sender_id {
+        return Err(
+            ApiError::forbidden("only service publisher can accept bids")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "service_id": service.service_id,
+                    "published_by": service.published_by,
+                    "reason": "service_owner_required"
+                })),
+        );
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let (accepted_bid, rejected_bid_ids, idempotent) = {
+        let mut bids = state.evomap_bids.write().await;
+        let mut idempotent = false;
+        {
+            let bid = bids.get_mut(&bid_id).ok_or_else(|| {
+                ApiError::not_found(format!("bid not found: {bid_id}")).with_request_id(rid.clone())
+            })?;
+            match bid.status {
+                EvomapBidStatus::Accepted
+                    if bid.accepted_by.as_deref() == Some(sender_id.as_str()) =>
+                {
+                    idempotent = true;
+                }
+                EvomapBidStatus::Accepted => {
+                    return Err(ApiError::conflict("bid already accepted")
+                        .with_request_id(rid)
+                        .with_details(serde_json::json!({
+                            "bid_id": bid_id,
+                            "accepted_by": bid.accepted_by,
+                            "reason": "already_accepted"
+                        })));
+                }
+                EvomapBidStatus::Rejected => {
+                    return Err(ApiError::conflict("rejected bid cannot be accepted")
+                        .with_request_id(rid)
+                        .with_details(serde_json::json!({
+                            "bid_id": bid_id,
+                            "reason": "bid_rejected"
+                        })));
+                }
+                EvomapBidStatus::Open => {
+                    bid.status = EvomapBidStatus::Accepted;
+                    bid.accepted_by = Some(sender_id.clone());
+                    bid.accepted_at_ms = Some(now_ms);
+                    bid.updated_at_ms = now_ms;
+                }
+            }
+        }
+        let accepted_bid = bids.get(&bid_id).cloned().ok_or_else(|| {
+            ApiError::not_found(format!("bid not found: {bid_id}")).with_request_id(rid.clone())
+        })?;
+        let mut rejected_bid_ids = Vec::new();
+        if !idempotent {
+            for (other_id, other_bid) in bids.iter_mut() {
+                if *other_id != bid_id
+                    && other_bid.service_id == accepted_bid.service_id
+                    && other_bid.status == EvomapBidStatus::Open
+                {
+                    other_bid.status = EvomapBidStatus::Rejected;
+                    other_bid.rejected_reason = Some("accepted_another_bid".to_string());
+                    other_bid.updated_at_ms = now_ms;
+                    rejected_bid_ids.push(other_id.clone());
+                }
+            }
+            rejected_bid_ids.sort();
+        }
+        (accepted_bid, rejected_bid_ids, idempotent)
+    };
+
+    let data = serde_json::json!({
+        "service": evomap_service_json(&service),
+        "accepted_bid": evomap_bid_json(&accepted_bid),
+        "rejected_bid_ids": rejected_bid_ids,
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_dispute_rule(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapDisputeRuleRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/dispute/rule",
+    )?;
+    let dispute_id = req
+        .dispute_id
+        .as_deref()
+        .map(|value| evomap_normalize_dispute_id(value, &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("dispute_id is required for /a2a/dispute/rule")
+                .with_request_id(rid.clone())
+        })?;
+    let decision_raw = req.decision.or(req.outcome).or(req.rule).ok_or_else(|| {
+        ApiError::bad_request("decision is required for /a2a/dispute/rule")
+            .with_request_id(rid.clone())
+    })?;
+    let decision = evomap_dispute_decision(&decision_raw).ok_or_else(|| {
+        ApiError::bad_request(
+            "decision must be one of: uphold_bid|refund_buyer|split_award|slash_provider",
+        )
+        .with_request_id(rid.clone())
+    })?;
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let bid_id = req
+        .bid_id
+        .as_deref()
+        .map(|value| evomap_normalize_bid_id(value, &rid))
+        .transpose()?;
+    if let Some(bid_id) = bid_id.as_deref() {
+        let bids = state.evomap_bids.read().await;
+        if !bids.contains_key(bid_id) {
+            return Err(
+                ApiError::not_found(format!("bid not found: {bid_id}")).with_request_id(rid)
+            );
+        }
+    }
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("market.dispute.rule:{dispute_id}:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let rule = {
+        let mut rules = state.evomap_dispute_rules.write().await;
+        if let Some(existing) = rules.get(&dispute_id).cloned() {
+            if existing.bid_id == bid_id
+                && existing.decision == decision
+                && existing.penalty_pct == req.penalty_pct
+                && existing.note == note
+                && existing.ruled_by == sender_id
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "dispute rule already exists with different payload: {dispute_id}"
+                ))
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "dispute_id": dispute_id,
+                    "reason": "rule_already_recorded"
+                })));
+            }
+        } else {
+            let rule = EvomapDisputeRuleRecord {
+                dispute_id: dispute_id.clone(),
+                bid_id,
+                decision: decision.to_string(),
+                penalty_pct: req.penalty_pct,
+                note,
+                ruled_by: sender_id.clone(),
+                ruled_at_ms: now_ms,
+            };
+            rules.insert(dispute_id.clone(), rule.clone());
+            rule
+        }
+    };
+
+    let data = serde_json::json!({
+        "rule": evomap_dispute_rule_json(&rule),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
 }
 
 #[cfg(all(
