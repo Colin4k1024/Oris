@@ -10743,7 +10743,7 @@ mod tests {
             .count();
         assert_eq!(reported_promoted, 3);
         assert_eq!(reported_revoked, 1);
-        assert_eq!(builtin_promoted, 2);
+        assert_eq!(builtin_promoted, 5);
 
         let _ = std::fs::remove_dir_all(&store_root);
     }
@@ -18443,7 +18443,7 @@ mod tests {
             serde_json::from_slice(&ranked_body).expect("ranked json");
         assert_eq!(ranked_json["data"]["mode"], "ranked");
         assert_eq!(ranked_json["data"]["idempotent"], true);
-        assert_eq!(ranked_json["data"]["total"], 2);
+        assert_eq!(ranked_json["data"]["total"], 5);
         assert_eq!(ranked_json["data"]["limit"], 1);
         assert_eq!(ranked_json["data"]["offset"], 0);
         assert_eq!(
@@ -18482,6 +18482,23 @@ mod tests {
             "builtin-experience-docs-rewrite-v1"
         );
 
+        let ranked_page5_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=evomap-discovery-agent&limit=1&offset=4")
+            .body(Body::empty())
+            .unwrap();
+        let ranked_page5_resp = router.clone().oneshot(ranked_page5_req).await.unwrap();
+        assert_eq!(ranked_page5_resp.status(), StatusCode::OK);
+        let ranked_page5_body = axum::body::to_bytes(ranked_page5_resp.into_body(), usize::MAX)
+            .await
+            .expect("ranked page5 body");
+        let ranked_page5_json: serde_json::Value =
+            serde_json::from_slice(&ranked_page5_body).expect("ranked page5 json");
+        assert_eq!(
+            ranked_page5_json["data"]["results"][0]["asset_id"],
+            "builtin-experience-task-decomposition-v1"
+        );
+
         let categories_req = Request::builder()
             .method(Method::GET)
             .uri("/a2a/assets/categories?sender_id=evomap-discovery-agent")
@@ -18495,7 +18512,7 @@ mod tests {
         let categories_json: serde_json::Value =
             serde_json::from_slice(&categories_body).expect("categories json");
         assert_eq!(categories_json["data"]["mode"], "categories");
-        assert_eq!(categories_json["data"]["total_categories"], 2);
+        assert_eq!(categories_json["data"]["total_categories"], 5);
         assert_eq!(
             categories_json["data"]["categories"][0]["category"],
             "ci.fix"

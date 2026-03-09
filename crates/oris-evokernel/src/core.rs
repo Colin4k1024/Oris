@@ -2890,6 +2890,60 @@ fn built_in_experience_genes() -> Vec<Gene> {
             validation: vec!["builtin-template".into(), "origin=builtin".into()],
             state: AssetState::Promoted,
         },
+        Gene {
+            id: "builtin-experience-task-decomposition-v1".into(),
+            signals: vec![
+                "task.decomposition".into(),
+                "task".into(),
+                "decomposition".into(),
+                "planning".into(),
+            ],
+            strategy: vec![
+                "asset_origin=builtin".into(),
+                "task_class=task.decomposition".into(),
+                "task_label=Task decomposition".into(),
+                "template_id=builtin-task-decomposition-v1".into(),
+                "summary=baseline task decomposition and routing experience".into(),
+            ],
+            validation: vec!["builtin-template".into(), "origin=builtin".into()],
+            state: AssetState::Promoted,
+        },
+        Gene {
+            id: "builtin-experience-project-workflow-v1".into(),
+            signals: vec![
+                "project.workflow".into(),
+                "project".into(),
+                "workflow".into(),
+                "milestone".into(),
+            ],
+            strategy: vec![
+                "asset_origin=builtin".into(),
+                "task_class=project.workflow".into(),
+                "task_label=Project workflow".into(),
+                "template_id=builtin-project-workflow-v1".into(),
+                "summary=baseline project proposal and merge workflow experience".into(),
+            ],
+            validation: vec!["builtin-template".into(), "origin=builtin".into()],
+            state: AssetState::Promoted,
+        },
+        Gene {
+            id: "builtin-experience-service-bid-v1".into(),
+            signals: vec![
+                "service.bid".into(),
+                "service".into(),
+                "bid".into(),
+                "economics".into(),
+            ],
+            strategy: vec![
+                "asset_origin=builtin".into(),
+                "task_class=service.bid".into(),
+                "task_label=Service bid".into(),
+                "template_id=builtin-service-bid-v1".into(),
+                "summary=baseline service bidding and settlement experience".into(),
+            ],
+            validation: vec!["builtin-template".into(), "origin=builtin".into()],
+            state: AssetState::Promoted,
+        },
     ]
 }
 
@@ -5405,7 +5459,27 @@ index 0000000..1111111
         let first = node
             .ensure_builtin_experience_assets("runtime-bootstrap")
             .unwrap();
-        assert_eq!(first.imported_asset_ids.len(), 2);
+        assert_eq!(first.imported_asset_ids.len(), 5);
+        assert!(first
+            .imported_asset_ids
+            .iter()
+            .any(|id| id == "builtin-experience-docs-rewrite-v1"));
+        assert!(first
+            .imported_asset_ids
+            .iter()
+            .any(|id| id == "builtin-experience-ci-fix-v1"));
+        assert!(first
+            .imported_asset_ids
+            .iter()
+            .any(|id| id == "builtin-experience-task-decomposition-v1"));
+        assert!(first
+            .imported_asset_ids
+            .iter()
+            .any(|id| id == "builtin-experience-project-workflow-v1"));
+        assert!(first
+            .imported_asset_ids
+            .iter()
+            .any(|id| id == "builtin-experience-service-bid-v1"));
 
         let second = node
             .ensure_builtin_experience_assets("runtime-bootstrap")
@@ -5505,7 +5579,7 @@ index 0000000..1111111
 
         assert_eq!(reported_promoted, 3);
         assert_eq!(reported_revoked, 1);
-        assert_eq!(builtin_promoted, 2);
+        assert_eq!(builtin_promoted, 5);
 
         let fetch = node
             .fetch_assets(
