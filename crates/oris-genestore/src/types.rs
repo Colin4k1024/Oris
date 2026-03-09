@@ -51,6 +51,9 @@ pub struct Capsule {
 
 impl Capsule {
     pub const STALE_THRESHOLD: f64 = 0.30;
+    pub const DECAY_PER_QUERY: f64 = 0.002;
+    pub const PENALTY_ON_FAILURE: f64 = 0.08;
+    pub const BOOST_ON_SUCCESS: f64 = 0.05;
 }
 
 /// Query for searching genes.
