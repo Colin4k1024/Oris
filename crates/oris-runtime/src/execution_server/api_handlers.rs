@@ -17702,7 +17702,7 @@ pub async fn evomap_bounty_create(
             accepted_by: None,
             accepted_at_ms: None,
         };
-        repo.upsert_bounty(&bounty).map_err(|e| ApiError::Internal(format!("db error: {}", e)))?;
+        repo.upsert_bounty(&bounty).map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
     }
 
     let response = EvomapBountyResponse {

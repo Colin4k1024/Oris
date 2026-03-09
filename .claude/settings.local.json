@@ -21,7 +21,11 @@
       "Bash(git fetch:*)",
       "Bash(git pull:*)",
       "Bash(git stash:*)",
-      "Bash(git add crates/oris-runtime/src/execution_server/api_handlers.rs .claude/settings.local.json)"
+      "Bash(git add crates/oris-runtime/src/execution_server/api_handlers.rs .claude/settings.local.json)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)"
     ]
   }
 }
