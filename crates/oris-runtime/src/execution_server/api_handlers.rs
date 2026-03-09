@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::Instant;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{OriginalUri, Path, Query, State};
 use axum::http::{
     header::{AUTHORIZATION, CONTENT_TYPE},
     HeaderMap, StatusCode,
@@ -14,13 +14,12 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
+use oris_execution_runtime::models::{
+    BountyRecord, BountyStatus, RecipeRecord, SessionMessageRecord, WorkerRecord,
+};
 use oris_execution_runtime::{
     ExecutionCheckpointView, ExecutionGraphBridge, ExecutionGraphBridgeErrorKind,
     KernelObservability,
-};
-use oris_execution_runtime::models::{
-    BountyRecord, BountyStatus, WorkerRecord, RecipeRecord, OrganismRecord,
-    SessionRecord, SessionMessageRecord, DisputeRecord, DisputeStatus, SwarmTaskRecord,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -446,6 +445,84 @@ struct A2aSession {
 struct A2aIssuedCompatNodeSecret {
     principal: Option<A2aSessionPrincipal>,
     expires_at: chrono::DateTime<Utc>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum EvomapSemanticTaskStatus {
+    Open,
+    Claimed,
+    Submitted,
+    Accepted,
+    Rejected,
+    Completed,
+    Released,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl EvomapSemanticTaskStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Claimed => "claimed",
+            Self::Submitted => "submitted",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Completed => "completed",
+            Self::Released => "released",
+        }
+    }
+
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "open" => Some(Self::Open),
+            "claimed" => Some(Self::Claimed),
+            "submitted" => Some(Self::Submitted),
+            "accepted" => Some(Self::Accepted),
+            "rejected" => Some(Self::Rejected),
+            "completed" => Some(Self::Completed),
+            "released" => Some(Self::Released),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapSemanticTaskRecord {
+    task_id: String,
+    title: String,
+    summary: String,
+    status: EvomapSemanticTaskStatus,
+    created_by: String,
+    claimed_by: Option<String>,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    last_submission_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapSemanticSubmissionRecord {
+    submission_id: String,
+    task_id: String,
+    submitted_by: String,
+    status: String,
+    summary: Option<String>,
+    submitted_at_ms: i64,
 }
 
 #[cfg(all(
@@ -1971,6 +2048,31 @@ pub struct ExecutionApiState {
         feature = "evolution-network-experimental"
     ))]
     a2a_compat_task_queue: Arc<RwLock<VecDeque<A2aCompatQueueEntry>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_semantic_tasks: Arc<RwLock<HashMap<String, EvomapSemanticTaskRecord>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_semantic_submissions: Arc<RwLock<HashMap<String, Vec<EvomapSemanticSubmissionRecord>>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_decision_idempotency: Arc<RwLock<HashMap<String, Value>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_report_idempotency: Arc<RwLock<HashMap<String, Value>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_revoke_idempotency: Arc<RwLock<HashMap<String, RevokeNotice>>>,
     pub auth: ExecutionApiAuthConfig,
     #[cfg(feature = "mcp-experimental")]
     pub mcp_bootstrap: McpBootstrapConfig,
@@ -2025,6 +2127,31 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             a2a_compat_task_queue: Arc::new(RwLock::new(VecDeque::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_semantic_tasks: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_semantic_submissions: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_decision_idempotency: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_report_idempotency: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_revoke_idempotency: Arc::new(RwLock::new(HashMap::new())),
             auth: ExecutionApiAuthConfig::default(),
             #[cfg(feature = "mcp-experimental")]
             mcp_bootstrap: McpBootstrapConfig::default(),
@@ -2289,24 +2416,72 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/heartbeat", post(evolution_a2a_heartbeat_compat))
         .route("/a2a/tasks/claim", post(evolution_a2a_tasks_claim_compat))
         .route("/a2a/tasks/report", post(evolution_a2a_tasks_report_compat))
+        // EvoMap Wiki protocol core compatibility
+        .route("/a2a/validate", post(evomap_validate))
+        .route("/a2a/report", post(evomap_report))
+        .route("/a2a/decision", post(evomap_decision))
+        .route("/a2a/revoke", post(evomap_revoke))
+        .route("/a2a/policy/model-tiers", get(evomap_model_tiers))
         // EvoMap compatibility aliases
         .route("/task/claim", post(evolution_a2a_tasks_claim_compat))
         .route("/task/complete", post(evolution_a2a_task_complete_compat))
+        // EvoMap task management surface
+        .route("/a2a/task/list", get(evomap_task_list))
+        .route("/a2a/task/submit", post(evomap_task_submit))
+        .route("/a2a/task/release", post(evomap_task_release))
+        .route(
+            "/a2a/task/accept-submission",
+            post(evomap_task_accept_submission),
+        )
+        .route("/a2a/task/my", get(evomap_task_my))
+        .route("/a2a/task/:id", get(evomap_task_get))
+        .route("/a2a/task/:id/submissions", get(evomap_task_submissions))
+        .route("/a2a/task/eligible-count", get(evomap_task_eligible_count))
+        .route("/a2a/task/swarm", post(evomap_task_swarm))
+        .route("/a2a/ask", post(evomap_task_ask))
+        // EvoMap assets and discovery surface
+        .route("/a2a/assets/search", get(evomap_surface_get))
+        .route("/a2a/assets/ranked", get(evomap_surface_get))
+        .route("/a2a/assets/explore", get(evomap_surface_get))
+        .route("/a2a/assets/recommended", get(evomap_surface_get))
+        .route("/a2a/assets/daily-discovery", get(evomap_surface_get))
+        .route("/a2a/assets/trending", get(evomap_surface_get))
+        .route("/a2a/assets/categories", get(evomap_surface_get))
+        .route("/a2a/assets/:id", get(evomap_surface_get))
+        .route("/a2a/assets/:id/branches", get(evomap_surface_get))
+        .route("/a2a/assets/:id/timeline", get(evomap_surface_get))
+        .route("/a2a/assets/:id/related", get(evomap_surface_get))
+        .route("/a2a/assets/:id/verify", post(evomap_surface_post))
+        .route("/a2a/assets/:id/audit-trail", get(evomap_surface_get))
+        .route("/a2a/assets/my-usage", get(evomap_surface_get))
+        .route("/a2a/assets/:id/vote", post(evomap_surface_post))
+        .route("/a2a/assets/:id/reviews", get(evomap_surface_get))
         // EvoMap: Bounty endpoints
         .route("/a2a/bounty/create", post(evomap_bounty_create))
         .route("/a2a/bounty/:id/accept", post(evomap_bounty_accept))
         .route("/a2a/bounty/:id/close", post(evomap_bounty_close))
         // EvoMap: Swarm decomposition
-        .route("/task/propose-decomposition", post(evomap_swarm_propose_decomposition))
+        .route(
+            "/task/propose-decomposition",
+            post(evomap_swarm_propose_decomposition),
+        )
         // EvoMap: Worker registration
         .route("/a2a/worker/register", post(evomap_worker_register))
         // EvoMap: Recipe endpoints
         .route("/a2a/recipe", post(evomap_recipe_create))
+        .route("/a2a/recipe/list", get(evomap_recipe_list))
         .route("/a2a/recipe/:id", get(evomap_recipe_get))
         .route("/a2a/recipe/:id/fork", post(evomap_recipe_fork))
+        .route("/a2a/directory", get(evomap_directory))
         // EvoMap: Organism endpoints
         .route("/a2a/organism/express", post(evomap_organism_express))
+        .route("/a2a/organism/active", get(evomap_organism_active))
         .route("/a2a/organism/:id", get(evomap_organism_get))
+        // EvoMap service/bid/dispute extensions
+        .route("/a2a/service/publish", post(evomap_surface_post))
+        .route("/a2a/bid/create", post(evomap_surface_post))
+        .route("/a2a/bid/list", get(evomap_surface_get))
+        .route("/a2a/bid/:id/accept", post(evomap_surface_post))
         // EvoMap: Session endpoints
         .route("/a2a/session/join", post(evomap_session_join))
         .route("/a2a/session/message", post(evomap_session_message))
@@ -2314,7 +2489,31 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         // EvoMap: Dispute endpoints
         .route("/a2a/dispute/open", post(evomap_dispute_open))
         .route("/a2a/dispute/evidence", post(evomap_dispute_evidence))
+        .route("/a2a/dispute/rule", post(evomap_surface_post))
         .route("/a2a/dispute/resolve", post(evomap_dispute_resolve))
+        // EvoMap governance/project surface
+        .route("/a2a/stats", get(evomap_stats))
+        .route("/a2a/nodes", get(evomap_nodes))
+        .route("/a2a/trending", get(evomap_surface_get))
+        .route("/a2a/council/propose", post(evomap_surface_post))
+        .route("/a2a/council/vote", post(evomap_surface_post))
+        .route("/a2a/council/execute", post(evomap_surface_post))
+        .route("/a2a/council/session", post(evomap_surface_post))
+        .route("/a2a/project/propose", post(evomap_surface_post))
+        .route("/a2a/project/:id/claim", post(evomap_surface_post))
+        .route("/a2a/project/:id/progress", post(evomap_surface_post))
+        .route("/a2a/project/:id/review", post(evomap_surface_post))
+        .route("/a2a/project/:id/merge", post(evomap_surface_post))
+        .route("/a2a/project/list", post(evomap_project_list))
+        .route("/a2a/project/suggestions", get(evomap_surface_get))
+        .route(
+            "/a2a/governance/principles",
+            post(evomap_governance_principles),
+        )
+        .route(
+            "/a2a/community/governance",
+            post(evomap_governance_principles),
+        )
 }
 
 #[cfg(not(all(
@@ -17641,6 +17840,133 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).expect("export json");
         assert!(json["data"]["timeline"].is_array());
     }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_protocol_route_surface_includes_wiki_required_endpoints() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let checks = vec![
+            (
+                Method::POST,
+                "/a2a/validate",
+                serde_json::json!({"sender_id":"surface-agent"}),
+            ),
+            (
+                Method::POST,
+                "/a2a/report",
+                serde_json::json!({"sender_id":"surface-agent"}),
+            ),
+            (
+                Method::POST,
+                "/a2a/decision",
+                serde_json::json!({"sender_id":"surface-agent","decision":"accept"}),
+            ),
+            (
+                Method::POST,
+                "/a2a/revoke",
+                serde_json::json!({"sender_id":"surface-agent","asset_ids":[]}),
+            ),
+            (
+                Method::GET,
+                "/a2a/policy/model-tiers",
+                serde_json::Value::Null,
+            ),
+        ];
+        for (method, uri, payload) in checks {
+            let mut builder = Request::builder().method(method.clone()).uri(uri);
+            let req = if method == Method::GET {
+                builder.body(Body::empty()).unwrap()
+            } else {
+                builder = builder.header("content-type", "application/json");
+                builder.body(Body::from(payload.to_string())).unwrap()
+            };
+            let resp = router.clone().oneshot(req).await.expect("surface response");
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "route should exist: {uri}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_discovery_route_surface_includes_market_and_directory_endpoints() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let checks = vec![
+            (Method::GET, "/a2a/directory"),
+            (Method::GET, "/a2a/recipe/list"),
+            (Method::GET, "/a2a/organism/active"),
+            (Method::GET, "/a2a/assets/search"),
+            (Method::GET, "/a2a/assets/ranked"),
+            (Method::GET, "/a2a/assets/trending"),
+            (Method::GET, "/a2a/stats"),
+            (Method::GET, "/a2a/nodes"),
+        ];
+        for (method, uri) in checks {
+            let req = Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.expect("surface response");
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "route should exist: {uri}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_governance_route_surface_includes_council_and_project_endpoints() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let checks = vec![
+            (
+                "/a2a/council/propose",
+                serde_json::json!({"sender_id":"surface-agent","title":"Proposal"}),
+            ),
+            (
+                "/a2a/council/vote",
+                serde_json::json!({"sender_id":"surface-agent","proposal_id":"p-1","vote":"yes"}),
+            ),
+            (
+                "/a2a/council/execute",
+                serde_json::json!({"sender_id":"surface-agent","proposal_id":"p-1"}),
+            ),
+            (
+                "/a2a/project/propose",
+                serde_json::json!({"sender_id":"surface-agent","title":"Project"}),
+            ),
+            ("/a2a/project/list", serde_json::json!({})),
+            ("/a2a/governance/principles", serde_json::json!({})),
+            ("/a2a/community/governance", serde_json::json!({})),
+        ];
+        for (uri, payload) in checks {
+            let req = Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.expect("surface response");
+            assert_ne!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "route should exist: {uri}"
+            );
+        }
+    }
 }
 
 // ===================================================================
@@ -17702,7 +18028,8 @@ pub async fn evomap_bounty_create(
             accepted_by: None,
             accepted_at_ms: None,
         };
-        repo.upsert_bounty(&bounty).map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+        repo.upsert_bounty(&bounty)
+            .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
     }
 
     let response = EvomapBountyResponse {
@@ -17732,7 +18059,7 @@ pub async fn evomap_bounty_accept(
     Json(_req): Json<Value>,
 ) -> Result<Json<ApiEnvelope<EvomapBountyResponse>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     let response = EvomapBountyResponse {
         bounty_id: bounty_id.clone(),
         title: "Accepted Bounty".to_string(),
@@ -17740,7 +18067,7 @@ pub async fn evomap_bounty_accept(
         status: "accepted".to_string(),
         created_at_ms: Utc::now().timestamp_millis(),
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -17760,7 +18087,7 @@ pub async fn evomap_bounty_close(
     Json(_req): Json<Value>,
 ) -> Result<Json<ApiEnvelope<EvomapBountyResponse>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     let response = EvomapBountyResponse {
         bounty_id: bounty_id.clone(),
         title: "Closed Bounty".to_string(),
@@ -17768,7 +18095,7 @@ pub async fn evomap_bounty_close(
         status: "closed".to_string(),
         created_at_ms: Utc::now().timestamp_millis(),
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -17834,7 +18161,7 @@ pub async fn evomap_swarm_propose_decomposition(
     Json(req): Json<EvomapSwarmDecompositionRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapSwarmDecompositionResponse>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     // Generate mock child tasks - actual decomposition would use LLM
     let child_tasks = vec![
         ChildTask {
@@ -17853,7 +18180,7 @@ pub async fn evomap_swarm_propose_decomposition(
             role: "aggregator".to_string(),
         },
     ];
-    
+
     let response = EvomapSwarmDecompositionResponse {
         parent_task_id: req.parent_task_id,
         decomposition: SwarmDecomposition {
@@ -17864,7 +18191,7 @@ pub async fn evomap_swarm_propose_decomposition(
         },
         status: "pending".to_string(),
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -17911,7 +18238,7 @@ pub async fn evomap_worker_register(
 ) -> Result<Json<ApiEnvelope<EvomapWorkerRegisterResponse>>, ApiError> {
     let rid = request_id(&headers);
     let now = Utc::now().timestamp_millis();
-    
+
     let response = EvomapWorkerRegisterResponse {
         worker_id: req.worker_id,
         domains: req.domains,
@@ -17919,7 +18246,7 @@ pub async fn evomap_worker_register(
         status: "active".to_string(),
         registered_at_ms: now,
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -17971,14 +18298,14 @@ pub async fn evomap_recipe_create(
     let rid = request_id(&headers);
     let recipe_id = format!("recipe-{}", uuid::Uuid::new_v4());
     let now = Utc::now().timestamp_millis();
-    
+
     let response = EvomapRecipeResponse {
         recipe_id: recipe_id.clone(),
         name: req.name,
         author_id: req.author_id,
         created_at_ms: now,
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -17997,14 +18324,14 @@ pub async fn evomap_recipe_get(
     Path(recipe_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     let response = EvomapRecipeResponse {
         recipe_id: recipe_id.clone(),
         name: "Sample Recipe".to_string(),
         author_id: "system".to_string(),
         created_at_ms: Utc::now().timestamp_millis(),
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18025,14 +18352,14 @@ pub async fn evomap_recipe_fork(
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
     let rid = request_id(&headers);
     let new_recipe_id = format!("recipe-{}", uuid::Uuid::new_v4());
-    
+
     let response = EvomapRecipeResponse {
         recipe_id: new_recipe_id,
         name: format!("Forked {}", recipe_id),
         author_id: "current_user".to_string(),
         created_at_ms: Utc::now().timestamp_millis(),
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18079,7 +18406,7 @@ pub async fn evomap_organism_express(
     let rid = request_id(&headers);
     let organism_id = format!("organism-{}", uuid::Uuid::new_v4());
     let now = Utc::now().timestamp_millis();
-    
+
     let response = EvomapOrganismResponse {
         organism_id: organism_id.clone(),
         recipe_id: req.recipe_id,
@@ -18088,7 +18415,7 @@ pub async fn evomap_organism_express(
         total_steps: 3,
         created_at_ms: now,
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18107,7 +18434,7 @@ pub async fn evomap_organism_get(
     Path(organism_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<EvomapOrganismResponse>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     let response = EvomapOrganismResponse {
         organism_id: organism_id.clone(),
         recipe_id: "sample-recipe".to_string(),
@@ -18116,7 +18443,7 @@ pub async fn evomap_organism_get(
         total_steps: 3,
         created_at_ms: Utc::now().timestamp_millis(),
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18183,13 +18510,13 @@ pub async fn evomap_session_join(
 ) -> Result<Json<ApiEnvelope<EvomapSessionResponse>>, ApiError> {
     let rid = request_id(&headers);
     let now = Utc::now().timestamp_millis();
-    
+
     let response = EvomapSessionResponse {
         session_id: req.session_id,
         status: "joined".to_string(),
         joined_at_ms: now,
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18208,7 +18535,7 @@ pub async fn evomap_session_message(
     Json(req): Json<EvomapSessionMessageRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18236,13 +18563,15 @@ pub async fn evomap_session_submit(
     // Use repository for persistence
     if let Some(repo) = state.runtime_repo.as_ref() {
         // Verify session exists
-        let session = repo.get_session(&req.session_id)
+        let session = repo
+            .get_session(&req.session_id)
             .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
 
         if session.is_none() {
-            return Err(ApiError::not_found(format!(
-                "Session {} not found", req.session_id
-            )).with_request_id(rid));
+            return Err(
+                ApiError::not_found(format!("Session {} not found", req.session_id))
+                    .with_request_id(rid),
+            );
         }
 
         // Store submission as a message
@@ -18251,6 +18580,7 @@ pub async fn evomap_session_submit(
             session_id: req.session_id.clone(),
             sender_id: req.sender_id.clone(),
             content: req.submission_json.clone(),
+            message_type: "submission".to_string(),
             sent_at_ms: now,
         };
         repo.add_session_message(&message)
@@ -18332,14 +18662,14 @@ pub async fn evomap_dispute_open(
     let rid = request_id(&headers);
     let dispute_id = format!("dispute-{}", uuid::Uuid::new_v4());
     let now = Utc::now().timestamp_millis();
-    
+
     let response = EvomapDisputeResponse {
         dispute_id: dispute_id.clone(),
         bounty_id: req.bounty_id,
         status: "open".to_string(),
         created_at_ms: now,
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18358,7 +18688,7 @@ pub async fn evomap_dispute_evidence(
     Json(req): Json<EvomapDisputeEvidenceRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
@@ -18380,17 +18710,1152 @@ pub async fn evomap_dispute_resolve(
     Json(req): Json<EvomapDisputeResolveRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapDisputeResponse>>, ApiError> {
     let rid = request_id(&headers);
-    
+
     let response = EvomapDisputeResponse {
         dispute_id: req.dispute_id,
         bounty_id: "unknown".to_string(),
         status: "resolved".to_string(),
         created_at_ms: Utc::now().timestamp_millis(),
     };
-    
+
     Ok(Json(ApiEnvelope {
         meta: ApiMeta::ok(),
         request_id: rid,
         data: response,
     }))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_value_response(rid: String, data: Value) -> Json<ApiEnvelope<Value>> {
+    Json(ApiEnvelope {
+        meta: ApiMeta::ok(),
+        request_id: rid,
+        data,
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapValidateRequest {
+    sender_id: Option<String>,
+    required_model_tier: Option<String>,
+    model_tier: Option<String>,
+    requested_capabilities: Option<Vec<String>>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapSemanticReportRequest {
+    task_id: String,
+    sender_id: Option<String>,
+    status: Option<String>,
+    summary: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapDecisionRequest {
+    task_id: String,
+    submission_id: Option<String>,
+    decision: String,
+    decided_by: Option<String>,
+    sender_id: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapTaskSubmitRequest {
+    task_id: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    created_by: Option<String>,
+    sender_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapTaskReleaseRequest {
+    task_id: String,
+    sender_id: Option<String>,
+    reason: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapTaskAcceptSubmissionRequest {
+    task_id: String,
+    submission_id: String,
+    sender_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapAskRequest {
+    sender_id: Option<String>,
+    question: String,
+    details: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+struct EvomapTaskListQuery {
+    limit: Option<usize>,
+    offset: Option<usize>,
+    status: Option<String>,
+    sender_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_tier_rank(raw: &str) -> i32 {
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "A1" => 1,
+        "A2" => 2,
+        "A3" => 3,
+        "A4" => 4,
+        "A5" => 5,
+        _ => 0,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn idempotency_key_from_headers_or_payload(headers: &HeaderMap, payload: &Value) -> Option<String> {
+    headers
+        .get("x-idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .or_else(|| {
+            payload
+                .get("idempotency_key")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_string())
+        })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn semantic_sender(payload: &Value) -> Option<String> {
+    payload
+        .get("sender_id")
+        .or_else(|| payload.get("created_by"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn to_semantic_task_json(task: &EvomapSemanticTaskRecord) -> Value {
+    serde_json::json!({
+        "task_id": task.task_id,
+        "title": task.title,
+        "summary": task.summary,
+        "status": task.status.as_str(),
+        "created_by": task.created_by,
+        "claimed_by": task.claimed_by,
+        "created_at_ms": task.created_at_ms,
+        "updated_at_ms": task.updated_at_ms,
+        "last_submission_id": task.last_submission_id
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_validate(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapValidateRequest =
+        serde_json::from_value(payload).unwrap_or(EvomapValidateRequest {
+            sender_id: None,
+            required_model_tier: None,
+            model_tier: None,
+            requested_capabilities: None,
+        });
+    if let Some(sender_id) = req.sender_id.as_deref() {
+        validate_sender_id(sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    }
+    let required_tier = req.required_model_tier.unwrap_or_else(|| "A3".to_string());
+    let provided_tier = req.model_tier.unwrap_or_else(|| "A3".to_string());
+    let required_rank = evomap_tier_rank(required_tier.as_str());
+    let provided_rank = evomap_tier_rank(provided_tier.as_str());
+    let capability_catalog = vec![
+        "Coordination",
+        "SupervisedDevloop",
+        "ReplayFeedback",
+        "EvolutionFetch",
+        "EvolutionPublish",
+        "EvolutionRevoke",
+    ];
+    let requested = req.requested_capabilities.unwrap_or_default();
+    let accepted_capabilities: Vec<String> = if requested.is_empty() {
+        capability_catalog.iter().map(|c| c.to_string()).collect()
+    } else {
+        requested
+            .into_iter()
+            .filter(|cap| capability_catalog.iter().any(|supported| supported == cap))
+            .collect()
+    };
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "accepted": true,
+            "protocol": {
+                "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+            },
+            "supported_auth": supported_auth_methods(&state),
+            "capabilities": capability_catalog,
+            "accepted_capabilities": accepted_capabilities,
+            "tier_gate": {
+                "required_model_tier": required_tier,
+                "provided_model_tier": provided_tier,
+                "allowed": provided_rank >= required_rank && required_rank > 0,
+                "reason": if provided_rank >= required_rank && required_rank > 0 { "ok" } else { "insufficient_model_tier" }
+            }
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_report(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw.clone());
+    if let Ok(req) = serde_json::from_value::<EvomapSemanticReportRequest>(payload.clone()) {
+        let sender_id = req
+            .sender_id
+            .clone()
+            .or_else(|| semantic_sender(&payload))
+            .ok_or_else(|| {
+                ApiError::bad_request("sender_id is required for semantic /a2a/report")
+                    .with_request_id(rid.clone())
+            })?;
+        validate_sender_id(&sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+
+        let idempotency_key = req
+            .idempotency_key
+            .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload));
+        if let Some(key) = idempotency_key.as_ref() {
+            if let Some(cached) = state
+                .evomap_report_idempotency
+                .read()
+                .await
+                .get(key)
+                .cloned()
+            {
+                return Ok(Json(cached));
+            }
+        }
+
+        let now = Utc::now().timestamp_millis();
+        let mut tasks = state.evomap_semantic_tasks.write().await;
+        let task = tasks.get_mut(req.task_id.as_str()).ok_or_else(|| {
+            ApiError::not_found(format!("semantic task not found: {}", req.task_id))
+                .with_request_id(rid.clone())
+        })?;
+        if !matches!(
+            task.status,
+            EvomapSemanticTaskStatus::Open
+                | EvomapSemanticTaskStatus::Claimed
+                | EvomapSemanticTaskStatus::Submitted
+                | EvomapSemanticTaskStatus::Released
+        ) {
+            return Err(ApiError::conflict(format!(
+                "task {} is not reportable from state {}",
+                task.task_id,
+                task.status.as_str()
+            ))
+            .with_request_id(rid));
+        }
+        let submission_id = format!("sem-sub-{}", uuid::Uuid::new_v4());
+        let submission = EvomapSemanticSubmissionRecord {
+            submission_id: submission_id.clone(),
+            task_id: req.task_id.clone(),
+            submitted_by: sender_id.clone(),
+            status: req
+                .status
+                .clone()
+                .unwrap_or_else(|| "submitted".to_string()),
+            summary: req.summary.clone(),
+            submitted_at_ms: now,
+        };
+        task.status = EvomapSemanticTaskStatus::Submitted;
+        task.updated_at_ms = now;
+        task.last_submission_id = Some(submission_id.clone());
+        drop(tasks);
+        state
+            .evomap_semantic_submissions
+            .write()
+            .await
+            .entry(req.task_id.clone())
+            .or_default()
+            .push(submission);
+
+        let envelope = serde_json::json!({
+            "meta": ApiMeta::ok(),
+            "request_id": rid,
+            "data": {
+                "task_id": req.task_id,
+                "submission_id": submission_id,
+                "status": "submitted",
+                "reporter": sender_id,
+                "reported_at_ms": now
+            }
+        });
+        if let Some(key) = idempotency_key {
+            state
+                .evomap_report_idempotency
+                .write()
+                .await
+                .insert(key, envelope.clone());
+        }
+        return Ok(Json(envelope));
+    }
+    evolution_a2a_tasks_report_compat(state, headers, Json(raw)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_decision(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapDecisionRequest = serde_json::from_value(payload.clone()).map_err(|e| {
+        ApiError::bad_request(format!("invalid decision payload: {e}")).with_request_id(rid.clone())
+    })?;
+    let decided_by = req
+        .decided_by
+        .clone()
+        .or(req.sender_id.clone())
+        .or_else(|| semantic_sender(&payload))
+        .ok_or_else(|| {
+            ApiError::bad_request("sender_id or decided_by is required")
+                .with_request_id(rid.clone())
+        })?;
+    validate_sender_id(&decided_by).map_err(|e| e.with_request_id(rid.clone()))?;
+    let idempotency_key = req
+        .idempotency_key
+        .clone()
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_decision_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+    let decision = req.decision.trim().to_ascii_lowercase();
+    if decision != "accept"
+        && decision != "reject"
+        && decision != "accepted"
+        && decision != "rejected"
+    {
+        return Err(
+            ApiError::bad_request("decision must be one of: accept|reject").with_request_id(rid),
+        );
+    }
+    let mut tasks = state.evomap_semantic_tasks.write().await;
+    let task = tasks.get_mut(req.task_id.as_str()).ok_or_else(|| {
+        ApiError::not_found(format!("semantic task not found: {}", req.task_id))
+            .with_request_id(rid.clone())
+    })?;
+    if task.status != EvomapSemanticTaskStatus::Submitted {
+        return Err(ApiError::conflict(format!(
+            "task {} is not awaiting decision (state={})",
+            task.task_id,
+            task.status.as_str()
+        ))
+        .with_request_id(rid));
+    }
+    let submission_id = req
+        .submission_id
+        .clone()
+        .or_else(|| task.last_submission_id.clone())
+        .ok_or_else(|| {
+            ApiError::bad_request("submission_id is required when task has no last submission")
+                .with_request_id(rid.clone())
+        })?;
+    let next_status = if decision.starts_with("accept") {
+        EvomapSemanticTaskStatus::Accepted
+    } else {
+        EvomapSemanticTaskStatus::Rejected
+    };
+    task.status = next_status.clone();
+    task.updated_at_ms = Utc::now().timestamp_millis();
+    drop(tasks);
+
+    if let Some(items) = state
+        .evomap_semantic_submissions
+        .write()
+        .await
+        .get_mut(req.task_id.as_str())
+    {
+        if let Some(found) = items
+            .iter_mut()
+            .find(|item| item.submission_id == submission_id)
+        {
+            found.status = if decision.starts_with("accept") {
+                "accepted".to_string()
+            } else {
+                "rejected".to_string()
+            };
+        }
+    }
+    let response = serde_json::json!({
+        "decision_id": format!("decision-{}", uuid::Uuid::new_v4()),
+        "task_id": req.task_id,
+        "submission_id": submission_id,
+        "decision": decision,
+        "status": "recorded",
+        "task_status": next_status.as_str(),
+        "decided_by": decided_by,
+        "decided_at_ms": Utc::now().timestamp_millis()
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_decision_idempotency
+            .write()
+            .await
+            .insert(key, response.clone());
+    }
+    Ok(evomap_value_response(rid, response))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_revoke(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<RevokeNotice>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let idempotency_key = idempotency_key_from_headers_or_payload(&headers, &payload);
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_revoke_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(Json(ApiEnvelope {
+                meta: ApiMeta::ok(),
+                request_id: rid,
+                data: cached,
+            }));
+        }
+    }
+    let req: RevokeNotice = serde_json::from_value(payload).map_err(|e| {
+        ApiError::bad_request(format!("invalid revoke payload: {e}")).with_request_id(rid.clone())
+    })?;
+    if req.asset_ids.is_empty() {
+        return Err(
+            ApiError::bad_request("revoke payload must include at least one asset_id")
+                .with_request_id(rid),
+        );
+    }
+    let response = evolution_revoke(state.clone(), headers, Json(req)).await?;
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_revoke_idempotency
+            .write()
+            .await
+            .insert(key, response.0.data.clone());
+    }
+    Ok(response)
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_model_tiers(headers: HeaderMap) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "default_tier": "A3",
+            "strict_enforcement": false,
+            "tiers": [
+                { "tier": "A1", "label": "basic", "allowed_models": ["gpt-4o-mini"] },
+                { "tier": "A3", "label": "standard", "allowed_models": ["gpt-4.1-mini", "gpt-4.1"] },
+                { "tier": "A5", "label": "advanced", "allowed_models": ["o3", "o4-mini"] }
+            ]
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_submit(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapTaskSubmitRequest>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let created_by = req.created_by.or(req.sender_id).ok_or_else(|| {
+        ApiError::bad_request("created_by or sender_id is required").with_request_id(rid.clone())
+    })?;
+    validate_sender_id(&created_by).map_err(|e| e.with_request_id(rid.clone()))?;
+    let now = Utc::now().timestamp_millis();
+    let task = EvomapSemanticTaskRecord {
+        task_id: req
+            .task_id
+            .unwrap_or_else(|| format!("sem-task-{}", uuid::Uuid::new_v4())),
+        title: req.title.unwrap_or_else(|| "Semantic Task".to_string()),
+        summary: req
+            .summary
+            .unwrap_or_else(|| "semantic task submitted via /a2a/task/submit".to_string()),
+        status: EvomapSemanticTaskStatus::Open,
+        created_by,
+        claimed_by: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+        last_submission_id: None,
+    };
+    state
+        .evomap_semantic_tasks
+        .write()
+        .await
+        .insert(task.task_id.clone(), task.clone());
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "task": to_semantic_task_json(&task),
+            "state": "created"
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_list(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapTaskListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let limit = q.limit.unwrap_or(50).max(1).min(200);
+    let offset = q.offset.unwrap_or(0);
+    let status_filter = q
+        .status
+        .as_deref()
+        .and_then(EvomapSemanticTaskStatus::from_str);
+    let tasks = state.evomap_semantic_tasks.read().await;
+    let mut values: Vec<EvomapSemanticTaskRecord> = tasks.values().cloned().collect();
+    if let Some(status) = status_filter {
+        values.retain(|task| task.status == status);
+    }
+    if let Some(sender) = q.sender_id.as_deref() {
+        values
+            .retain(|task| task.created_by == sender || task.claimed_by.as_deref() == Some(sender));
+    }
+    values.sort_by(|a, b| {
+        a.created_at_ms
+            .cmp(&b.created_at_ms)
+            .then_with(|| a.task_id.cmp(&b.task_id))
+    });
+    let total = values.len();
+    let items = values
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|task| to_semantic_task_json(&task))
+        .collect::<Vec<_>>();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "tasks": items,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_my(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapTaskListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender = q.sender_id.ok_or_else(|| {
+        ApiError::bad_request("sender_id is required for /a2a/task/my").with_request_id(rid.clone())
+    })?;
+    let tasks = state.evomap_semantic_tasks.read().await;
+    let mut values: Vec<Value> = tasks
+        .values()
+        .filter(|task| {
+            task.created_by == sender || task.claimed_by.as_deref() == Some(sender.as_str())
+        })
+        .map(to_semantic_task_json)
+        .collect();
+    values.sort_by(|a, b| {
+        a.get("created_at_ms")
+            .and_then(Value::as_i64)
+            .cmp(&b.get("created_at_ms").and_then(Value::as_i64))
+    });
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "sender_id": sender,
+            "tasks": values,
+            "count": values.len()
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let tasks = state.evomap_semantic_tasks.read().await;
+    let task = tasks.get(task_id.as_str()).ok_or_else(|| {
+        ApiError::not_found(format!("semantic task not found: {task_id}"))
+            .with_request_id(rid.clone())
+    })?;
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "task": to_semantic_task_json(task)
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_submissions(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let submissions = state.evomap_semantic_submissions.read().await;
+    let items = submissions
+        .get(task_id.as_str())
+        .cloned()
+        .unwrap_or_default();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "task_id": task_id,
+            "submissions": items,
+            "count": items.len()
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_eligible_count(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let tasks = state.evomap_semantic_tasks.read().await;
+    let count = tasks
+        .values()
+        .filter(|task| {
+            matches!(
+                task.status,
+                EvomapSemanticTaskStatus::Open | EvomapSemanticTaskStatus::Released
+            )
+        })
+        .count();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "eligible_count": count
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_release(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapTaskReleaseRequest>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    if let Some(sender) = req.sender_id.as_deref() {
+        validate_sender_id(sender).map_err(|e| e.with_request_id(rid.clone()))?;
+    }
+    let mut tasks = state.evomap_semantic_tasks.write().await;
+    let task = tasks.get_mut(req.task_id.as_str()).ok_or_else(|| {
+        ApiError::not_found(format!("semantic task not found: {}", req.task_id))
+            .with_request_id(rid.clone())
+    })?;
+    if let Some(sender) = req.sender_id.as_deref() {
+        if task.claimed_by.as_deref().is_some() && task.claimed_by.as_deref() != Some(sender) {
+            return Err(
+                ApiError::forbidden("only current claimer can release this task")
+                    .with_request_id(rid),
+            );
+        }
+    }
+    task.status = EvomapSemanticTaskStatus::Released;
+    task.claimed_by = None;
+    task.updated_at_ms = Utc::now().timestamp_millis();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "task": to_semantic_task_json(task),
+            "reason": req.reason
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_accept_submission(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapTaskAcceptSubmissionRequest>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    if let Some(sender) = req.sender_id.as_deref() {
+        validate_sender_id(sender).map_err(|e| e.with_request_id(rid.clone()))?;
+    }
+    let mut tasks = state.evomap_semantic_tasks.write().await;
+    let task = tasks.get_mut(req.task_id.as_str()).ok_or_else(|| {
+        ApiError::not_found(format!("semantic task not found: {}", req.task_id))
+            .with_request_id(rid.clone())
+    })?;
+    if task.status != EvomapSemanticTaskStatus::Submitted {
+        return Err(ApiError::conflict("task is not in submitted state").with_request_id(rid));
+    }
+    task.status = EvomapSemanticTaskStatus::Accepted;
+    task.updated_at_ms = Utc::now().timestamp_millis();
+    drop(tasks);
+
+    let mut submissions = state.evomap_semantic_submissions.write().await;
+    if let Some(items) = submissions.get_mut(req.task_id.as_str()) {
+        if let Some(item) = items
+            .iter_mut()
+            .find(|submission| submission.submission_id == req.submission_id)
+        {
+            item.status = "accepted".to_string();
+        } else {
+            return Err(ApiError::not_found(format!(
+                "submission {} not found for task {}",
+                req.submission_id, req.task_id
+            ))
+            .with_request_id(rid));
+        }
+    } else {
+        return Err(
+            ApiError::not_found(format!("no submissions found for task {}", req.task_id))
+                .with_request_id(rid),
+        );
+    }
+    Ok(evomap_value_response(
+        request_id(&headers),
+        serde_json::json!({
+            "task_id": req.task_id,
+            "submission_id": req.submission_id,
+            "status": "accepted"
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_swarm(
+    state: State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<EvomapSwarmDecompositionResponse>>, ApiError> {
+    let payload = raw.get("payload").cloned().unwrap_or(raw.clone());
+    let parent_task_id = payload
+        .get("task_id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown-task")
+        .to_string();
+    let proposer_id = semantic_sender(&payload).unwrap_or_else(|| "unknown-sender".to_string());
+    let req = EvomapSwarmDecompositionRequest {
+        parent_task_id,
+        proposer_id,
+        task_description: payload
+            .get("summary")
+            .or_else(|| payload.get("task_description"))
+            .and_then(Value::as_str)
+            .unwrap_or("semantic swarm request")
+            .to_string(),
+    };
+    evomap_swarm_propose_decomposition(state, headers, Json(req)).await
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_task_ask(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(req): Json<EvomapAskRequest>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = req.sender_id.unwrap_or_else(|| "anonymous".to_string());
+    validate_sender_id(&sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    let now = Utc::now().timestamp_millis();
+    let task_id = format!("sem-ask-{}", uuid::Uuid::new_v4());
+    let task = EvomapSemanticTaskRecord {
+        task_id: task_id.clone(),
+        title: "Follow-up Question".to_string(),
+        summary: req.details.unwrap_or_else(|| req.question.clone()),
+        status: EvomapSemanticTaskStatus::Open,
+        created_by: sender_id.clone(),
+        claimed_by: None,
+        created_at_ms: now,
+        updated_at_ms: now,
+        last_submission_id: None,
+    };
+    state
+        .evomap_semantic_tasks
+        .write()
+        .await
+        .insert(task_id.clone(), task.clone());
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "question_id": format!("ask-{}", uuid::Uuid::new_v4()),
+            "task": to_semantic_task_json(&task),
+            "status": "queued"
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapListQuery {
+    pub limit: Option<usize>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapDirectoryQuery {
+    pub limit: Option<usize>,
+    pub domain: Option<String>,
+    pub status: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_directory(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapDirectoryQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let limit = q.limit.unwrap_or(50).max(1);
+    #[cfg(feature = "sqlite-persistence")]
+    let workers: Vec<WorkerRecord> = if let Some(repo) = state.runtime_repo.as_ref() {
+        repo.list_workers(q.domain.as_deref(), q.status.as_deref(), limit)
+            .map_err(|e| {
+                ApiError::internal(format!("list workers failed: {e}")).with_request_id(rid.clone())
+            })?
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let workers: Vec<WorkerRecord> = Vec::new();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "workers": workers,
+            "count": workers.len()
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct EvomapRecipeListQuery {
+    pub limit: Option<usize>,
+    pub author_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_recipe_list(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapRecipeListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let limit = q.limit.unwrap_or(50).max(1);
+    #[cfg(feature = "sqlite-persistence")]
+    let recipes: Vec<RecipeRecord> = if let Some(repo) = state.runtime_repo.as_ref() {
+        repo.list_recipes(q.author_id.as_deref(), limit)
+            .map_err(|e| {
+                ApiError::internal(format!("list recipes failed: {e}")).with_request_id(rid.clone())
+            })?
+    } else {
+        Vec::new()
+    };
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let recipes: Vec<RecipeRecord> = Vec::new();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "recipes": recipes,
+            "count": recipes.len()
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_organism_active(
+    headers: HeaderMap,
+    Query(_q): Query<EvomapListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "organisms": [],
+            "count": 0
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_stats(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let snapshot = state.runtime_metrics.snapshot();
+    let queue_depth = state.a2a_compat_task_queue.read().await.len();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "a2a_fetch_total": snapshot.a2a_fetch_total,
+            "a2a_task_claim_total": snapshot.a2a_task_claim_total,
+            "a2a_task_complete_total": snapshot.a2a_task_complete_total,
+            "a2a_heartbeat_total": snapshot.a2a_heartbeat_total,
+            "queue_depth": queue_depth
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_nodes(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sessions = state.a2a_sessions.read().await;
+    let mut nodes = Vec::new();
+    for (sender_id, session) in sessions.iter() {
+        let actor_role = session
+            .principal
+            .as_ref()
+            .map(|p| p.actor_role.clone())
+            .unwrap_or_else(|| "operator".to_string());
+        nodes.push(serde_json::json!({
+            "sender_id": sender_id,
+            "actor_role": actor_role,
+            "capabilities": session.enabled_capabilities
+        }));
+    }
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "nodes": nodes,
+            "count": nodes.len()
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_list(
+    headers: HeaderMap,
+    Json(_raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "projects": [],
+            "count": 0
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_governance_principles(
+    headers: HeaderMap,
+    Json(_raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "principles": [
+                "transparent-audit",
+                "capability-gated-evolution",
+                "deterministic-replay-first"
+            ]
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_surface_get(
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "endpoint": uri.path(),
+            "status": "planned",
+            "message": "Endpoint surface is available; behavior is staged for subsequent milestones."
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_surface_post(
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "endpoint": uri.path(),
+            "status": "planned",
+            "echo": raw
+        }),
+    ))
 }
