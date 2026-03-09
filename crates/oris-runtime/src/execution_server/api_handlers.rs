@@ -617,6 +617,82 @@ struct EvomapCouncilProposalRecord {
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum EvomapProjectStatus {
+    Proposed,
+    Claimed,
+    InProgress,
+    InReview,
+    ChangesRequested,
+    ReviewedApproved,
+    Rejected,
+    Merged,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+impl EvomapProjectStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Claimed => "claimed",
+            Self::InProgress => "in_progress",
+            Self::InReview => "in_review",
+            Self::ChangesRequested => "changes_requested",
+            Self::ReviewedApproved => "reviewed_approved",
+            Self::Rejected => "rejected",
+            Self::Merged => "merged",
+        }
+    }
+
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "proposed" => Some(Self::Proposed),
+            "claimed" => Some(Self::Claimed),
+            "in_progress" | "in-progress" => Some(Self::InProgress),
+            "in_review" | "in-review" | "review" => Some(Self::InReview),
+            "changes_requested" | "changes-requested" | "needs_changes" => {
+                Some(Self::ChangesRequested)
+            }
+            "reviewed_approved" | "approved" => Some(Self::ReviewedApproved),
+            "rejected" => Some(Self::Rejected),
+            "merged" => Some(Self::Merged),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct EvomapProjectRecord {
+    project_id: String,
+    title: String,
+    summary: Option<String>,
+    tags: Vec<String>,
+    status: EvomapProjectStatus,
+    proposed_by: String,
+    claimed_by: Option<String>,
+    progress_pct: u8,
+    progress_note: Option<String>,
+    review_verdict: Option<String>,
+    review_note: Option<String>,
+    reviewed_by: Option<String>,
+    merged_by: Option<String>,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+    merged_at_ms: Option<i64>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 const A2A_SESSION_TTL_HOURS: i64 = 24;
 
 #[cfg(all(
@@ -2176,6 +2252,16 @@ pub struct ExecutionApiState {
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
     ))]
+    evomap_projects: Arc<RwLock<HashMap<String, EvomapProjectRecord>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    evomap_project_idempotency: Arc<RwLock<HashMap<String, Value>>>,
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
     evomap_decision_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
         feature = "agent-contract-experimental",
@@ -2276,6 +2362,16 @@ impl ExecutionApiState {
                 feature = "evolution-network-experimental"
             ))]
             evomap_council_proposals: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_projects: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(
+                feature = "agent-contract-experimental",
+                feature = "evolution-network-experimental"
+            ))]
+            evomap_project_idempotency: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
                 feature = "agent-contract-experimental",
                 feature = "evolution-network-experimental"
@@ -2638,13 +2734,13 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/council/vote", post(evomap_council_vote))
         .route("/a2a/council/execute", post(evomap_council_execute))
         .route("/a2a/council/session", post(evomap_council_session))
-        .route("/a2a/project/propose", post(evomap_surface_post))
-        .route("/a2a/project/:id/claim", post(evomap_surface_post))
-        .route("/a2a/project/:id/progress", post(evomap_surface_post))
-        .route("/a2a/project/:id/review", post(evomap_surface_post))
-        .route("/a2a/project/:id/merge", post(evomap_surface_post))
+        .route("/a2a/project/propose", post(evomap_project_propose))
+        .route("/a2a/project/:id/claim", post(evomap_project_claim))
+        .route("/a2a/project/:id/progress", post(evomap_project_progress))
+        .route("/a2a/project/:id/review", post(evomap_project_review))
+        .route("/a2a/project/:id/merge", post(evomap_project_merge))
         .route("/a2a/project/list", post(evomap_project_list))
-        .route("/a2a/project/suggestions", get(evomap_surface_get))
+        .route("/a2a/project/suggestions", get(evomap_project_suggestions))
         .route(
             "/a2a/governance/principles",
             post(evomap_governance_principles),
@@ -19058,28 +19154,53 @@ mod tests {
     #[tokio::test]
     async fn evomap_governance_route_surface_includes_council_and_project_endpoints() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
-        let checks = vec![
+        for (uri, payload) in [
+            (
+                "/a2a/council/session",
+                serde_json::json!({
+                    "sender_id":"surface-agent",
+                    "action":"open",
+                    "session_id":"surface-council-session",
+                    "quorum":1,
+                    "min_yes":1
+                }),
+            ),
             (
                 "/a2a/council/propose",
-                serde_json::json!({"sender_id":"surface-agent","title":"Proposal"}),
+                serde_json::json!({
+                    "sender_id":"surface-agent",
+                    "proposal_id":"surface-council-proposal",
+                    "session_id":"surface-council-session",
+                    "title":"Proposal"
+                }),
             ),
             (
                 "/a2a/council/vote",
-                serde_json::json!({"sender_id":"surface-agent","proposal_id":"p-1","vote":"yes"}),
+                serde_json::json!({
+                    "sender_id":"surface-agent",
+                    "proposal_id":"surface-council-proposal",
+                    "vote":"yes"
+                }),
             ),
             (
                 "/a2a/council/execute",
-                serde_json::json!({"sender_id":"surface-agent","proposal_id":"p-1"}),
+                serde_json::json!({
+                    "sender_id":"surface-agent",
+                    "proposal_id":"surface-council-proposal"
+                }),
             ),
             (
                 "/a2a/project/propose",
-                serde_json::json!({"sender_id":"surface-agent","title":"Project"}),
+                serde_json::json!({
+                    "sender_id":"surface-agent",
+                    "project_id":"surface-project",
+                    "title":"Project"
+                }),
             ),
             ("/a2a/project/list", serde_json::json!({})),
             ("/a2a/governance/principles", serde_json::json!({})),
             ("/a2a/community/governance", serde_json::json!({})),
-        ];
-        for (uri, payload) in checks {
+        ] {
             let req = Request::builder()
                 .method(Method::POST)
                 .uri(uri)
@@ -19093,6 +19214,293 @@ mod tests {
                 "route should exist: {uri}"
             );
         }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_project_workflow_semantics_support_state_transitions_and_suggestions() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let propose_alpha_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-owner",
+                    "project_id": "project-alpha",
+                    "title": "Project Alpha",
+                    "summary": "semantic project workflow",
+                    "tags": ["runtime", "semantic"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let propose_alpha_resp = router.clone().oneshot(propose_alpha_req).await.unwrap();
+        assert_eq!(propose_alpha_resp.status(), StatusCode::OK);
+        let propose_alpha_body = axum::body::to_bytes(propose_alpha_resp.into_body(), usize::MAX)
+            .await
+            .expect("project alpha propose body");
+        let propose_alpha_json: serde_json::Value =
+            serde_json::from_slice(&propose_alpha_body).expect("project alpha propose json");
+        assert_eq!(propose_alpha_json["data"]["project"]["status"], "proposed");
+        assert_eq!(propose_alpha_json["data"]["idempotent"], false);
+
+        let propose_alpha_repeat_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-owner",
+                    "project_id": "project-alpha",
+                    "title": "Project Alpha",
+                    "summary": "semantic project workflow",
+                    "tags": ["runtime", "semantic"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let propose_alpha_repeat_resp = router
+            .clone()
+            .oneshot(propose_alpha_repeat_req)
+            .await
+            .unwrap();
+        assert_eq!(propose_alpha_repeat_resp.status(), StatusCode::OK);
+        let propose_alpha_repeat_body =
+            axum::body::to_bytes(propose_alpha_repeat_resp.into_body(), usize::MAX)
+                .await
+                .expect("project alpha repeat body");
+        let propose_alpha_repeat_json: serde_json::Value =
+            serde_json::from_slice(&propose_alpha_repeat_body).expect("project alpha repeat json");
+        assert_eq!(propose_alpha_repeat_json["data"]["idempotent"], true);
+
+        let propose_beta_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-owner",
+                    "project_id": "project-beta",
+                    "title": "Project Beta",
+                    "summary": "should appear in suggestions"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let propose_beta_resp = router.clone().oneshot(propose_beta_req).await.unwrap();
+        assert_eq!(propose_beta_resp.status(), StatusCode::OK);
+
+        let claim_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/project-alpha/claim")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-executor"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
+        assert_eq!(claim_resp.status(), StatusCode::OK);
+
+        let progress_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/project-alpha/progress")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-executor",
+                    "progress_pct": 100,
+                    "note": "delivery completed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let progress_resp = router.clone().oneshot(progress_req).await.unwrap();
+        assert_eq!(progress_resp.status(), StatusCode::OK);
+        let progress_body = axum::body::to_bytes(progress_resp.into_body(), usize::MAX)
+            .await
+            .expect("project progress body");
+        let progress_json: serde_json::Value =
+            serde_json::from_slice(&progress_body).expect("project progress json");
+        assert_eq!(progress_json["data"]["project"]["status"], "in_review");
+
+        let review_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/project-alpha/review")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-reviewer",
+                    "verdict": "approve",
+                    "note": "ready to merge"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let review_resp = router.clone().oneshot(review_req).await.unwrap();
+        assert_eq!(review_resp.status(), StatusCode::OK);
+        let review_body = axum::body::to_bytes(review_resp.into_body(), usize::MAX)
+            .await
+            .expect("project review body");
+        let review_json: serde_json::Value =
+            serde_json::from_slice(&review_body).expect("project review json");
+        assert_eq!(
+            review_json["data"]["project"]["status"],
+            "reviewed_approved"
+        );
+
+        let merge_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/project-alpha/merge")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-owner"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let merge_resp = router.clone().oneshot(merge_req).await.unwrap();
+        assert_eq!(merge_resp.status(), StatusCode::OK);
+        let merge_body = axum::body::to_bytes(merge_resp.into_body(), usize::MAX)
+            .await
+            .expect("project merge body");
+        let merge_json: serde_json::Value =
+            serde_json::from_slice(&merge_body).expect("project merge json");
+        assert_eq!(merge_json["data"]["project"]["status"], "merged");
+
+        let list_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/list")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "status": "merged",
+                    "sort": "updated_desc",
+                    "limit": 10
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let list_resp = router.clone().oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .expect("project list body");
+        let list_json: serde_json::Value =
+            serde_json::from_slice(&list_body).expect("project list json");
+        assert_eq!(list_json["data"]["total"], 1);
+        assert_eq!(
+            list_json["data"]["projects"][0]["project_id"],
+            serde_json::json!("project-alpha")
+        );
+
+        let suggestions_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/project/suggestions?sender_id=project-owner&limit=10")
+            .body(Body::empty())
+            .unwrap();
+        let suggestions_resp = router.oneshot(suggestions_req).await.unwrap();
+        assert_eq!(suggestions_resp.status(), StatusCode::OK);
+        let suggestions_body = axum::body::to_bytes(suggestions_resp.into_body(), usize::MAX)
+            .await
+            .expect("project suggestions body");
+        let suggestions_json: serde_json::Value =
+            serde_json::from_slice(&suggestions_body).expect("project suggestions json");
+        let suggestions = suggestions_json["data"]["suggestions"]
+            .as_array()
+            .expect("project suggestions array");
+        assert!(suggestions
+            .iter()
+            .any(|item| item["project"]["project_id"] == "project-beta"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_project_merge_requires_review_approval() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let propose_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-negative-agent",
+                    "project_id": "project-negative",
+                    "title": "Project Negative"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let propose_resp = router.clone().oneshot(propose_req).await.unwrap();
+        assert_eq!(propose_resp.status(), StatusCode::OK);
+
+        let merge_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/project-negative/merge")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "project-negative-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let merge_resp = router.oneshot(merge_req).await.unwrap();
+        assert_eq!(merge_resp.status(), StatusCode::CONFLICT);
+        let merge_body = axum::body::to_bytes(merge_resp.into_body(), usize::MAX)
+            .await
+            .expect("project merge negative body");
+        let merge_json: serde_json::Value =
+            serde_json::from_slice(&merge_body).expect("project merge negative json");
+        assert_eq!(merge_json["error"]["code"], "conflict");
+        assert_eq!(
+            merge_json["error"]["details"]["reason"],
+            serde_json::json!("project_not_ready_for_merge")
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_project_propose_worker_role_is_forbidden() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "worker-project-key",
+                "worker-project-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/propose")
+            .header("x-api-key-id", "worker-project-key")
+            .header("x-api-key", "worker-project-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "worker-project-agent",
+                    "title": "worker should be denied"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[cfg(all(
@@ -20013,31 +20421,46 @@ mod tests {
                 "req-project-propose",
                 "/a2a/project/propose",
                 "a2a.semantic.project.propose",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "project_id": "project-1",
+                    "title": "Semantic project audit"
+                }),
             ),
             (
                 "req-project-claim",
                 "/a2a/project/project-1/claim",
                 "a2a.semantic.project.claim",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent"
+                }),
             ),
             (
                 "req-project-progress",
                 "/a2a/project/project-1/progress",
                 "a2a.semantic.project.progress",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent",
+                    "progress_pct": 100,
+                    "note": "ready for review"
+                }),
             ),
             (
                 "req-project-review",
                 "/a2a/project/project-1/review",
                 "a2a.semantic.project.review",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-reviewer",
+                    "verdict": "approve"
+                }),
             ),
             (
                 "req-project-merge",
                 "/a2a/project/project-1/merge",
                 "a2a.semantic.project.merge",
-                serde_json::json!({}),
+                serde_json::json!({
+                    "sender_id": "sem-market-audit-agent"
+                }),
             ),
         ] {
             let req = Request::builder()
@@ -21279,6 +21702,93 @@ struct EvomapCouncilVoteRequest {
 struct EvomapCouncilExecuteRequest {
     sender_id: Option<String>,
     proposal_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectProposeRequest {
+    sender_id: Option<String>,
+    project_id: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    tags: Option<Vec<String>>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectClaimRequest {
+    sender_id: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectProgressRequest {
+    sender_id: Option<String>,
+    progress_pct: Option<u8>,
+    note: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectReviewRequest {
+    sender_id: Option<String>,
+    verdict: Option<String>,
+    decision: Option<String>,
+    note: Option<String>,
+    comment: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectMergeRequest {
+    sender_id: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectListRequest {
+    sender_id: Option<String>,
+    status: Option<String>,
+    owner_id: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectSuggestionsQuery {
+    sender_id: Option<String>,
+    status: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 #[cfg(all(
@@ -22838,16 +23348,825 @@ pub async fn evomap_nodes(
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
-pub async fn evomap_project_list(
+fn evomap_normalize_project_id(project_id: &str, rid: &str) -> Result<String, ApiError> {
+    let project_id = project_id.trim();
+    if project_id.is_empty() {
+        return Err(ApiError::bad_request("project_id must not be empty").with_request_id(rid));
+    }
+    if !project_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        return Err(
+            ApiError::bad_request("project_id contains invalid characters").with_request_id(rid),
+        );
+    }
+    Ok(project_id.to_string())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_project_review_outcome(raw: &str) -> Option<(&'static str, EvomapProjectStatus)> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "approve" | "approved" | "accept" => {
+            Some(("approved", EvomapProjectStatus::ReviewedApproved))
+        }
+        "changes" | "request_changes" | "changes_requested" | "needs_changes" => {
+            Some(("changes_requested", EvomapProjectStatus::ChangesRequested))
+        }
+        "reject" | "rejected" => Some(("rejected", EvomapProjectStatus::Rejected)),
+        _ => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_project_json(project: &EvomapProjectRecord) -> Value {
+    serde_json::json!({
+        "project_id": project.project_id,
+        "title": project.title,
+        "summary": project.summary,
+        "tags": project.tags,
+        "status": project.status.as_str(),
+        "proposed_by": project.proposed_by,
+        "claimed_by": project.claimed_by,
+        "progress_pct": project.progress_pct,
+        "progress_note": project.progress_note,
+        "review_verdict": project.review_verdict,
+        "review_note": project.review_note,
+        "reviewed_by": project.reviewed_by,
+        "merged_by": project.merged_by,
+        "created_at_ms": project.created_at_ms,
+        "updated_at_ms": project.updated_at_ms,
+        "merged_at_ms": project.merged_at_ms
+    })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_project_suggestion_rank(status: &EvomapProjectStatus) -> u8 {
+    match status {
+        EvomapProjectStatus::ReviewedApproved => 0,
+        EvomapProjectStatus::InReview => 1,
+        EvomapProjectStatus::ChangesRequested => 2,
+        EvomapProjectStatus::Proposed => 3,
+        EvomapProjectStatus::Claimed => 4,
+        EvomapProjectStatus::InProgress => 5,
+        EvomapProjectStatus::Rejected => 6,
+        EvomapProjectStatus::Merged => 7,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn evomap_project_suggestion_reason(status: &EvomapProjectStatus) -> &'static str {
+    match status {
+        EvomapProjectStatus::ReviewedApproved => "ready_to_merge",
+        EvomapProjectStatus::InReview => "awaiting_review",
+        EvomapProjectStatus::ChangesRequested => "changes_requested",
+        EvomapProjectStatus::Proposed => "unclaimed_project",
+        EvomapProjectStatus::Claimed => "claimed_project",
+        EvomapProjectStatus::InProgress => "in_progress_project",
+        EvomapProjectStatus::Rejected => "rejected_project",
+        EvomapProjectStatus::Merged => "already_merged",
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_propose(
+    State(state): State<ExecutionApiState>,
     headers: HeaderMap,
-    Json(_raw): Json<Value>,
+    Json(raw): Json<Value>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectProposeRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/project/propose",
+    )?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("title is required for /a2a/project/propose")
+                .with_request_id(rid.clone())
+        })?
+        .to_string();
+    let summary = req
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let project_id = req
+        .project_id
+        .as_deref()
+        .map(|value| evomap_normalize_project_id(value, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("project-{}", uuid::Uuid::new_v4()));
+    let mut tags = req.tags.unwrap_or_default();
+    tags = tags
+        .into_iter()
+        .map(|item| item.trim().to_ascii_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("project.propose:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_project_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let project = {
+        let mut projects = state.evomap_projects.write().await;
+        if let Some(existing) = projects.get(&project_id).cloned() {
+            if existing.proposed_by == sender_id
+                && existing.title == title
+                && existing.summary == summary
+                && existing.tags == tags
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "project_id already exists with different payload: {project_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let project = EvomapProjectRecord {
+                project_id: project_id.clone(),
+                title,
+                summary,
+                tags,
+                status: EvomapProjectStatus::Proposed,
+                proposed_by: sender_id.clone(),
+                claimed_by: None,
+                progress_pct: 0,
+                progress_note: None,
+                review_verdict: None,
+                review_note: None,
+                reviewed_by: None,
+                merged_by: None,
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                merged_at_ms: None,
+            };
+            projects.insert(project_id, project.clone());
+            project
+        }
+    };
+
+    let data = serde_json::json!({
+        "project": evomap_project_json(&project),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_project_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_claim(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let project_id = evomap_normalize_project_id(&project_id, &rid)?;
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectClaimRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/project/:id/claim",
+    )?;
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("project.claim:{project_id}:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_project_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let mut idempotent = false;
+    let project = {
+        let mut projects = state.evomap_projects.write().await;
+        let project = projects.get_mut(project_id.as_str()).ok_or_else(|| {
+            ApiError::not_found(format!("project not found: {project_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        match project.status {
+            EvomapProjectStatus::Proposed
+            | EvomapProjectStatus::ChangesRequested
+            | EvomapProjectStatus::Rejected => {
+                project.status = EvomapProjectStatus::Claimed;
+                project.claimed_by = Some(sender_id.clone());
+                project.updated_at_ms = Utc::now().timestamp_millis();
+            }
+            EvomapProjectStatus::Claimed
+                if project.claimed_by.as_deref() == Some(sender_id.as_str()) =>
+            {
+                idempotent = true;
+            }
+            EvomapProjectStatus::Claimed => {
+                return Err(
+                    ApiError::conflict("project is already claimed by another actor")
+                        .with_request_id(rid)
+                        .with_details(serde_json::json!({
+                            "project_id": project_id,
+                            "claimed_by": project.claimed_by,
+                            "reason": "already_claimed"
+                        })),
+                );
+            }
+            EvomapProjectStatus::Merged => {
+                return Err(ApiError::conflict("project is already merged")
+                    .with_request_id(rid)
+                    .with_details(serde_json::json!({
+                        "project_id": project_id,
+                        "reason": "already_merged"
+                    })));
+            }
+            _ => {
+                return Err(
+                    ApiError::conflict("project cannot be claimed from current state")
+                        .with_request_id(rid)
+                        .with_details(serde_json::json!({
+                            "project_id": project_id,
+                            "status": project.status.as_str(),
+                            "reason": "invalid_state_transition"
+                        })),
+                );
+            }
+        }
+        project.clone()
+    };
+
+    let data = serde_json::json!({
+        "project": evomap_project_json(&project),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_project_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_progress(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let project_id = evomap_normalize_project_id(&project_id, &rid)?;
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectProgressRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/project/:id/progress",
+    )?;
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("project.progress:{project_id}:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_project_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let mut idempotent = false;
+    let project = {
+        let mut projects = state.evomap_projects.write().await;
+        let project = projects.get_mut(project_id.as_str()).ok_or_else(|| {
+            ApiError::not_found(format!("project not found: {project_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if project.claimed_by.as_deref() != Some(sender_id.as_str()) {
+            return Err(
+                ApiError::forbidden("only current claimer can report project progress")
+                    .with_request_id(rid)
+                    .with_details(serde_json::json!({
+                        "project_id": project_id,
+                        "claimed_by": project.claimed_by,
+                        "reason": "claimer_mismatch"
+                    })),
+            );
+        }
+        let target_progress = req.progress_pct.unwrap_or(project.progress_pct);
+        if target_progress < project.progress_pct {
+            return Err(ApiError::conflict("progress_pct must be monotonic")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "project_id": project_id,
+                    "current_progress_pct": project.progress_pct,
+                    "requested_progress_pct": target_progress,
+                    "reason": "non_monotonic_progress"
+                })));
+        }
+        let next_status = if target_progress >= 100 {
+            EvomapProjectStatus::InReview
+        } else {
+            EvomapProjectStatus::InProgress
+        };
+        if project.progress_pct == target_progress
+            && project.progress_note == note
+            && project.status == next_status
+        {
+            idempotent = true;
+        } else {
+            if matches!(
+                project.status,
+                EvomapProjectStatus::Merged | EvomapProjectStatus::ReviewedApproved
+            ) {
+                return Err(ApiError::conflict(
+                    "project cannot accept progress updates in current state",
+                )
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "project_id": project_id,
+                    "status": project.status.as_str(),
+                    "reason": "project_not_progressable"
+                })));
+            }
+            project.progress_pct = target_progress;
+            project.progress_note = note;
+            project.status = next_status;
+            project.updated_at_ms = Utc::now().timestamp_millis();
+        }
+        project.clone()
+    };
+
+    let data = serde_json::json!({
+        "project": evomap_project_json(&project),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_project_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_review(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let project_id = evomap_normalize_project_id(&project_id, &rid)?;
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectReviewRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/project/:id/review",
+    )?;
+    let verdict_raw = req.verdict.or(req.decision).ok_or_else(|| {
+        ApiError::bad_request("verdict is required for /a2a/project/:id/review")
+            .with_request_id(rid.clone())
+    })?;
+    let (review_verdict, review_status) =
+        evomap_project_review_outcome(&verdict_raw).ok_or_else(|| {
+            ApiError::bad_request("verdict must be one of: approve|changes_requested|rejected")
+                .with_request_id(rid.clone())
+        })?;
+    let review_note = req
+        .note
+        .or(req.comment)
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("project.review:{project_id}:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_project_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let mut idempotent = false;
+    let project = {
+        let mut projects = state.evomap_projects.write().await;
+        let project = projects.get_mut(project_id.as_str()).ok_or_else(|| {
+            ApiError::not_found(format!("project not found: {project_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if project.claimed_by.as_deref() == Some(sender_id.as_str()) {
+            return Err(
+                ApiError::forbidden("project claimer cannot review own project")
+                    .with_request_id(rid)
+                    .with_details(serde_json::json!({
+                        "project_id": project_id,
+                        "reason": "self_review_denied"
+                    })),
+            );
+        }
+        if project.status != EvomapProjectStatus::InReview {
+            if project.reviewed_by.as_deref() == Some(sender_id.as_str())
+                && project.review_verdict.as_deref() == Some(review_verdict)
+                && project.review_note == review_note
+                && project.status == review_status
+            {
+                idempotent = true;
+                project.clone()
+            } else {
+                return Err(ApiError::conflict("project is not pending review")
+                    .with_request_id(rid)
+                    .with_details(serde_json::json!({
+                        "project_id": project_id,
+                        "status": project.status.as_str(),
+                        "reason": "project_not_in_review"
+                    })));
+            }
+        } else {
+            project.status = review_status;
+            project.review_verdict = Some(review_verdict.to_string());
+            project.review_note = review_note;
+            project.reviewed_by = Some(sender_id.clone());
+            project.updated_at_ms = Utc::now().timestamp_millis();
+            project.clone()
+        }
+    };
+
+    let data = serde_json::json!({
+        "project": evomap_project_json(&project),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_project_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_merge(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let project_id = evomap_normalize_project_id(&project_id, &rid)?;
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectMergeRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/project/:id/merge",
+    )?;
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|key| format!("project.merge:{project_id}:{key}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_project_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let mut idempotent = false;
+    let project = {
+        let mut projects = state.evomap_projects.write().await;
+        let project = projects.get_mut(project_id.as_str()).ok_or_else(|| {
+            ApiError::not_found(format!("project not found: {project_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        if project.status == EvomapProjectStatus::Merged {
+            idempotent = true;
+            project.clone()
+        } else if project.status != EvomapProjectStatus::ReviewedApproved {
+            return Err(ApiError::conflict("project is not ready to merge")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "project_id": project_id,
+                    "status": project.status.as_str(),
+                    "reason": "project_not_ready_for_merge"
+                })));
+        } else {
+            let now_ms = Utc::now().timestamp_millis();
+            project.status = EvomapProjectStatus::Merged;
+            project.merged_by = Some(sender_id);
+            project.merged_at_ms = Some(now_ms);
+            project.updated_at_ms = now_ms;
+            project.clone()
+        }
+    };
+
+    let data = serde_json::json!({
+        "project": evomap_project_json(&project),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_project_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_list(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectListRequest = serde_json::from_value(payload).unwrap_or_default();
+    if let Some(sender_id) = req.sender_id.as_deref() {
+        validate_sender_id(sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    }
+    let status_filter = req
+        .status
+        .as_deref()
+        .map(|raw| {
+            EvomapProjectStatus::from_str(raw).ok_or_else(|| {
+                ApiError::bad_request("status must be a valid project status")
+                    .with_request_id(rid.clone())
+            })
+        })
+        .transpose()?;
+    let owner_id = req
+        .owner_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string());
+    let query = req
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+    let limit = req.limit.unwrap_or(50).clamp(1, 200);
+    let offset = req.offset.unwrap_or(0);
+    let sort = req
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("created_asc")
+        .to_ascii_lowercase();
+
+    let projects = state.evomap_projects.read().await;
+    let mut values = projects.values().cloned().collect::<Vec<_>>();
+    if let Some(status) = status_filter {
+        values.retain(|project| project.status == status);
+    }
+    if let Some(owner_id) = owner_id.as_deref() {
+        values.retain(|project| {
+            project.proposed_by == owner_id || project.claimed_by.as_deref() == Some(owner_id)
+        });
+    }
+    if let Some(query) = query.as_deref() {
+        values.retain(|project| {
+            project.project_id.to_ascii_lowercase().contains(query)
+                || project.title.to_ascii_lowercase().contains(query)
+                || project
+                    .summary
+                    .as_deref()
+                    .map(|value| value.to_ascii_lowercase().contains(query))
+                    .unwrap_or(false)
+                || project
+                    .tags
+                    .iter()
+                    .any(|tag| tag.to_ascii_lowercase().contains(query))
+        });
+    }
+    match sort.as_str() {
+        "created_desc" => values.sort_by(|left, right| {
+            right
+                .created_at_ms
+                .cmp(&left.created_at_ms)
+                .then_with(|| left.project_id.cmp(&right.project_id))
+        }),
+        "updated_desc" => values.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.project_id.cmp(&right.project_id))
+        }),
+        "updated_asc" => values.sort_by(|left, right| {
+            left.updated_at_ms
+                .cmp(&right.updated_at_ms)
+                .then_with(|| left.project_id.cmp(&right.project_id))
+        }),
+        "status_then_updated" => values.sort_by(|left, right| {
+            evomap_project_suggestion_rank(&left.status)
+                .cmp(&evomap_project_suggestion_rank(&right.status))
+                .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
+                .then_with(|| left.project_id.cmp(&right.project_id))
+        }),
+        _ => values.sort_by(|left, right| {
+            left.created_at_ms
+                .cmp(&right.created_at_ms)
+                .then_with(|| left.project_id.cmp(&right.project_id))
+        }),
+    }
+    let total = values.len();
+    let projects = values
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|project| evomap_project_json(&project))
+        .collect::<Vec<_>>();
+    let count = projects.len();
+
     Ok(evomap_value_response(
         rid,
         serde_json::json!({
-            "projects": [],
-            "count": 0
+            "projects": projects,
+            "total": total,
+            "count": count,
+            "limit": limit,
+            "offset": offset,
+            "sort": sort,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_suggestions(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapProjectSuggestionsQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/project/suggestions")?;
+    let status_filter = q
+        .status
+        .as_deref()
+        .map(|raw| {
+            EvomapProjectStatus::from_str(raw).ok_or_else(|| {
+                ApiError::bad_request("status must be a valid project status")
+                    .with_request_id(rid.clone())
+            })
+        })
+        .transpose()?;
+    let limit = q.limit.unwrap_or(20).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let projects = state.evomap_projects.read().await;
+    let mut suggestions = projects
+        .values()
+        .filter(|project| {
+            if let Some(status) = status_filter.as_ref() {
+                return &project.status == status;
+            }
+            match project.status {
+                EvomapProjectStatus::Merged => false,
+                EvomapProjectStatus::Claimed | EvomapProjectStatus::InProgress => {
+                    project.claimed_by.as_deref() == Some(sender_id.as_str())
+                        || project.proposed_by == sender_id
+                }
+                EvomapProjectStatus::Rejected => project.proposed_by == sender_id,
+                _ => true,
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    suggestions.sort_by(|left, right| {
+        evomap_project_suggestion_rank(&left.status)
+            .cmp(&evomap_project_suggestion_rank(&right.status))
+            .then_with(|| right.updated_at_ms.cmp(&left.updated_at_ms))
+            .then_with(|| left.project_id.cmp(&right.project_id))
+    });
+    let total = suggestions.len();
+    let suggestions = suggestions
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|project| {
+            serde_json::json!({
+                "project": evomap_project_json(&project),
+                "reason": evomap_project_suggestion_reason(&project.status)
+            })
+        })
+        .collect::<Vec<_>>();
+    let count = suggestions.len();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "sender_id": sender_id,
+            "suggestions": suggestions,
+            "total": total,
+            "count": count,
+            "limit": limit,
+            "offset": offset,
+            "idempotent": true
         }),
     ))
 }
