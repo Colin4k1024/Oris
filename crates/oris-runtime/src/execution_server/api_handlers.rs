@@ -3336,9 +3336,29 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
                 resource_type: "sender",
                 resource_id: None,
             }),
+            ["a2a", "validate"] => Some(AuditTarget {
+                action: "a2a.semantic.validate",
+                resource_type: "protocol",
+                resource_id: None,
+            }),
             ["a2a", "fetch"] => Some(AuditTarget {
                 action: "a2a.compat.fetch",
                 resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "report"] => Some(AuditTarget {
+                action: "a2a.semantic.report",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "decision"] => Some(AuditTarget {
+                action: "a2a.semantic.decision",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "revoke"] => Some(AuditTarget {
+                action: "a2a.semantic.revoke",
+                resource_type: "asset",
                 resource_id: None,
             }),
             ["a2a", "tasks", "distribute"] => Some(AuditTarget {
@@ -17965,6 +17985,391 @@ mod tests {
                 StatusCode::NOT_FOUND,
                 "route should exist: {uri}"
             );
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_protocol_validate_returns_tier_gate_and_capability_contract() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-validate-agent",
+                    "required_model_tier": "A3",
+                    "model_tier": "A4",
+                    "requested_capabilities": ["Coordination", "UnknownCapability"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("validate body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("validate json");
+        assert_eq!(json["data"]["accepted"], true);
+        assert_eq!(
+            json["data"]["protocol"]["name"],
+            crate::agent_contract::A2A_PROTOCOL_NAME
+        );
+        assert_eq!(
+            json["data"]["protocol"]["version"],
+            crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+        );
+        assert_eq!(json["data"]["tier_gate"]["allowed"], true);
+        let accepted = json["data"]["accepted_capabilities"]
+            .as_array()
+            .expect("accepted_capabilities");
+        assert!(accepted
+            .iter()
+            .any(|value| value.as_str() == Some("Coordination")));
+        assert!(!accepted
+            .iter()
+            .any(|value| value.as_str() == Some("UnknownCapability")));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_protocol_report_and_decision_support_idempotent_semantic_flow() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "sem-flow-agent",
+                    "title": "SEM flow task",
+                    "summary": "exercise /a2a/report and /a2a/decision"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+        let submit_body = axum::body::to_bytes(submit_resp.into_body(), usize::MAX)
+            .await
+            .expect("submit body");
+        let submit_json: serde_json::Value =
+            serde_json::from_slice(&submit_body).expect("submit json");
+        let task_id = submit_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("task_id")
+            .to_string();
+
+        let report_payload = serde_json::json!({
+            "task_id": task_id,
+            "sender_id": "sem-flow-agent",
+            "summary": "semantic report",
+            "idempotency_key": "sem-report-idem-1"
+        });
+        let report_req_1 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(report_payload.to_string()))
+            .unwrap();
+        let report_resp_1 = router.clone().oneshot(report_req_1).await.unwrap();
+        assert_eq!(report_resp_1.status(), StatusCode::OK);
+        let report_body_1 = axum::body::to_bytes(report_resp_1.into_body(), usize::MAX)
+            .await
+            .expect("report body 1");
+        let report_json_1: serde_json::Value =
+            serde_json::from_slice(&report_body_1).expect("report json 1");
+        assert_eq!(report_json_1["data"]["status"], "submitted");
+        let submission_id = report_json_1["data"]["submission_id"]
+            .as_str()
+            .expect("submission_id")
+            .to_string();
+
+        let report_req_2 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(report_payload.to_string()))
+            .unwrap();
+        let report_resp_2 = router.clone().oneshot(report_req_2).await.unwrap();
+        assert_eq!(report_resp_2.status(), StatusCode::OK);
+        let report_body_2 = axum::body::to_bytes(report_resp_2.into_body(), usize::MAX)
+            .await
+            .expect("report body 2");
+        let report_json_2: serde_json::Value =
+            serde_json::from_slice(&report_body_2).expect("report json 2");
+        assert_eq!(report_json_2, report_json_1);
+
+        let decision_payload = serde_json::json!({
+            "task_id": submit_json["data"]["task"]["task_id"],
+            "submission_id": submission_id,
+            "decision": "accept",
+            "sender_id": "sem-flow-agent",
+            "idempotency_key": "sem-decision-idem-1"
+        });
+        let decision_req_1 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("content-type", "application/json")
+            .body(Body::from(decision_payload.to_string()))
+            .unwrap();
+        let decision_resp_1 = router.clone().oneshot(decision_req_1).await.unwrap();
+        assert_eq!(decision_resp_1.status(), StatusCode::OK);
+        let decision_body_1 = axum::body::to_bytes(decision_resp_1.into_body(), usize::MAX)
+            .await
+            .expect("decision body 1");
+        let decision_json_1: serde_json::Value =
+            serde_json::from_slice(&decision_body_1).expect("decision json 1");
+        assert_eq!(decision_json_1["data"]["task_status"], "accepted");
+
+        let decision_req_2 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("content-type", "application/json")
+            .body(Body::from(decision_payload.to_string()))
+            .unwrap();
+        let decision_resp_2 = router.oneshot(decision_req_2).await.unwrap();
+        assert_eq!(decision_resp_2.status(), StatusCode::OK);
+        let decision_body_2 = axum::body::to_bytes(decision_resp_2.into_body(), usize::MAX)
+            .await
+            .expect("decision body 2");
+        let decision_json_2: serde_json::Value =
+            serde_json::from_slice(&decision_body_2).expect("decision json 2");
+        assert_eq!(decision_json_2["data"], decision_json_1["data"]);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_protocol_decision_rejects_invalid_decision_value() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "sem-task-invalid",
+                    "decision": "maybe",
+                    "sender_id": "sem-invalid-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("decision invalid body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decision invalid json");
+        let message = json["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("accept|reject"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evomap_protocol_core_worker_role_is_forbidden() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "worker-sem-key-1",
+                "worker-sem-secret-1",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("x-api-key-id", "worker-sem-key-1")
+            .header("x-api-key", "worker-sem-secret-1")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "worker-sem-agent",
+                    "required_model_tier": "A3",
+                    "model_tier": "A4"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("forbidden body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("forbidden json");
+        assert_eq!(json["error"]["code"], "forbidden");
+    }
+
+    #[cfg(all(
+        feature = "sqlite-persistence",
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn audit_logs_capture_semantic_protocol_core_actions() {
+        let state =
+            ExecutionApiState::with_sqlite_idempotency(build_test_graph().await, ":memory:")
+                .with_static_api_key_with_role("sem-audit-key", ApiRole::Operator);
+        let repo = state.runtime_repo.clone().expect("runtime repo");
+        let router = build_router(state);
+        let sender_id = "sem-audit-agent";
+
+        let hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("x-api-key", "sem-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "agent_id": sender_id,
+                    "role": "Planner",
+                    "capability_level": "A4",
+                    "supported_protocols": [
+                        {
+                            "name": crate::agent_contract::A2A_PROTOCOL_NAME,
+                            "version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1
+                        }
+                    ],
+                    "advertised_capabilities": ["EvolutionFetch", "EvolutionPublish", "EvolutionRevoke"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let hello_resp = router.clone().oneshot(hello_req).await.unwrap();
+        assert_eq!(hello_resp.status(), StatusCode::OK);
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("x-api-key", "sem-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "title": "Semantic audit flow"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+        let submit_body = axum::body::to_bytes(submit_resp.into_body(), usize::MAX)
+            .await
+            .expect("submit body");
+        let submit_json: serde_json::Value =
+            serde_json::from_slice(&submit_body).expect("submit json");
+        let task_id = submit_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("task_id")
+            .to_string();
+
+        let validate_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("x-request-id", "req-sem-validate")
+            .header("x-api-key", "sem-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "required_model_tier": "A3",
+                    "model_tier": "A4"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let validate_resp = router.clone().oneshot(validate_req).await.unwrap();
+        assert_eq!(validate_resp.status(), StatusCode::OK);
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("x-request-id", "req-sem-report")
+            .header("x-api-key", "sem-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": task_id,
+                    "sender_id": sender_id,
+                    "summary": "semantic report for audit"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .expect("report body");
+        let report_json: serde_json::Value =
+            serde_json::from_slice(&report_body).expect("report json");
+        let submission_id = report_json["data"]["submission_id"]
+            .as_str()
+            .expect("submission_id")
+            .to_string();
+
+        let decision_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("x-request-id", "req-sem-decision")
+            .header("x-api-key", "sem-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": report_json["data"]["task_id"],
+                    "submission_id": submission_id,
+                    "decision": "accept",
+                    "sender_id": sender_id
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let decision_resp = router.clone().oneshot(decision_req).await.unwrap();
+        assert_eq!(decision_resp.status(), StatusCode::OK);
+
+        let revoke_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/revoke")
+            .header("x-request-id", "req-sem-revoke")
+            .header("x-api-key", "sem-audit-key")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": sender_id,
+                    "asset_ids": ["sem-asset-1"],
+                    "reason": "policy violation"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let revoke_resp = router.clone().oneshot(revoke_req).await.unwrap();
+        assert_eq!(revoke_resp.status(), StatusCode::OK);
+
+        let logs = repo.list_audit_logs(400).expect("list audit logs");
+        for (request_id, action) in [
+            ("req-sem-validate", "a2a.semantic.validate"),
+            ("req-sem-report", "a2a.semantic.report"),
+            ("req-sem-decision", "a2a.semantic.decision"),
+            ("req-sem-revoke", "a2a.semantic.revoke"),
+        ] {
+            assert!(logs.iter().any(|log| {
+                log.request_id == request_id && log.action == action && log.result == "success"
+            }));
         }
     }
 }
