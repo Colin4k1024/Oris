@@ -18230,15 +18230,44 @@ pub async fn evomap_session_submit(
     Json(req): Json<EvomapSessionSubmitRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
-    
-    Ok(Json(ApiEnvelope {
-        meta: ApiMeta::ok(),
-        request_id: rid,
-        data: serde_json::json!({
-            "submission_id": format!("sub-{}", uuid::Uuid::new_v4()),
-            "submitted_at_ms": Utc::now().timestamp_millis()
-        }),
-    }))
+    let now = Utc::now().timestamp_millis();
+    let submission_id = format!("sub-{}", uuid::Uuid::new_v4());
+
+    // Use repository for persistence
+    if let Some(repo) = state.runtime_repo.as_ref() {
+        // Verify session exists
+        let session = repo.get_session(&req.session_id)
+            .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+
+        if session.is_none() {
+            return Err(ApiError::not_found(format!(
+                "Session {} not found", req.session_id
+            )).with_request_id(rid));
+        }
+
+        // Store submission as a message
+        let message = SessionMessageRecord {
+            message_id: submission_id.clone(),
+            session_id: req.session_id.clone(),
+            sender_id: req.sender_id.clone(),
+            content: req.submission_json.clone(),
+            sent_at_ms: now,
+        };
+        repo.add_session_message(&message)
+            .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+
+        return Ok(Json(ApiEnvelope {
+            meta: ApiMeta::ok(),
+            request_id: rid,
+            data: serde_json::json!({
+                "submission_id": submission_id,
+                "submitted_at_ms": now
+            }),
+        }));
+    }
+
+    // Fallback: return not implemented if no repo
+    Err(ApiError::not_found("Runtime repository not available").with_request_id(rid))
 }
 
 /// Dispute open request
