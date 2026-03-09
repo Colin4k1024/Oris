@@ -42,22 +42,13 @@ async fn main() -> ExampleResult<()> {
         description: "Initial code fix to create baseline Gene".into(),
     };
     let target = ProposalTarget::Paths(vec!["docs/evo-confidence-initial.md".into()]);
-    let proposal = proposal_for(
-        &task,
-        &target,
-        "agent",
-        "initial fix for baseline",
-    );
+    let proposal = proposal_for(&task, &target, "agent", "initial fix for baseline");
 
     let capture = evo
         .capture_from_proposal(
             &"initial-run".into(),
             &proposal,
-            proposal_diff(
-                single_path(&target),
-                "Initial Confidence Baseline",
-                "agent",
-            ),
+            proposal_diff(single_path(&target), "Initial Confidence Baseline", "agent"),
             base_revision,
         )
         .await?;
@@ -94,9 +85,15 @@ async fn main() -> ExampleResult<()> {
     // Calculate time to quarantine: solve for hours when confidence = 0.5
     // confidence = 0.7 * e^(-0.05 * hours) = 0.5
     // hours = ln(0.7/0.5) / 0.05 = 0.3365 / 0.05 = 6.73 hours
-    let hours_to_quarantine = (initial_confidence / MIN_REPLAY_CONFIDENCE).ln() / REPLAY_CONFIDENCE_DECAY_RATE;
-    println!("  From {:.2} to {:.2}: {:.1} hours ({:.1} days)",
-        initial_confidence, MIN_REPLAY_CONFIDENCE, hours_to_quarantine, hours_to_quarantine / 24.0);
+    let hours_to_quarantine =
+        (initial_confidence / MIN_REPLAY_CONFIDENCE).ln() / REPLAY_CONFIDENCE_DECAY_RATE;
+    println!(
+        "  From {:.2} to {:.2}: {:.1} hours ({:.1} days)",
+        initial_confidence,
+        MIN_REPLAY_CONFIDENCE,
+        hours_to_quarantine,
+        hours_to_quarantine / 24.0
+    );
 
     // ============================================================
     // Step 4: Demonstrate successful reuse boost
@@ -112,7 +109,10 @@ async fn main() -> ExampleResult<()> {
     let boosted_confidence = (current_confidence + boost_amount).min(1.0);
 
     println!("  At {:.1} hours: {:.2}", age_hours, current_confidence);
-    println!("  After successful reuse: +{:.2} -> {:.2}", boost_amount, boosted_confidence);
+    println!(
+        "  After successful reuse: +{:.2} -> {:.2}",
+        boost_amount, boosted_confidence
+    );
 
     // ============================================================
     // Step 5: Show complete lifecycle
@@ -128,7 +128,10 @@ async fn main() -> ExampleResult<()> {
     // ============================================================
     println!("\n=== Summary ===");
     println!("✓ Confidence decays automatically over time");
-    println!("✓ Genes/Capsules are quarantined when confidence drops below {:.2}", MIN_REPLAY_CONFIDENCE);
+    println!(
+        "✓ Genes/Capsules are quarantined when confidence drops below {:.2}",
+        MIN_REPLAY_CONFIDENCE
+    );
     println!("✓ Successful reuse can boost confidence back up");
     println!("✓ This enables automatic 'forgetting' of stale solutions");
 

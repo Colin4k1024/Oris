@@ -12,8 +12,8 @@ use crate::{
     critic::LlmCritic,
     static_analysis::detect_anti_patterns,
     types::{
-        AntiPatternKind, EvaluationReport, MutationProposal, Verdict,
-        APPLY_THRESHOLD, PROMOTE_THRESHOLD,
+        AntiPatternKind, EvaluationReport, MutationProposal, Verdict, APPLY_THRESHOLD,
+        PROMOTE_THRESHOLD,
     },
 };
 use anyhow::Result;
@@ -55,15 +55,15 @@ impl MutationEvaluator {
             );
 
             return Ok(EvaluationReport {
-                proposal_id:     proposal.id,
-                evaluated_at:    Utc::now(),
+                proposal_id: proposal.id,
+                evaluated_at: Utc::now(),
                 composite_score: 0.0,
                 dimensions: crate::types::DimensionScores {
-                    signal_alignment:     0.0,
+                    signal_alignment: 0.0,
                     semantic_correctness: 0.0,
-                    generalisability:     0.0,
-                    test_coverage_delta:  0.0,
-                    complexity_impact:    0.0,
+                    generalisability: 0.0,
+                    test_coverage_delta: 0.0,
+                    complexity_impact: 0.0,
                 },
                 verdict: Verdict::Reject,
                 rationale: format!("Blocked by static analysis: {}", reason),
@@ -122,9 +122,9 @@ fn build_rationale(
     anti_patterns: &[crate::types::AntiPattern],
 ) -> String {
     let verdict_str = match verdict {
-        Verdict::Promote   => "Promote",
+        Verdict::Promote => "Promote",
         Verdict::ApplyOnly => "Apply-only",
-        Verdict::Reject    => "Reject",
+        Verdict::Reject => "Reject",
     };
 
     let ap_summary = if anti_patterns.is_empty() {
@@ -168,13 +168,13 @@ mod tests {
 
     fn proposal(original: &str, proposed: &str) -> MutationProposal {
         MutationProposal {
-            id:             Uuid::new_v4(),
-            intent:         "fix type mismatch".into(),
-            original:       original.to_string(),
-            proposed:       proposed.to_string(),
-            signals:        vec![EvoSignal {
-                kind:     SignalKind::CompilerError,
-                message:  "mismatched types".into(),
+            id: Uuid::new_v4(),
+            intent: "fix type mismatch".into(),
+            original: original.to_string(),
+            proposed: proposed.to_string(),
+            signals: vec![EvoSignal {
+                kind: SignalKind::CompilerError,
+                message: "mismatched types".into(),
                 location: Some("src/lib.rs:10".into()),
             }],
             source_gene_id: None,

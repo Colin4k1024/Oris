@@ -81,8 +81,8 @@ pub fn build_user_prompt(proposal: &MutationProposal) -> String {
 ```
 
 Evaluate the mutation and return the JSON object as specified."#,
-        intent   = proposal.intent,
-        signals  = signals_text,
+        intent = proposal.intent,
+        signals = signals_text,
         original = proposal.original,
         proposed = proposal.proposed,
     )
@@ -95,22 +95,22 @@ Evaluate the mutation and return the JSON object as specified."#,
 /// Raw JSON shape returned by the critic LLM.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct CriticResponse {
-    pub signal_alignment:     f64,
+    pub signal_alignment: f64,
     pub semantic_correctness: f64,
-    pub generalisability:     f64,
-    pub test_coverage_delta:  f64,
-    pub complexity_impact:    f64,
-    pub rationale:            String,
+    pub generalisability: f64,
+    pub test_coverage_delta: f64,
+    pub complexity_impact: f64,
+    pub rationale: String,
 }
 
 impl CriticResponse {
     pub fn into_scores_and_rationale(self) -> (DimensionScores, String) {
         let scores = DimensionScores {
-            signal_alignment:     self.signal_alignment.clamp(0.0, 1.0),
+            signal_alignment: self.signal_alignment.clamp(0.0, 1.0),
             semantic_correctness: self.semantic_correctness.clamp(0.0, 1.0),
-            generalisability:     self.generalisability.clamp(0.0, 1.0),
-            test_coverage_delta:  self.test_coverage_delta.clamp(0.0, 1.0),
-            complexity_impact:    self.complexity_impact.clamp(0.0, 1.0),
+            generalisability: self.generalisability.clamp(0.0, 1.0),
+            test_coverage_delta: self.test_coverage_delta.clamp(0.0, 1.0),
+            complexity_impact: self.complexity_impact.clamp(0.0, 1.0),
         };
         (scores, self.rationale)
     }
@@ -121,10 +121,7 @@ pub fn strip_fences(raw: &str) -> &str {
     let trimmed = raw.trim();
     if trimmed.starts_with("```") {
         // drop first line and last fence
-        let inner = trimmed
-            .splitn(2, '\n')
-            .nth(1)
-            .unwrap_or(trimmed);
+        let inner = trimmed.splitn(2, '\n').nth(1).unwrap_or(trimmed);
         inner.trim_end_matches("```").trim()
     } else {
         trimmed
@@ -145,11 +142,11 @@ impl MockCritic {
     pub fn passing() -> Self {
         Self {
             scores: DimensionScores {
-                signal_alignment:     0.90,
+                signal_alignment: 0.90,
                 semantic_correctness: 0.85,
-                generalisability:     0.80,
-                test_coverage_delta:  0.60,
-                complexity_impact:    0.90,
+                generalisability: 0.80,
+                test_coverage_delta: 0.60,
+                complexity_impact: 0.90,
             },
         }
     }
@@ -157,11 +154,11 @@ impl MockCritic {
     pub fn failing() -> Self {
         Self {
             scores: DimensionScores {
-                signal_alignment:     0.20,
+                signal_alignment: 0.20,
                 semantic_correctness: 0.10,
-                generalisability:     0.15,
-                test_coverage_delta:  0.30,
-                complexity_impact:    0.50,
+                generalisability: 0.15,
+                test_coverage_delta: 0.30,
+                complexity_impact: 0.50,
             },
         }
     }

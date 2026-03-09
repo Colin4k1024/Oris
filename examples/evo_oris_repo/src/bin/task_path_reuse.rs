@@ -44,11 +44,7 @@ async fn main() -> ExampleResult<()> {
         "add tracing::info! macro to log function entry/exit",
     );
 
-    let diff_1 = proposal_diff(
-        single_path(&target_1),
-        "Logging Solution",
-        "code-agent",
-    );
+    let diff_1 = proposal_diff(single_path(&target_1), "Logging Solution", "code-agent");
 
     println!("  Capturing execution path...");
     let capture_1 = evo
@@ -86,11 +82,7 @@ async fn main() -> ExampleResult<()> {
         "add metrics::counter! macro to track function calls",
     );
 
-    let diff_2 = proposal_diff(
-        single_path(&target_2),
-        "Metrics Solution",
-        "code-agent",
-    );
+    let diff_2 = proposal_diff(single_path(&target_2), "Metrics Solution", "code-agent");
 
     println!("  Capturing second execution path...");
     let capture_2 = evo

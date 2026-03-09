@@ -193,32 +193,145 @@ mod tests {
             Ok(0)
         }
 
-        fn upsert_bounty(&self, _: &super::super::models::BountyRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_bounty(&self, _: &str) -> Result<Option<super::super::models::BountyRecord>, KernelError> { Ok(None) }
-        fn list_bounties(&self, _: Option<&str>, _: usize) -> Result<Vec<super::super::models::BountyRecord>, KernelError> { Ok(vec![]) }
-        fn accept_bounty(&self, _: &str, _: &str) -> Result<(), KernelError> { Ok(()) }
-        fn close_bounty(&self, _: &str) -> Result<(), KernelError> { Ok(()) }
-        fn upsert_swarm_decomposition(&self, _: &super::super::models::SwarmTaskRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_swarm_decomposition(&self, _: &str) -> Result<Option<super::super::models::SwarmTaskRecord>, KernelError> { Ok(None) }
-        fn register_worker(&self, _: &super::super::models::WorkerRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_worker(&self, _: &str) -> Result<Option<super::super::models::WorkerRecord>, KernelError> { Ok(None) }
-        fn list_workers(&self, _: Option<&str>, _: Option<&str>, _: usize) -> Result<Vec<super::super::models::WorkerRecord>, KernelError> { Ok(vec![]) }
-        fn heartbeat_worker(&self, _: &str, _: i64) -> Result<(), KernelError> { Ok(()) }
-        fn create_recipe(&self, _: &super::super::models::RecipeRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_recipe(&self, _: &str) -> Result<Option<super::super::models::RecipeRecord>, KernelError> { Ok(None) }
-        fn fork_recipe(&self, _: &str, _: &str, _: &str) -> Result<Option<super::super::models::RecipeRecord>, KernelError> { Ok(None) }
-        fn list_recipes(&self, _: Option<&str>, _: usize) -> Result<Vec<super::super::models::RecipeRecord>, KernelError> { Ok(vec![]) }
-        fn express_organism(&self, _: &super::super::models::OrganismRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_organism(&self, _: &str) -> Result<Option<super::super::models::OrganismRecord>, KernelError> { Ok(None) }
-        fn update_organism(&self, _: &str, _: i32, _: &str) -> Result<(), KernelError> { Ok(()) }
-        fn create_session(&self, _: &super::super::models::SessionRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_session(&self, _: &str) -> Result<Option<super::super::models::SessionRecord>, KernelError> { Ok(None) }
-        fn add_session_message(&self, _: &super::super::models::SessionMessageRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_session_history(&self, _: &str, _: usize) -> Result<Vec<super::super::models::SessionMessageRecord>, KernelError> { Ok(vec![]) }
-        fn open_dispute(&self, _: &super::super::models::DisputeRecord) -> Result<(), KernelError> { Ok(()) }
-        fn get_dispute(&self, _: &str) -> Result<Option<super::super::models::DisputeRecord>, KernelError> { Ok(None) }
-        fn get_disputes_for_bounty(&self, _: &str) -> Result<Vec<super::super::models::DisputeRecord>, KernelError> { Ok(vec![]) }
-        fn resolve_dispute(&self, _: &str, _: &str, _: &str) -> Result<(), KernelError> { Ok(()) }
+        fn upsert_bounty(&self, _: &super::super::models::BountyRecord) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_bounty(
+            &self,
+            _: &str,
+        ) -> Result<Option<super::super::models::BountyRecord>, KernelError> {
+            Ok(None)
+        }
+        fn list_bounties(
+            &self,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<super::super::models::BountyRecord>, KernelError> {
+            Ok(vec![])
+        }
+        fn accept_bounty(&self, _: &str, _: &str) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn close_bounty(&self, _: &str) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn upsert_swarm_decomposition(
+            &self,
+            _: &super::super::models::SwarmTaskRecord,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_swarm_decomposition(
+            &self,
+            _: &str,
+        ) -> Result<Option<super::super::models::SwarmTaskRecord>, KernelError> {
+            Ok(None)
+        }
+        fn register_worker(
+            &self,
+            _: &super::super::models::WorkerRecord,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_worker(
+            &self,
+            _: &str,
+        ) -> Result<Option<super::super::models::WorkerRecord>, KernelError> {
+            Ok(None)
+        }
+        fn list_workers(
+            &self,
+            _: Option<&str>,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<super::super::models::WorkerRecord>, KernelError> {
+            Ok(vec![])
+        }
+        fn heartbeat_worker(&self, _: &str, _: i64) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn create_recipe(&self, _: &super::super::models::RecipeRecord) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_recipe(
+            &self,
+            _: &str,
+        ) -> Result<Option<super::super::models::RecipeRecord>, KernelError> {
+            Ok(None)
+        }
+        fn fork_recipe(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<super::super::models::RecipeRecord>, KernelError> {
+            Ok(None)
+        }
+        fn list_recipes(
+            &self,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<Vec<super::super::models::RecipeRecord>, KernelError> {
+            Ok(vec![])
+        }
+        fn express_organism(
+            &self,
+            _: &super::super::models::OrganismRecord,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_organism(
+            &self,
+            _: &str,
+        ) -> Result<Option<super::super::models::OrganismRecord>, KernelError> {
+            Ok(None)
+        }
+        fn update_organism(&self, _: &str, _: i32, _: &str) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn create_session(
+            &self,
+            _: &super::super::models::SessionRecord,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_session(
+            &self,
+            _: &str,
+        ) -> Result<Option<super::super::models::SessionRecord>, KernelError> {
+            Ok(None)
+        }
+        fn add_session_message(
+            &self,
+            _: &super::super::models::SessionMessageRecord,
+        ) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_session_history(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<Vec<super::super::models::SessionMessageRecord>, KernelError> {
+            Ok(vec![])
+        }
+        fn open_dispute(&self, _: &super::super::models::DisputeRecord) -> Result<(), KernelError> {
+            Ok(())
+        }
+        fn get_dispute(
+            &self,
+            _: &str,
+        ) -> Result<Option<super::super::models::DisputeRecord>, KernelError> {
+            Ok(None)
+        }
+        fn get_disputes_for_bounty(
+            &self,
+            _: &str,
+        ) -> Result<Vec<super::super::models::DisputeRecord>, KernelError> {
+            Ok(vec![])
+        }
+        fn resolve_dispute(&self, _: &str, _: &str, _: &str) -> Result<(), KernelError> {
+            Ok(())
+        }
     }
 
     fn attempt(id: &str, attempt_no: u32) -> AttemptDispatchRecord {

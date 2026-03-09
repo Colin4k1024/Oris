@@ -69,7 +69,8 @@ async fn main() -> ExampleResult<()> {
 
     // Execute coordination
     let collab_result = evo.coordinate(collab_plan.clone());
-    println!("  Result: {} completed, {} failed",
+    println!(
+        "  Result: {} completed, {} failed",
         collab_result.completed_tasks.len(),
         collab_result.failed_tasks.len()
     );
