@@ -91,9 +91,14 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 
 ```bash
 cargo add oris-runtime --features full-evolution-experimental
-cargo run -p evo_oris_repo
+bash scripts/evo_first_run.sh
 cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
 ```
+
+首跑产物（用于快速确认是否成功）：
+
+- `target/evo_first_run/summary.json`
+- `target/evo_first_run/run.log`
 
 这条路径对应当前仓库里真实可运行的实验闭环：
 

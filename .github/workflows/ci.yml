@@ -125,6 +125,10 @@ jobs:
         shell: bash
         run: |
           bash scripts/run_orchestrator_checks.sh
+      - name: Run evo first-run onboarding gate
+        shell: bash
+        run: |
+          bash scripts/evo_first_run.sh
       - name: Validate runtime API contract drift
         shell: bash
         run: |

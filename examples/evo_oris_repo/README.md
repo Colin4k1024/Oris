@@ -4,6 +4,19 @@ This package is the runnable Evolution scenario suite for the current checked-in
 
 It expands the original canonical flow into multiple focused programs so each major Evo capability can be validated independently.
 
+## Canonical First Run
+
+Before using the full scenario matrix, run the repository-level onboarding entry:
+
+```bash
+bash scripts/evo_first_run.sh
+```
+
+This is the default contributor entrypoint and produces:
+
+- `target/evo_first_run/summary.json`
+- `target/evo_first_run/run.log`
+
 ## Prerequisites
 
 From repository root:
