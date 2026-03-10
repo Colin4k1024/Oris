@@ -928,11 +928,11 @@ impl PostgresRuntimeRepository {
         rt.block_on(async move {
             let sql = format!(
                 "INSERT INTO \"{}\".runtime_workers_registry
-                 (worker_id, domains_json, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status)
+                 (worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status)
                  VALUES ($1, $2, $3, $4, $5, $5, $6)
                  ON CONFLICT(worker_id)
                  DO UPDATE SET
-                   domains_json = excluded.domains_json,
+                   domains = excluded.domains,
                    max_load = excluded.max_load,
                    metadata_json = excluded.metadata_json,
                    last_heartbeat_ms = excluded.last_heartbeat_ms,
@@ -952,7 +952,7 @@ impl PostgresRuntimeRepository {
 
             // Fetch the row
             let sql = format!(
-                "SELECT worker_id, domains_json, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
                  FROM \"{}\".runtime_workers_registry
                  WHERE worker_id = $1",
                 schema
@@ -985,7 +985,7 @@ impl PostgresRuntimeRepository {
         let worker_id = worker_id.to_string();
         rt.block_on(async move {
             let sql = format!(
-                "SELECT worker_id, domains_json, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
                  FROM \"{}\".runtime_workers_registry
                  WHERE worker_id = $1",
                 schema
@@ -1054,7 +1054,7 @@ impl PostgresRuntimeRepository {
         let dispute_id = dispute_id.to_string();
         let bounty_id = bounty_id.to_string();
         let opened_by = opened_by.to_string();
-        let description = description.to_string();
+        let _description = description.to_string();
         let created_at_ms = dt_to_ms(created_at);
         rt.block_on(async move {
             let sql = format!(
@@ -1738,155 +1738,796 @@ impl RuntimeRepository for PostgresRuntimeRepository {
 
     // ============== Bounty Methods ==============
 
-    fn upsert_bounty(&self, _bounty: &BountyRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn upsert_bounty(&self, bounty: &BountyRecord) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty = bounty.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_bounties
+                 (bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 ON CONFLICT(bounty_id)
+                 DO UPDATE SET
+                   title = excluded.title,
+                   description = excluded.description,
+                   reward = excluded.reward,
+                   status = excluded.status,
+                   closed_at_ms = excluded.closed_at_ms,
+                   accepted_by = excluded.accepted_by,
+                   accepted_at_ms = excluded.accepted_at_ms",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&bounty.bounty_id)
+                .bind(&bounty.title)
+                .bind(&bounty.description)
+                .bind(bounty.reward)
+                .bind(bounty.status.as_str())
+                .bind(&bounty.created_by)
+                .bind(bounty.created_at_ms)
+                .bind(bounty.closed_at_ms)
+                .bind(&bounty.accepted_by)
+                .bind(bounty.accepted_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("upsert bounty", e))?;
+            Ok(())
+        })
     }
 
-    fn get_bounty(&self, _bounty_id: &str) -> Result<Option<BountyRecord>, KernelError> {
-        Ok(None) // TODO: implement
+    fn get_bounty(&self, bounty_id: &str) -> Result<Option<BountyRecord>, KernelError> {
+        Ok(
+            PostgresRuntimeRepository::get_bounty(self, bounty_id)?.map(|row| BountyRecord {
+                bounty_id: row.bounty_id,
+                title: row.title,
+                description: row.description,
+                reward: row.reward,
+                status: BountyStatus::from_str(&row.status),
+                created_by: row.created_by,
+                created_at_ms: dt_to_ms(row.created_at),
+                closed_at_ms: row.closed_at.map(dt_to_ms),
+                accepted_by: row.accepted_by,
+                accepted_at_ms: row.accepted_at.map(dt_to_ms),
+            }),
+        )
     }
 
     fn list_bounties(
         &self,
-        _status: Option<&str>,
-        _limit: usize,
+        status: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<BountyRecord>, KernelError> {
-        Ok(vec![]) // TODO: implement
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let status = status.map(String::from);
+        rt.block_on(async move {
+            let (sql, bind_status) = if status.is_some() {
+                (
+                    format!(
+                        "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms
+                         FROM \"{}\".runtime_bounties
+                         WHERE status = $1
+                         ORDER BY created_at_ms DESC
+                         LIMIT $2",
+                        schema
+                    ),
+                    true,
+                )
+            } else {
+                (
+                    format!(
+                        "SELECT bounty_id, title, description, reward, status, created_by, created_at_ms, closed_at_ms, accepted_by, accepted_at_ms
+                         FROM \"{}\".runtime_bounties
+                         ORDER BY created_at_ms DESC
+                         LIMIT $1",
+                        schema
+                    ),
+                    false,
+                )
+            };
+            let rows = if bind_status {
+                sqlx::query(&sql)
+                    .bind(status.as_deref())
+                    .bind(limit as i64)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| map_driver_err("list bounties", e))?
+            } else {
+                sqlx::query(&sql)
+                    .bind(limit as i64)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| map_driver_err("list bounties", e))?
+            };
+            Ok(rows
+                .into_iter()
+                .map(|r| BountyRecord {
+                    bounty_id: r.get(0),
+                    title: r.get(1),
+                    description: r.get(2),
+                    reward: r.get(3),
+                    status: BountyStatus::from_str(r.get::<String, _>(4).as_str()),
+                    created_by: r.get(5),
+                    created_at_ms: r.get(6),
+                    closed_at_ms: r.get(7),
+                    accepted_by: r.get(8),
+                    accepted_at_ms: r.get(9),
+                })
+                .collect())
+        })
     }
 
-    fn accept_bounty(&self, _bounty_id: &str, _accepted_by: &str) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn accept_bounty(&self, bounty_id: &str, accepted_by: &str) -> Result<(), KernelError> {
+        let accepted =
+            PostgresRuntimeRepository::accept_bounty(self, bounty_id, accepted_by, Utc::now())?;
+        if !accepted {
+            return Err(KernelError::Driver(format!(
+                "bounty not found or not in open status: {}",
+                bounty_id
+            )));
+        }
+        Ok(())
     }
 
-    fn close_bounty(&self, _bounty_id: &str) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn close_bounty(&self, bounty_id: &str) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty_id = bounty_id.to_string();
+        let now_ms = dt_to_ms(Utc::now());
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_bounties
+                 SET status = 'closed', closed_at_ms = $2
+                 WHERE bounty_id = $1
+                   AND status IN ('open', 'accepted')",
+                schema
+            );
+            let updated = sqlx::query(&sql)
+                .bind(&bounty_id)
+                .bind(now_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("close bounty", e))?
+                .rows_affected();
+            if updated == 0 {
+                return Err(KernelError::Driver(format!(
+                    "bounty not found or already closed: {}",
+                    bounty_id
+                )));
+            }
+            Ok(())
+        })
     }
 
     // ============== Swarm Methods ==============
 
-    fn upsert_swarm_decomposition(&self, _task: &SwarmTaskRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn upsert_swarm_decomposition(&self, task: &SwarmTaskRecord) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let task = task.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_swarm_tasks
+                 (parent_task_id, decomposition_json, proposer_id, proposer_reward_pct, solver_reward_pct, aggregator_reward_pct, status, created_at_ms, completed_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                 ON CONFLICT(parent_task_id)
+                 DO UPDATE SET
+                   decomposition_json = excluded.decomposition_json,
+                   status = excluded.status,
+                   completed_at_ms = excluded.completed_at_ms",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&task.parent_task_id)
+                .bind(&task.decomposition_json)
+                .bind(&task.proposer_id)
+                .bind(task.proposer_reward_pct)
+                .bind(task.solver_reward_pct)
+                .bind(task.aggregator_reward_pct)
+                .bind(&task.status)
+                .bind(task.created_at_ms)
+                .bind(task.completed_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("upsert swarm decomposition", e))?;
+            Ok(())
+        })
     }
 
     fn get_swarm_decomposition(
         &self,
-        _parent_task_id: &str,
+        parent_task_id: &str,
     ) -> Result<Option<SwarmTaskRecord>, KernelError> {
-        Ok(None) // TODO: implement
+        Ok(
+            PostgresRuntimeRepository::get_swarm_task(self, parent_task_id)?.map(|row| {
+                SwarmTaskRecord {
+                    parent_task_id: row.parent_task_id,
+                    decomposition_json: row.decomposition_json,
+                    proposer_id: row.proposer_id,
+                    proposer_reward_pct: row.proposer_reward_pct,
+                    solver_reward_pct: row.solver_reward_pct,
+                    aggregator_reward_pct: row.aggregator_reward_pct,
+                    status: row.status,
+                    created_at_ms: dt_to_ms(row.created_at),
+                    completed_at_ms: row.completed_at.map(dt_to_ms),
+                }
+            }),
+        )
     }
 
     // ============== Worker Methods ==============
 
-    fn register_worker(&self, _worker: &WorkerRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn register_worker(&self, worker: &WorkerRecord) -> Result<(), KernelError> {
+        PostgresRuntimeRepository::upsert_worker_registration(
+            self,
+            &worker.worker_id,
+            &worker.domains,
+            worker.max_load,
+            worker.metadata_json.as_deref(),
+            &worker.status,
+            ms_to_dt(worker.registered_at_ms),
+        )?;
+        Ok(())
     }
 
-    fn get_worker(&self, _worker_id: &str) -> Result<Option<WorkerRecord>, KernelError> {
-        Ok(None) // TODO: implement
+    fn get_worker(&self, worker_id: &str) -> Result<Option<WorkerRecord>, KernelError> {
+        Ok(
+            PostgresRuntimeRepository::get_worker_registration(self, worker_id)?.map(|row| {
+                WorkerRecord {
+                    worker_id: row.worker_id,
+                    domains: row.domains_json,
+                    max_load: row.max_load,
+                    metadata_json: row.metadata_json,
+                    registered_at_ms: dt_to_ms(row.registered_at),
+                    last_heartbeat_ms: row.last_heartbeat_at.map(dt_to_ms),
+                    status: row.status,
+                }
+            }),
+        )
     }
 
     fn list_workers(
         &self,
-        _domain: Option<&str>,
-        _status: Option<&str>,
-        _limit: usize,
+        domain: Option<&str>,
+        status: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<WorkerRecord>, KernelError> {
-        Ok(vec![]) // TODO: implement
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let domain = domain.map(String::from);
+        let status = status.map(String::from);
+        rt.block_on(async move {
+            let sql = match (domain.is_some(), status.is_some()) {
+                (true, true) => format!(
+                    "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                     FROM \"{}\".runtime_workers_registry
+                     WHERE domains LIKE $1 AND status = $2
+                     ORDER BY registered_at_ms DESC
+                     LIMIT $3",
+                    schema
+                ),
+                (true, false) => format!(
+                    "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                     FROM \"{}\".runtime_workers_registry
+                     WHERE domains LIKE $1
+                     ORDER BY registered_at_ms DESC
+                     LIMIT $2",
+                    schema
+                ),
+                (false, true) => format!(
+                    "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                     FROM \"{}\".runtime_workers_registry
+                     WHERE status = $1
+                     ORDER BY registered_at_ms DESC
+                     LIMIT $2",
+                    schema
+                ),
+                (false, false) => format!(
+                    "SELECT worker_id, domains, max_load, metadata_json, registered_at_ms, last_heartbeat_ms, status
+                     FROM \"{}\".runtime_workers_registry
+                     ORDER BY registered_at_ms DESC
+                     LIMIT $1",
+                    schema
+                ),
+            };
+            let rows = match (domain.as_deref(), status.as_deref()) {
+                (Some(d), Some(s)) => {
+                    let like = format!("%{}%", d);
+                    sqlx::query(&sql)
+                        .bind(like)
+                        .bind(s)
+                        .bind(limit as i64)
+                        .fetch_all(&pool)
+                        .await
+                        .map_err(|e| map_driver_err("list workers", e))?
+                }
+                (Some(d), None) => {
+                    let like = format!("%{}%", d);
+                    sqlx::query(&sql)
+                        .bind(like)
+                        .bind(limit as i64)
+                        .fetch_all(&pool)
+                        .await
+                        .map_err(|e| map_driver_err("list workers", e))?
+                }
+                (None, Some(s)) => {
+                    sqlx::query(&sql)
+                        .bind(s)
+                        .bind(limit as i64)
+                        .fetch_all(&pool)
+                        .await
+                        .map_err(|e| map_driver_err("list workers", e))?
+                }
+                (None, None) => {
+                    sqlx::query(&sql)
+                        .bind(limit as i64)
+                        .fetch_all(&pool)
+                        .await
+                        .map_err(|e| map_driver_err("list workers", e))?
+                }
+            };
+            Ok(rows
+                .into_iter()
+                .map(|r| WorkerRecord {
+                    worker_id: r.get(0),
+                    domains: r.get(1),
+                    max_load: r.get(2),
+                    metadata_json: r.get(3),
+                    registered_at_ms: r.get(4),
+                    last_heartbeat_ms: r.get(5),
+                    status: r.get(6),
+                })
+                .collect())
+        })
     }
 
-    fn heartbeat_worker(&self, _worker_id: &str, _heartbeat_at_ms: i64) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn heartbeat_worker(&self, worker_id: &str, heartbeat_at_ms: i64) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let worker_id = worker_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "UPDATE \"{}\".runtime_workers_registry
+                 SET last_heartbeat_ms = $2, status = 'active'
+                 WHERE worker_id = $1",
+                schema
+            );
+            let updated = sqlx::query(&sql)
+                .bind(&worker_id)
+                .bind(heartbeat_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("heartbeat worker", e))?
+                .rows_affected();
+            if updated == 0 {
+                return Err(KernelError::Driver(format!(
+                    "worker not found: {}",
+                    worker_id
+                )));
+            }
+            Ok(())
+        })
     }
 
     // ============== Recipe Methods ==============
 
-    fn create_recipe(&self, _recipe: &RecipeRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn create_recipe(&self, recipe: &RecipeRecord) -> Result<(), KernelError> {
+        PostgresRuntimeRepository::create_recipe(
+            self,
+            &PostgresRecipeRow {
+                recipe_id: recipe.recipe_id.clone(),
+                name: recipe.name.clone(),
+                description: recipe.description.clone(),
+                gene_sequence_json: recipe.gene_sequence_json.clone(),
+                author_id: recipe.author_id.clone(),
+                forked_from: recipe.forked_from.clone(),
+                created_at: ms_to_dt(recipe.created_at_ms),
+                updated_at: ms_to_dt(recipe.updated_at_ms),
+                is_public: recipe.is_public,
+            },
+        )
     }
 
-    fn get_recipe(&self, _recipe_id: &str) -> Result<Option<RecipeRecord>, KernelError> {
-        Ok(None) // TODO: implement
+    fn get_recipe(&self, recipe_id: &str) -> Result<Option<RecipeRecord>, KernelError> {
+        Ok(
+            PostgresRuntimeRepository::get_recipe(self, recipe_id)?.map(|row| RecipeRecord {
+                recipe_id: row.recipe_id,
+                name: row.name,
+                description: row.description,
+                gene_sequence_json: row.gene_sequence_json,
+                author_id: row.author_id,
+                forked_from: row.forked_from,
+                created_at_ms: dt_to_ms(row.created_at),
+                updated_at_ms: dt_to_ms(row.updated_at),
+                is_public: row.is_public,
+            }),
+        )
     }
 
     fn fork_recipe(
         &self,
-        _original_id: &str,
-        _new_id: &str,
-        _new_author: &str,
+        original_id: &str,
+        new_id: &str,
+        new_author: &str,
     ) -> Result<Option<RecipeRecord>, KernelError> {
-        Ok(None) // TODO: implement
+        let Some(original) = RuntimeRepository::get_recipe(self, original_id)? else {
+            return Ok(None);
+        };
+        let now_ms = dt_to_ms(Utc::now());
+        let forked = RecipeRecord {
+            recipe_id: new_id.to_string(),
+            name: format!("Fork of {}", original.name),
+            description: original.description,
+            gene_sequence_json: original.gene_sequence_json,
+            author_id: new_author.to_string(),
+            forked_from: Some(original_id.to_string()),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            is_public: original.is_public,
+        };
+        RuntimeRepository::create_recipe(self, &forked)?;
+        Ok(Some(forked))
     }
 
     fn list_recipes(
         &self,
-        _author_id: Option<&str>,
-        _limit: usize,
+        author_id: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<RecipeRecord>, KernelError> {
-        Ok(vec![]) // TODO: implement
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let author_id = author_id.map(String::from);
+        rt.block_on(async move {
+            let (sql, bind_author) = if author_id.is_some() {
+                (
+                    format!(
+                        "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public
+                         FROM \"{}\".runtime_recipes
+                         WHERE author_id = $1
+                         ORDER BY created_at_ms DESC
+                         LIMIT $2",
+                        schema
+                    ),
+                    true,
+                )
+            } else {
+                (
+                    format!(
+                        "SELECT recipe_id, name, description, gene_sequence_json, author_id, forked_from, created_at_ms, updated_at_ms, is_public
+                         FROM \"{}\".runtime_recipes
+                         ORDER BY created_at_ms DESC
+                         LIMIT $1",
+                        schema
+                    ),
+                    false,
+                )
+            };
+            let rows = if bind_author {
+                sqlx::query(&sql)
+                    .bind(author_id.as_deref())
+                    .bind(limit as i64)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| map_driver_err("list recipes", e))?
+            } else {
+                sqlx::query(&sql)
+                    .bind(limit as i64)
+                    .fetch_all(&pool)
+                    .await
+                    .map_err(|e| map_driver_err("list recipes", e))?
+            };
+            Ok(rows
+                .into_iter()
+                .map(|r| RecipeRecord {
+                    recipe_id: r.get(0),
+                    name: r.get(1),
+                    description: r.get(2),
+                    gene_sequence_json: r.get(3),
+                    author_id: r.get(4),
+                    forked_from: r.get(5),
+                    created_at_ms: r.get(6),
+                    updated_at_ms: r.get(7),
+                    is_public: r.get::<i32, _>(8) != 0,
+                })
+                .collect())
+        })
     }
 
     // ============== Organism Methods ==============
 
-    fn express_organism(&self, _organism: &OrganismRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn express_organism(&self, organism: &OrganismRecord) -> Result<(), KernelError> {
+        PostgresRuntimeRepository::create_organism(
+            self,
+            &PostgresOrganismRow {
+                organism_id: organism.organism_id.clone(),
+                recipe_id: organism.recipe_id.clone(),
+                status: organism.status.clone(),
+                current_step: organism.current_step,
+                total_steps: organism.total_steps,
+                created_at: ms_to_dt(organism.created_at_ms),
+                completed_at: organism.completed_at_ms.map(ms_to_dt),
+            },
+        )
     }
 
-    fn get_organism(&self, _organism_id: &str) -> Result<Option<OrganismRecord>, KernelError> {
-        Ok(None) // TODO: implement
+    fn get_organism(&self, organism_id: &str) -> Result<Option<OrganismRecord>, KernelError> {
+        Ok(
+            PostgresRuntimeRepository::get_organism(self, organism_id)?.map(|row| OrganismRecord {
+                organism_id: row.organism_id,
+                recipe_id: row.recipe_id,
+                status: row.status,
+                current_step: row.current_step,
+                total_steps: row.total_steps,
+                created_at_ms: dt_to_ms(row.created_at),
+                completed_at_ms: row.completed_at.map(dt_to_ms),
+            }),
+        )
     }
 
     fn update_organism(
         &self,
-        _organism_id: &str,
-        _current_step: i32,
-        _status: &str,
+        organism_id: &str,
+        current_step: i32,
+        status: &str,
     ) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+        let updated = PostgresRuntimeRepository::update_organism_status(
+            self,
+            organism_id,
+            status,
+            current_step,
+        )?;
+        if !updated {
+            return Err(KernelError::Driver(format!(
+                "organism not found: {}",
+                organism_id
+            )));
+        }
+        Ok(())
     }
 
     // ============== Session Methods ==============
 
-    fn create_session(&self, _session: &SessionRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn create_session(&self, session: &SessionRecord) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let session = session.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_collab_sessions
+                 (session_id, session_type, creator_id, status, created_at_ms, ended_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&session.session_id)
+                .bind(&session.session_type)
+                .bind(&session.creator_id)
+                .bind(&session.status)
+                .bind(session.created_at_ms)
+                .bind(session.ended_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("create session", e))?;
+            Ok(())
+        })
     }
 
-    fn get_session(&self, _session_id: &str) -> Result<Option<SessionRecord>, KernelError> {
-        Ok(None) // TODO: implement
+    fn get_session(&self, session_id: &str) -> Result<Option<SessionRecord>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let session_id = session_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT session_id, session_type, creator_id, status, created_at_ms, ended_at_ms
+                 FROM \"{}\".runtime_collab_sessions
+                 WHERE session_id = $1",
+                schema
+            );
+            let row = sqlx::query(&sql)
+                .bind(&session_id)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| map_driver_err("get session", e))?;
+            Ok(row.map(|r| SessionRecord {
+                session_id: r.get(0),
+                session_type: r.get(1),
+                creator_id: r.get(2),
+                status: r.get(3),
+                created_at_ms: r.get(4),
+                ended_at_ms: r.get(5),
+            }))
+        })
     }
 
-    fn add_session_message(&self, _message: &SessionMessageRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn add_session_message(&self, message: &SessionMessageRecord) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let message = message.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_collab_messages
+                 (message_id, session_id, sender_id, content, message_type, sent_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&message.message_id)
+                .bind(&message.session_id)
+                .bind(&message.sender_id)
+                .bind(&message.content)
+                .bind(&message.message_type)
+                .bind(message.sent_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("add session message", e))?;
+            Ok(())
+        })
     }
 
     fn get_session_history(
         &self,
-        _session_id: &str,
-        _limit: usize,
+        session_id: &str,
+        limit: usize,
     ) -> Result<Vec<SessionMessageRecord>, KernelError> {
-        Ok(vec![]) // TODO: implement
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let session_id = session_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT message_id, session_id, sender_id, content, message_type, sent_at_ms
+                 FROM \"{}\".runtime_collab_messages
+                 WHERE session_id = $1
+                 ORDER BY sent_at_ms DESC
+                 LIMIT $2",
+                schema
+            );
+            let rows = sqlx::query(&sql)
+                .bind(&session_id)
+                .bind(limit as i64)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| map_driver_err("get session history", e))?;
+            Ok(rows
+                .into_iter()
+                .map(|r| SessionMessageRecord {
+                    message_id: r.get(0),
+                    session_id: r.get(1),
+                    sender_id: r.get(2),
+                    content: r.get(3),
+                    message_type: r.get(4),
+                    sent_at_ms: r.get(5),
+                })
+                .collect())
+        })
     }
 
     // ============== Dispute Methods ==============
 
-    fn open_dispute(&self, _dispute: &DisputeRecord) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+    fn open_dispute(&self, dispute: &DisputeRecord) -> Result<(), KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let dispute = dispute.clone();
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".runtime_disputes
+                 (dispute_id, bounty_id, opened_by, status, evidence_json, resolution, resolved_by, resolved_at_ms, created_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&dispute.dispute_id)
+                .bind(&dispute.bounty_id)
+                .bind(&dispute.opened_by)
+                .bind(dispute.status.as_str())
+                .bind(&dispute.evidence_json)
+                .bind(&dispute.resolution)
+                .bind(&dispute.resolved_by)
+                .bind(dispute.resolved_at_ms)
+                .bind(dispute.created_at_ms)
+                .execute(&pool)
+                .await
+                .map_err(|e| map_driver_err("open dispute", e))?;
+            Ok(())
+        })
     }
 
-    fn get_dispute(&self, _dispute_id: &str) -> Result<Option<DisputeRecord>, KernelError> {
-        Ok(None) // TODO: implement
+    fn get_dispute(&self, dispute_id: &str) -> Result<Option<DisputeRecord>, KernelError> {
+        Ok(
+            PostgresRuntimeRepository::get_dispute(self, dispute_id)?.map(|row| DisputeRecord {
+                dispute_id: row.dispute_id,
+                bounty_id: row.bounty_id,
+                opened_by: row.opened_by,
+                status: DisputeStatus::from_str(&row.status),
+                evidence_json: row.evidence_json,
+                resolution: row.resolution,
+                resolved_by: row.resolved_by,
+                resolved_at_ms: row.resolved_at.map(dt_to_ms),
+                created_at_ms: dt_to_ms(row.created_at),
+            }),
+        )
     }
 
-    fn get_disputes_for_bounty(&self, _bounty_id: &str) -> Result<Vec<DisputeRecord>, KernelError> {
-        Ok(vec![]) // TODO: implement
+    fn get_disputes_for_bounty(&self, bounty_id: &str) -> Result<Vec<DisputeRecord>, KernelError> {
+        self.ensure_schema()?;
+        let pool = self.pool()?.clone();
+        let rt = self.runtime()?;
+        let schema = self.schema.clone();
+        let bounty_id = bounty_id.to_string();
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT dispute_id, bounty_id, opened_by, status, evidence_json, resolution, resolved_by, resolved_at_ms, created_at_ms
+                 FROM \"{}\".runtime_disputes
+                 WHERE bounty_id = $1
+                 ORDER BY created_at_ms DESC",
+                schema
+            );
+            let rows = sqlx::query(&sql)
+                .bind(&bounty_id)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| map_driver_err("get disputes for bounty", e))?;
+            Ok(rows
+                .into_iter()
+                .map(|r| DisputeRecord {
+                    dispute_id: r.get(0),
+                    bounty_id: r.get(1),
+                    opened_by: r.get(2),
+                    status: DisputeStatus::from_str(r.get::<String, _>(3).as_str()),
+                    evidence_json: r.get(4),
+                    resolution: r.get(5),
+                    resolved_by: r.get(6),
+                    resolved_at_ms: r.get(7),
+                    created_at_ms: r.get(8),
+                })
+                .collect())
+        })
     }
 
     fn resolve_dispute(
         &self,
-        _dispute_id: &str,
-        _resolution: &str,
-        _resolved_by: &str,
+        dispute_id: &str,
+        resolution: &str,
+        resolved_by: &str,
     ) -> Result<(), KernelError> {
-        Ok(()) // TODO: implement
+        let resolved = PostgresRuntimeRepository::resolve_dispute(
+            self,
+            dispute_id,
+            resolution,
+            resolved_by,
+            Utc::now(),
+        )?;
+        if !resolved {
+            return Err(KernelError::Driver(format!(
+                "dispute not found or already resolved: {}",
+                dispute_id
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1900,6 +2541,10 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
 
     use super::{PostgresRuntimeRepository, POSTGRES_RUNTIME_SCHEMA_VERSION};
+    use crate::models::{
+        BountyRecord, BountyStatus, DisputeRecord, DisputeStatus, OrganismRecord, RecipeRecord,
+        SessionMessageRecord, SessionRecord, SwarmTaskRecord, WorkerRecord,
+    };
     use crate::{RuntimeRepository, SchedulerDecision, SkeletonScheduler, SqliteRuntimeRepository};
 
     trait ContractHarness: RuntimeRepository {
@@ -1975,6 +2620,259 @@ mod tests {
         assert!(available.iter().any(|r| r.attempt_id == attempt_id));
 
         assert_eq!(repo.latest_seq_for_run(&run_id).expect("latest seq"), 0);
+    }
+
+    fn assert_bounty_worker_swarm_contract<R: RuntimeRepository>(repo: &R, prefix: &str) {
+        let now_ms = Utc::now().timestamp_millis();
+        let bounty_id = format!("{prefix}-bounty");
+        let worker_id = format!("{prefix}-worker");
+        let parent_task_id = format!("{prefix}-swarm-task");
+
+        let bounty = BountyRecord {
+            bounty_id: bounty_id.clone(),
+            title: format!("{} title", prefix),
+            description: Some("semantic contract bounty".to_string()),
+            reward: 123,
+            status: BountyStatus::Open,
+            created_by: "alice".to_string(),
+            created_at_ms: now_ms,
+            closed_at_ms: None,
+            accepted_by: None,
+            accepted_at_ms: None,
+        };
+        repo.upsert_bounty(&bounty).expect("upsert bounty");
+
+        let fetched = repo
+            .get_bounty(&bounty_id)
+            .expect("get bounty")
+            .expect("bounty exists");
+        assert_eq!(fetched.status, BountyStatus::Open);
+
+        repo.accept_bounty(&bounty_id, &worker_id)
+            .expect("accept bounty");
+        let accepted = repo
+            .get_bounty(&bounty_id)
+            .expect("get accepted bounty")
+            .expect("accepted bounty exists");
+        assert_eq!(accepted.status, BountyStatus::Accepted);
+        assert_eq!(accepted.accepted_by.as_deref(), Some(worker_id.as_str()));
+
+        repo.close_bounty(&bounty_id).expect("close bounty");
+        let closed = repo
+            .get_bounty(&bounty_id)
+            .expect("get closed bounty")
+            .expect("closed bounty exists");
+        assert_eq!(closed.status, BountyStatus::Closed);
+        assert!(closed.closed_at_ms.is_some());
+
+        let listed = repo
+            .list_bounties(Some("closed"), 8)
+            .expect("list closed bounties");
+        assert!(listed.iter().any(|b| b.bounty_id == bounty_id));
+
+        let worker = WorkerRecord {
+            worker_id: worker_id.clone(),
+            domains: "evomap,semantic".to_string(),
+            max_load: 2,
+            metadata_json: Some(r#"{"role":"solver"}"#.to_string()),
+            registered_at_ms: now_ms,
+            last_heartbeat_ms: Some(now_ms),
+            status: "active".to_string(),
+        };
+        repo.register_worker(&worker).expect("register worker");
+        let worker_fetched = repo
+            .get_worker(&worker_id)
+            .expect("get worker")
+            .expect("worker exists");
+        assert_eq!(worker_fetched.domains, "evomap,semantic");
+        assert_eq!(worker_fetched.status, "active");
+
+        let by_domain = repo
+            .list_workers(Some("evomap"), Some("active"), 10)
+            .expect("list workers by domain+status");
+        assert!(by_domain.iter().any(|w| w.worker_id == worker_id));
+
+        let heartbeat_ms = now_ms + 777;
+        repo.heartbeat_worker(&worker_id, heartbeat_ms)
+            .expect("heartbeat worker");
+        let heartbeat_worker = repo
+            .get_worker(&worker_id)
+            .expect("get worker after heartbeat")
+            .expect("worker exists after heartbeat");
+        assert_eq!(heartbeat_worker.last_heartbeat_ms, Some(heartbeat_ms));
+
+        let swarm = SwarmTaskRecord {
+            parent_task_id: parent_task_id.clone(),
+            decomposition_json: r#"{"children":[{"id":"c1"}]}"#.to_string(),
+            proposer_id: "alice".to_string(),
+            proposer_reward_pct: 5,
+            solver_reward_pct: 85,
+            aggregator_reward_pct: 10,
+            status: "pending".to_string(),
+            created_at_ms: now_ms,
+            completed_at_ms: None,
+        };
+        repo.upsert_swarm_decomposition(&swarm)
+            .expect("upsert swarm task");
+        let swarm_fetched = repo
+            .get_swarm_decomposition(&parent_task_id)
+            .expect("get swarm decomposition")
+            .expect("swarm decomposition exists");
+        assert_eq!(swarm_fetched.proposer_id, "alice");
+        assert_eq!(swarm_fetched.status, "pending");
+    }
+
+    fn assert_recipe_organism_session_dispute_contract<R: RuntimeRepository>(
+        repo: &R,
+        prefix: &str,
+    ) {
+        let now_ms = Utc::now().timestamp_millis();
+        let recipe_id = format!("{prefix}-recipe");
+        let fork_recipe_id = format!("{prefix}-recipe-fork");
+        let organism_id = format!("{prefix}-organism");
+        let session_id = format!("{prefix}-session");
+        let dispute_id = format!("{prefix}-dispute");
+        let bounty_id = format!("{prefix}-bounty-for-dispute");
+
+        repo.upsert_bounty(&BountyRecord {
+            bounty_id: bounty_id.clone(),
+            title: format!("{prefix} bounty"),
+            description: None,
+            reward: 42,
+            status: BountyStatus::Open,
+            created_by: "arbiter".to_string(),
+            created_at_ms: now_ms,
+            closed_at_ms: None,
+            accepted_by: None,
+            accepted_at_ms: None,
+        })
+        .expect("seed bounty for dispute");
+
+        let recipe = RecipeRecord {
+            recipe_id: recipe_id.clone(),
+            name: format!("{prefix} base recipe"),
+            description: Some("base".to_string()),
+            gene_sequence_json: r#"{"steps":["a","b"]}"#.to_string(),
+            author_id: "alice".to_string(),
+            forked_from: None,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+            is_public: true,
+        };
+        repo.create_recipe(&recipe).expect("create recipe");
+
+        let fetched_recipe = repo
+            .get_recipe(&recipe_id)
+            .expect("get recipe")
+            .expect("recipe exists");
+        assert_eq!(fetched_recipe.author_id, "alice");
+
+        let forked = repo
+            .fork_recipe(&recipe_id, &fork_recipe_id, "bob")
+            .expect("fork recipe call")
+            .expect("forked recipe exists");
+        assert_eq!(forked.forked_from.as_deref(), Some(recipe_id.as_str()));
+        assert_eq!(forked.author_id, "bob");
+
+        let recipes = repo
+            .list_recipes(Some("alice"), 10)
+            .expect("list recipes by author");
+        assert!(recipes.iter().any(|r| r.recipe_id == recipe_id));
+
+        let organism = OrganismRecord {
+            organism_id: organism_id.clone(),
+            recipe_id: recipe_id.clone(),
+            status: "pending".to_string(),
+            current_step: 0,
+            total_steps: 2,
+            created_at_ms: now_ms,
+            completed_at_ms: None,
+        };
+        repo.express_organism(&organism).expect("express organism");
+        repo.update_organism(&organism_id, 1, "running")
+            .expect("update organism running");
+        repo.update_organism(&organism_id, 2, "completed")
+            .expect("update organism completed");
+        let updated_organism = repo
+            .get_organism(&organism_id)
+            .expect("get organism")
+            .expect("organism exists");
+        assert_eq!(updated_organism.status, "completed");
+        assert_eq!(updated_organism.current_step, 2);
+        assert!(updated_organism.completed_at_ms.is_some());
+
+        let session = SessionRecord {
+            session_id: session_id.clone(),
+            session_type: "pair".to_string(),
+            creator_id: "alice".to_string(),
+            status: "active".to_string(),
+            created_at_ms: now_ms,
+            ended_at_ms: None,
+        };
+        repo.create_session(&session).expect("create session");
+
+        repo.add_session_message(&SessionMessageRecord {
+            message_id: format!("{prefix}-msg-1"),
+            session_id: session_id.clone(),
+            sender_id: "alice".to_string(),
+            content: "first".to_string(),
+            message_type: "message".to_string(),
+            sent_at_ms: now_ms + 1,
+        })
+        .expect("add session message 1");
+        repo.add_session_message(&SessionMessageRecord {
+            message_id: format!("{prefix}-msg-2"),
+            session_id: session_id.clone(),
+            sender_id: "bob".to_string(),
+            content: "second".to_string(),
+            message_type: "message".to_string(),
+            sent_at_ms: now_ms + 2,
+        })
+        .expect("add session message 2");
+
+        let session_history = repo
+            .get_session_history(&session_id, 10)
+            .expect("get session history");
+        assert_eq!(session_history.len(), 2);
+        assert_eq!(session_history[0].content, "second");
+
+        let dispute = DisputeRecord {
+            dispute_id: dispute_id.clone(),
+            bounty_id: bounty_id.clone(),
+            opened_by: "alice".to_string(),
+            status: DisputeStatus::Open,
+            evidence_json: Some(r#"{"proof":"hash"}"#.to_string()),
+            resolution: None,
+            resolved_by: None,
+            resolved_at_ms: None,
+            created_at_ms: now_ms,
+        };
+        repo.open_dispute(&dispute).expect("open dispute");
+        let opened = repo
+            .get_dispute(&dispute_id)
+            .expect("get dispute")
+            .expect("dispute exists");
+        assert_eq!(opened.status, DisputeStatus::Open);
+
+        let disputes = repo
+            .get_disputes_for_bounty(&bounty_id)
+            .expect("get disputes for bounty");
+        assert!(disputes.iter().any(|d| d.dispute_id == dispute_id));
+
+        repo.resolve_dispute(&dispute_id, "approved", "arbiter")
+            .expect("resolve dispute");
+        let resolved = repo
+            .get_dispute(&dispute_id)
+            .expect("get resolved dispute")
+            .expect("resolved dispute exists");
+        assert_eq!(resolved.status, DisputeStatus::Resolved);
+        assert_eq!(resolved.resolved_by.as_deref(), Some("arbiter"));
+        assert!(resolved.resolved_at_ms.is_some());
+    }
+
+    fn assert_semantic_roundtrip<R: RuntimeRepository>(repo: &R, prefix: &str) {
+        assert_bounty_worker_swarm_contract(repo, prefix);
+        assert_recipe_organism_session_dispute_contract(repo, prefix);
     }
 
     fn test_db_url() -> Option<String> {
@@ -2397,5 +3295,56 @@ mod tests {
         assert_eq!(fetched.decomposition_json, decomposition_json);
         assert_eq!(fetched.proposer_id, "alice");
         assert_eq!(fetched.status, "pending");
+    }
+
+    #[test]
+    fn runtime_repository_bounty_roundtrip_contract_postgres_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        assert_bounty_worker_swarm_contract(&repo, "pg-bounty-contract");
+    }
+
+    #[test]
+    fn runtime_repository_worker_roundtrip_contract_postgres_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        assert_bounty_worker_swarm_contract(&repo, "pg-worker-contract");
+    }
+
+    #[test]
+    fn runtime_repository_recipe_organism_roundtrip_contract_postgres_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        assert_recipe_organism_session_dispute_contract(&repo, "pg-recipe-organism-contract");
+    }
+
+    #[test]
+    fn runtime_repository_session_dispute_roundtrip_contract_postgres_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        assert_recipe_organism_session_dispute_contract(&repo, "pg-session-dispute-contract");
+    }
+
+    #[test]
+    fn runtime_repository_semantic_contract_sqlite() {
+        let repo = SqliteRuntimeRepository::new(":memory:").expect("sqlite repo");
+        assert_semantic_roundtrip(&repo, "sqlite-semantic-contract");
+    }
+
+    #[test]
+    fn runtime_repository_semantic_contract_postgres_when_env_is_set() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let repo = PostgresRuntimeRepository::new(db_url).with_schema(test_schema());
+        assert_semantic_roundtrip(&repo, "pg-semantic-contract");
     }
 }

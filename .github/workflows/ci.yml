@@ -125,6 +125,10 @@ jobs:
         shell: bash
         run: |
           bash scripts/run_orchestrator_checks.sh
+      - name: Run EvoMap release hardening gate
+        shell: bash
+        run: |
+          bash scripts/run_evomap_release_gate.sh
       - name: Validate runtime API contract drift
         shell: bash
         run: |
