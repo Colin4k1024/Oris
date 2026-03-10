@@ -3507,13 +3507,16 @@ fn ensure_builtin_experience_assets_in_store(
     }
     let sender_id = normalized_sender_id(&sender_id);
     let mut imported_asset_ids = Vec::new();
-    let bundle = match load_evomap_builtin_assets()? {
-        Some(bundle) => bundle,
-        None => BuiltinAssetBundle {
-            genes: built_in_experience_genes(),
-            capsules: Vec::new(),
-        },
+    // Keep legacy compatibility templates available even when EvoMap snapshots
+    // are present, so A2A compatibility fetch flows retain stable builtin IDs.
+    let mut bundle = BuiltinAssetBundle {
+        genes: built_in_experience_genes(),
+        capsules: Vec::new(),
     };
+    if let Some(snapshot_bundle) = load_evomap_builtin_assets()? {
+        bundle.genes.extend(snapshot_bundle.genes);
+        bundle.capsules.extend(snapshot_bundle.capsules);
+    }
 
     for gene in bundle.genes {
         if !known_gene_ids.insert(gene.id.clone()) {

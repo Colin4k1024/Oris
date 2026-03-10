@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use oris_orchestrator::coordinator::{Coordinator, CoordinatorConfig};
+use oris_orchestrator::coordinator::{Coordinator, CoordinatorConfig, ValidationSummary};
 use oris_orchestrator::github_adapter::{InMemoryGitHubAdapter, RemoteIssue};
 use oris_orchestrator::runtime_client::InMemoryRuntimeA2aClient;
 use oris_orchestrator::task_spec::TaskSpec;
@@ -107,4 +107,26 @@ async fn run_next_remote_issue_executes_single_selected_issue() {
     let payloads = github.recorded_payloads();
     assert_eq!(payloads.len(), 1);
     assert_eq!(payloads[0].issue_id, "issue-110");
+}
+
+#[tokio::test]
+async fn run_task_blocks_when_backend_parity_gate_is_false() {
+    let runtime = InMemoryRuntimeA2aClient::default();
+    let github = InMemoryGitHubAdapter::default();
+    let coordinator = Coordinator::new(Arc::new(runtime), Arc::new(github), CoordinatorConfig::default());
+    let spec = TaskSpec::new("issue-999", "Gate deny path", vec![".".to_string()]).unwrap();
+
+    let summary = ValidationSummary {
+        build_ok: true,
+        contract_ok: true,
+        e2e_ok: true,
+        backend_parity_ok: false,
+        policy_ok: true,
+    };
+
+    let err = coordinator
+        .run_task_with_validation(spec, summary)
+        .await
+        .expect_err("expected validation gate failure");
+    assert_eq!(err.kind(), "validation");
 }
