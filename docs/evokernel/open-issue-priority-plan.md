@@ -15,6 +15,21 @@ Working defaults:
 - any issue that would require a breaking API, config, persistence, or behavior
   change must stop and escalate instead of selecting a major release implicitly
 
+## EvoMap Release Gate Requirement
+
+For EvoMap release-candidate work, the publish decision must include an
+explicit EvoMap release gate run:
+
+```bash
+bash scripts/run_evomap_release_gate.sh
+```
+
+Operator approval must record:
+
+- contract + e2e pass evidence
+- backend parity outcome (sqlite/postgres, or approved exception)
+- evidence bundle id from `target/evomap-release-evidence.json`
+
 ## Ground Truth Snapshot (March 3, 2026)
 
 | Issue | Current State | Evidence-Based Status |

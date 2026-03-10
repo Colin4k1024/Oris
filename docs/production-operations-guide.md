@@ -186,6 +186,25 @@ Do not mark an environment production-ready until all of these are true:
 6. Documentation:
    - on-call operators have access to this guide and the incident runbook
 
+### EvoMap release gate (required before publish)
+
+Before any EvoMap-related release publish action, run:
+
+```bash
+bash scripts/run_evomap_release_gate.sh
+```
+
+Required checklist:
+
+- contract gate: pass
+- e2e gate: pass
+- backend parity gate (sqlite/postgres): pass, or approved exception recorded
+- evidence bundle id from `target/evomap-release-evidence.json` attached to the
+  approval record
+
+Do not publish if the release gate summary has `status != "pass"` unless an
+explicit exception is approved and logged with the same evidence bundle id.
+
 ## 7. SLO Baseline
 
 These are default operator-facing starting targets, not hard product guarantees.
