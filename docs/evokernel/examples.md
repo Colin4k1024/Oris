@@ -6,6 +6,21 @@ This document describes the Evolution example programs under `examples/evo_oris_
 
 All commands run from repository root.
 
+## First run (30 minutes)
+
+Use the canonical onboarding entry first:
+
+```bash
+bash scripts/evo_first_run.sh
+```
+
+Expected observable artifacts:
+
+- `target/evo_first_run/summary.json`
+- `target/evo_first_run/run.log`
+
+After this passes, continue with the advanced scenario list below.
+
 ## 1. Canonical capture/replay flow
 
 Command:

@@ -84,6 +84,17 @@ Run the evolution example:
 cargo run -p evo_oris_repo
 ```
 
+First run (30 minutes, with observable artifacts):
+
+```bash
+bash scripts/evo_first_run.sh
+```
+
+This writes:
+
+- `target/evo_first_run/summary.json`
+- `target/evo_first_run/run.log`
+
 ---
 
 ## Comparison
