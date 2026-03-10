@@ -23,6 +23,27 @@ pub struct CoordinatorConfig {
     pub branch_prefix: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidationSummary {
+    pub build_ok: bool,
+    pub contract_ok: bool,
+    pub e2e_ok: bool,
+    pub backend_parity_ok: bool,
+    pub policy_ok: bool,
+}
+
+impl ValidationSummary {
+    pub fn all_green() -> Self {
+        Self {
+            build_ok: true,
+            contract_ok: true,
+            e2e_ok: true,
+            backend_parity_ok: true,
+            policy_ok: true,
+        }
+    }
+}
+
 impl Default for CoordinatorConfig {
     fn default() -> Self {
         Self {
@@ -94,6 +115,15 @@ impl Coordinator {
         &self,
         spec: TaskSpec,
     ) -> Result<CoordinatorRunOutcome, CoordinatorError> {
+        self.run_task_with_validation(spec, ValidationSummary::all_green())
+            .await
+    }
+
+    pub async fn run_task_with_validation(
+        &self,
+        spec: TaskSpec,
+        validation: ValidationSummary,
+    ) -> Result<CoordinatorRunOutcome, CoordinatorError> {
         let handshake = self
             .runtime
             .handshake(default_handshake_request(&self.config.sender_id))
@@ -135,8 +165,14 @@ impl Coordinator {
             completion_response.result.terminal_state,
             A2aTaskLifecycleState::Succeeded
         );
-        let evidence =
-            EvidenceBundle::new(&start_ack.session_id, is_success, is_success, is_success);
+        let evidence = EvidenceBundle::new(
+            &start_ack.session_id,
+            is_success && validation.build_ok,
+            is_success && validation.contract_ok,
+            is_success && validation.e2e_ok,
+            is_success && validation.backend_parity_ok,
+            is_success && validation.policy_ok,
+        );
 
         if !ValidationGate::is_pr_ready(&evidence) {
             return Err(CoordinatorError::validation(
