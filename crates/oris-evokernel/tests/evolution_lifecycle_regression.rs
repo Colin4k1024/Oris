@@ -2,6 +2,8 @@
 //! governor policy, and the end-to-end EvoKernel lifecycle.
 
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,6 +49,61 @@ fn unique_path(label: &str) -> PathBuf {
         "oris-evokernel-regression-{label}-{}-{nonce}",
         std::process::id()
     ))
+}
+
+fn create_audit_log_path(test_name: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target/test-audit/evolution_lifecycle_regression");
+    fs::create_dir_all(&root).unwrap();
+    root.join(format!("{test_name}-{nonce}.log"))
+}
+
+fn append_audit_log(path: &PathBuf, line: impl AsRef<str>) {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    file.write_all(line.as_ref().as_bytes()).unwrap();
+    file.write_all(b"\n").unwrap();
+}
+
+struct TestAuditGuard {
+    path: PathBuf,
+    test_name: String,
+}
+
+impl TestAuditGuard {
+    fn new(test_name: &str) -> Self {
+        let path = create_audit_log_path(test_name);
+        append_audit_log(
+            &path,
+            format!("[START] test={test_name} pid={}", std::process::id()),
+        );
+        Self {
+            path,
+            test_name: test_name.to_string(),
+        }
+    }
+}
+
+impl Drop for TestAuditGuard {
+    fn drop(&mut self) {
+        let status = if std::thread::panicking() {
+            "FAIL"
+        } else {
+            "PASS"
+        };
+        append_audit_log(
+            &self.path,
+            format!("[END] test={} status={status}", self.test_name),
+        );
+    }
 }
 
 fn temp_workspace() -> PathBuf {
@@ -267,6 +324,22 @@ fn test_evo_with_store(
     (workspace, evo)
 }
 
+fn strategy_metadata_value(strategy: &[String], key: &str) -> Option<String> {
+    strategy.iter().find_map(|entry| {
+        let (entry_key, entry_value) = entry.split_once('=')?;
+        if entry_key.trim().eq_ignore_ascii_case(key) {
+            let value = entry_value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        } else {
+            None
+        }
+    })
+}
+
 struct SeededStore {
     events: Mutex<Vec<StoredEvolutionEvent>>,
 }
@@ -374,6 +447,7 @@ fn backdate_store_events(store: &JsonlEvolutionStore, age: Duration) {
 
 #[tokio::test]
 async fn capture_then_replay_records_full_lifecycle() {
+    let _audit = TestAuditGuard::new("capture_then_replay_records_full_lifecycle");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("sandbox");
     let store_root = unique_path("store");
@@ -445,6 +519,8 @@ async fn capture_then_replay_records_full_lifecycle() {
 
 #[tokio::test]
 async fn replay_selection_is_deterministic_across_repeated_identical_inputs() {
+    let _audit =
+        TestAuditGuard::new("replay_selection_is_deterministic_across_repeated_identical_inputs");
     async fn run_once(label: &str) -> (String, oris_evokernel::ReplayDecision) {
         let workspace = temp_workspace();
         let sandbox_root = unique_path(&format!("{label}-sandbox"));
@@ -499,6 +575,7 @@ async fn replay_selection_is_deterministic_across_repeated_identical_inputs() {
 
 #[test]
 fn deterministic_signal_extraction_is_stable() {
+    let _audit = TestAuditGuard::new("deterministic_signal_extraction_is_stable");
     let input = SignalExtractionInput {
         patch_diff: "\
 diff --git a/src/lib.rs b/src/lib.rs
@@ -530,6 +607,7 @@ diff --git a/src/lib.rs b/src/lib.rs
 
 #[tokio::test]
 async fn local_selector_query_returns_captured_gene() {
+    let _audit = TestAuditGuard::new("local_selector_query_returns_captured_gene");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("selector-query-sandbox");
     let store_root = unique_path("selector-query-store");
@@ -567,6 +645,7 @@ async fn local_selector_query_returns_captured_gene() {
 
 #[tokio::test]
 async fn single_task_learns_and_replays_on_second_run() {
+    let _audit = TestAuditGuard::new("single_task_learns_and_replays_on_second_run");
     let (workspace, store, evo) = test_evo("self-evolve-second-run");
 
     let cold_start = evo
@@ -610,6 +689,8 @@ async fn single_task_learns_and_replays_on_second_run() {
 
 #[tokio::test]
 async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
+    let _audit =
+        TestAuditGuard::new("replay_feedback_surfaces_planner_hints_and_reasoning_savings");
     let (workspace, _store, evo) = test_evo("replay-feedback");
     let signals = vec!["missing readme".to_string()];
 
@@ -658,6 +739,8 @@ async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
 
 #[tokio::test]
 async fn supervised_devloop_executes_bounded_docs_task_after_approval() {
+    let _audit =
+        TestAuditGuard::new("supervised_devloop_executes_bounded_docs_task_after_approval");
     let (_workspace, store, evo) = test_evo("supervised-devloop-approved");
     let request = devloop_request("task-docs-approved", "docs/supervised-devloop.md", true);
 
@@ -684,6 +767,8 @@ async fn supervised_devloop_executes_bounded_docs_task_after_approval() {
 
 #[tokio::test]
 async fn supervised_devloop_stops_before_execution_without_human_approval() {
+    let _audit =
+        TestAuditGuard::new("supervised_devloop_stops_before_execution_without_human_approval");
     let (_workspace, store, evo) = test_evo("supervised-devloop-awaiting-approval");
     let request = devloop_request("task-docs-await", "docs/supervised-awaiting.md", false);
 
@@ -706,6 +791,9 @@ async fn supervised_devloop_stops_before_execution_without_human_approval() {
 
 #[tokio::test]
 async fn supervised_devloop_rejects_out_of_scope_tasks_without_bypassing_policy() {
+    let _audit = TestAuditGuard::new(
+        "supervised_devloop_rejects_out_of_scope_tasks_without_bypassing_policy",
+    );
     let (_workspace, store, evo) = test_evo("supervised-devloop-rejected");
     let request = devloop_request("task-src-rejected", "src/lib.rs", true);
 
@@ -728,6 +816,7 @@ async fn supervised_devloop_rejects_out_of_scope_tasks_without_bypassing_policy(
 
 #[tokio::test]
 async fn repeated_tasks_shift_from_fallback_to_replay_after_learning() {
+    let _audit = TestAuditGuard::new("repeated_tasks_shift_from_fallback_to_replay_after_learning");
     let (workspace, store, evo) = test_evo("self-evolve-hit-rate");
 
     let mut pre_learning_hits = 0;
@@ -786,6 +875,7 @@ async fn repeated_tasks_shift_from_fallback_to_replay_after_learning() {
 
 #[tokio::test]
 async fn normalized_signal_variants_can_replay_learned_capsule() {
+    let _audit = TestAuditGuard::new("normalized_signal_variants_can_replay_learned_capsule");
     let (workspace, _store, evo) = test_evo("self-evolve-normalized-signal");
 
     let captured = evo
@@ -815,6 +905,8 @@ async fn normalized_signal_variants_can_replay_learned_capsule() {
 
 #[tokio::test]
 async fn adjacent_task_class_signal_variants_can_replay_learned_capsule() {
+    let _audit =
+        TestAuditGuard::new("adjacent_task_class_signal_variants_can_replay_learned_capsule");
     let (workspace, _store, evo) = test_evo("self-evolve-adjacent-task-class");
 
     let captured = evo
@@ -840,6 +932,7 @@ async fn adjacent_task_class_signal_variants_can_replay_learned_capsule() {
 
 #[tokio::test]
 async fn unrelated_task_class_signal_variants_do_not_replay() {
+    let _audit = TestAuditGuard::new("unrelated_task_class_signal_variants_do_not_replay");
     let (workspace, _store, evo) = test_evo("self-evolve-negative-task-class");
 
     evo.capture_successful_mutation(
@@ -863,6 +956,7 @@ async fn unrelated_task_class_signal_variants_do_not_replay() {
 
 #[tokio::test]
 async fn stale_confidence_forces_revalidation_before_replay() {
+    let _audit = TestAuditGuard::new("stale_confidence_forces_revalidation_before_replay");
     let old_timestamp = (Utc::now() - Duration::hours(48)).to_rfc3339();
     let mutation = sample_mutation_with_id("mutation-stale-confidence");
     let workspace = temp_workspace();
@@ -947,6 +1041,8 @@ async fn stale_confidence_forces_revalidation_before_replay() {
 
 #[tokio::test]
 async fn long_repeated_sequence_reports_stable_replay_metrics_after_learning() {
+    let _audit =
+        TestAuditGuard::new("long_repeated_sequence_reports_stable_replay_metrics_after_learning");
     let (workspace, store, evo) = test_evo("self-evolve-long-sequence");
 
     let captured = evo
@@ -991,6 +1087,8 @@ async fn long_repeated_sequence_reports_stable_replay_metrics_after_learning() {
 
 #[tokio::test]
 async fn remote_learning_requires_local_validation_before_becoming_shareable() {
+    let _audit =
+        TestAuditGuard::new("remote_learning_requires_local_validation_before_becoming_shareable");
     let (_producer_workspace, producer_store, producer) = test_evo("self-evolve-remote-producer");
     let captured = producer
         .capture_successful_mutation(
@@ -1067,6 +1165,7 @@ async fn remote_learning_requires_local_validation_before_becoming_shareable() {
 
 #[tokio::test]
 async fn distributed_learning_survives_restart_and_replays_again() {
+    let _audit = TestAuditGuard::new("distributed_learning_survives_restart_and_replays_again");
     let (_producer_workspace, producer_store, producer) =
         test_evo("self-evolve-remote-restart-producer");
     let captured = producer
@@ -1134,6 +1233,7 @@ async fn distributed_learning_survives_restart_and_replays_again() {
 
 #[tokio::test]
 async fn unrelated_tasks_do_not_false_positive_after_learning() {
+    let _audit = TestAuditGuard::new("unrelated_tasks_do_not_false_positive_after_learning");
     let (workspace, _store, evo) = test_evo("self-evolve-no-false-positive");
 
     let captured = evo
@@ -1158,6 +1258,7 @@ async fn unrelated_tasks_do_not_false_positive_after_learning() {
 
 #[tokio::test]
 async fn mixed_task_sequence_only_replays_for_learned_signals() {
+    let _audit = TestAuditGuard::new("mixed_task_sequence_only_replays_for_learned_signals");
     let (workspace, store, evo) = test_evo("self-evolve-mixed-sequence");
 
     let captured = evo
@@ -1219,6 +1320,8 @@ async fn mixed_task_sequence_only_replays_for_learned_signals() {
 
 #[test]
 fn bootstrap_if_empty_seeds_exactly_four_genes_and_four_capsules() {
+    let _audit =
+        TestAuditGuard::new("bootstrap_if_empty_seeds_exactly_four_genes_and_four_capsules");
     let (_workspace, store, evo) = test_evo("bootstrap-seed-count");
 
     let report = evo
@@ -1242,6 +1345,7 @@ fn bootstrap_if_empty_seeds_exactly_four_genes_and_four_capsules() {
 
 #[test]
 fn bootstrap_capsules_start_quarantined() {
+    let _audit = TestAuditGuard::new("bootstrap_capsules_start_quarantined");
     let (_workspace, store, evo) = test_evo("bootstrap-quarantine");
 
     evo.bootstrap_if_empty(&"run-bootstrap-quarantine".to_string())
@@ -1261,6 +1365,7 @@ fn bootstrap_capsules_start_quarantined() {
 
 #[test]
 fn bootstrap_if_empty_is_idempotent() {
+    let _audit = TestAuditGuard::new("bootstrap_if_empty_is_idempotent");
     let (_workspace, store, evo) = test_evo("bootstrap-idempotent");
 
     let first = evo
@@ -1286,6 +1391,8 @@ fn bootstrap_if_empty_is_idempotent() {
 
 #[test]
 fn bootstrap_appends_records_without_overwriting_existing_events() {
+    let _audit =
+        TestAuditGuard::new("bootstrap_appends_records_without_overwriting_existing_events");
     let (_workspace, store, evo) = test_evo("bootstrap-append-only");
 
     store
@@ -1308,6 +1415,9 @@ fn bootstrap_appends_records_without_overwriting_existing_events() {
 
 #[tokio::test]
 async fn bootstrap_seeds_remain_quarantined_and_do_not_appear_as_replay_candidates() {
+    let _audit = TestAuditGuard::new(
+        "bootstrap_seeds_remain_quarantined_and_do_not_appear_as_replay_candidates",
+    );
     let (workspace, store, evo) = test_evo("bootstrap-discoverable");
 
     evo.bootstrap_if_empty(&"run-bootstrap-discoverable".to_string())
@@ -1336,6 +1446,7 @@ async fn bootstrap_seeds_remain_quarantined_and_do_not_appear_as_replay_candidat
 
 #[tokio::test]
 async fn sandbox_boundary_blocks_out_of_scope_patch() {
+    let _audit = TestAuditGuard::new("sandbox_boundary_blocks_out_of_scope_patch");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("sandbox-boundary");
     let sandbox = LocalProcessSandbox::new("run-sandbox-boundary", &workspace, &sandbox_root);
@@ -1350,6 +1461,7 @@ async fn sandbox_boundary_blocks_out_of_scope_patch() {
 
 #[tokio::test]
 async fn governor_blast_radius_gate_blocks_promotion_and_replay() {
+    let _audit = TestAuditGuard::new("governor_blast_radius_gate_blocks_promotion_and_replay");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("governor-candidate-sandbox");
     let store_root = unique_path("governor-candidate-store");
@@ -1410,6 +1522,7 @@ async fn governor_blast_radius_gate_blocks_promotion_and_replay() {
 
 #[tokio::test]
 async fn governor_rate_limit_blocks_rapid_successive_mutations() {
+    let _audit = TestAuditGuard::new("governor_rate_limit_blocks_rapid_successive_mutations");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("governor-rate-limit-sandbox");
     let store_root = unique_path("governor-rate-limit-store");
@@ -1462,6 +1575,7 @@ async fn governor_rate_limit_blocks_rapid_successive_mutations() {
 
 #[tokio::test]
 async fn governor_cooling_window_blocks_rapid_repromotion() {
+    let _audit = TestAuditGuard::new("governor_cooling_window_blocks_rapid_repromotion");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("governor-cooling-sandbox");
     let store_root = unique_path("governor-cooling-store");
@@ -1511,6 +1625,7 @@ async fn governor_cooling_window_blocks_rapid_repromotion() {
 
 #[tokio::test]
 async fn local_capture_uses_existing_confidence_context_for_governor() {
+    let _audit = TestAuditGuard::new("local_capture_uses_existing_confidence_context_for_governor");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("governor-confidence-sandbox");
     let store_root = unique_path("governor-confidence-store");
@@ -1575,6 +1690,7 @@ async fn local_capture_uses_existing_confidence_context_for_governor() {
 
 #[tokio::test]
 async fn failed_replay_stops_immediate_reuse_without_revocation() {
+    let _audit = TestAuditGuard::new("failed_replay_stops_immediate_reuse_without_revocation");
     let workspace = temp_workspace();
     let sandbox_root = unique_path("replay-failure-sandbox");
     let store_root = unique_path("replay-failure-store");
@@ -1677,4 +1793,156 @@ async fn failed_replay_stops_immediate_reuse_without_revocation() {
         &stored.event,
         EvolutionEvent::CapsuleReused { capsule_id, .. } if capsule_id == &captured.id
     )));
+}
+
+#[test]
+fn evomap_snapshot_can_be_loaded_and_mapped() {
+    let _audit = TestAuditGuard::new("evomap_snapshot_can_be_loaded_and_mapped");
+    let store_root = unique_path("evomap-snapshot-mapped-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
+
+    let import = node
+        .ensure_builtin_experience_assets("runtime-bootstrap")
+        .unwrap();
+    assert!(!import.imported_asset_ids.is_empty());
+
+    let (_, projection) = EvoEvolutionStore::scan_projection(store.as_ref()).unwrap();
+    let evomap_gene_ids = projection
+        .genes
+        .iter()
+        .filter(|gene| {
+            strategy_metadata_value(&gene.strategy, "asset_origin").as_deref()
+                == Some("builtin_evomap")
+        })
+        .map(|gene| gene.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let evomap_capsules = projection
+        .capsules
+        .iter()
+        .filter(|capsule| evomap_gene_ids.contains(&capsule.gene_id))
+        .count();
+
+    assert!(!evomap_gene_ids.is_empty());
+    assert!(evomap_capsules > 0);
+}
+
+#[test]
+fn ensure_builtin_assets_imports_genes_and_capsules() {
+    let _audit = TestAuditGuard::new("ensure_builtin_assets_imports_genes_and_capsules");
+    let store_root = unique_path("evomap-imports-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
+
+    node.ensure_builtin_experience_assets("runtime-bootstrap")
+        .unwrap();
+    let (_, projection) = EvoEvolutionStore::scan_projection(store.as_ref()).unwrap();
+
+    let promoted_gene_ids = projection
+        .genes
+        .iter()
+        .filter(|gene| {
+            gene.state == EvoAssetState::Promoted
+                && strategy_metadata_value(&gene.strategy, "asset_origin").as_deref()
+                    == Some("builtin_evomap")
+        })
+        .map(|gene| gene.id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let promoted_capsules = projection
+        .capsules
+        .iter()
+        .filter(|capsule| {
+            capsule.state == EvoAssetState::Promoted && promoted_gene_ids.contains(&capsule.gene_id)
+        })
+        .count();
+
+    assert!(!promoted_gene_ids.is_empty());
+    assert!(promoted_capsules > 0);
+}
+
+#[test]
+fn ensure_builtin_assets_is_idempotent_with_snapshot() {
+    let _audit = TestAuditGuard::new("ensure_builtin_assets_is_idempotent_with_snapshot");
+    let store_root = unique_path("evomap-idempotent-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
+
+    let first = node
+        .ensure_builtin_experience_assets("runtime-bootstrap")
+        .unwrap();
+    assert!(!first.imported_asset_ids.is_empty());
+
+    let second = node
+        .ensure_builtin_experience_assets("runtime-bootstrap")
+        .unwrap();
+    assert!(second.imported_asset_ids.is_empty());
+}
+
+#[test]
+fn builtin_evomap_assets_are_fetchable() {
+    let _audit = TestAuditGuard::new("builtin_evomap_assets_are_fetchable");
+    let store_root = unique_path("evomap-fetch-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
+
+    node.ensure_builtin_experience_assets("runtime-bootstrap")
+        .unwrap();
+
+    let fetch = node
+        .fetch_assets(
+            "execution-api",
+            &oris_evokernel::FetchQuery {
+                sender_id: "compat-agent".into(),
+                signals: vec!["error".into()],
+            },
+        )
+        .unwrap();
+
+    let has_gene = fetch.assets.iter().any(|asset| {
+        matches!(
+            asset,
+            oris_evolution_network::NetworkAsset::Gene { gene }
+                if strategy_metadata_value(&gene.strategy, "asset_origin").as_deref() == Some("builtin_evomap")
+                    && gene.state == EvoAssetState::Promoted
+        )
+    });
+    let has_capsule = fetch.assets.iter().any(|asset| {
+        matches!(
+            asset,
+            oris_evolution_network::NetworkAsset::Capsule { capsule }
+                if capsule.state == EvoAssetState::Promoted
+        )
+    });
+    assert!(has_gene);
+    assert!(has_capsule);
+}
+
+#[test]
+fn builtin_evomap_replay_path_has_declared_mutation() {
+    let _audit = TestAuditGuard::new("builtin_evomap_replay_path_has_declared_mutation");
+    let store_root = unique_path("evomap-mutation-store");
+    let store = Arc::new(JsonlEvolutionStore::new(&store_root));
+    let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
+
+    node.ensure_builtin_experience_assets("runtime-bootstrap")
+        .unwrap();
+
+    let events = store.scan(1).unwrap();
+    let (_, projection) = EvoEvolutionStore::scan_projection(store.as_ref()).unwrap();
+    let capsule_mutation_ids = projection
+        .capsules
+        .iter()
+        .map(|capsule| capsule.mutation_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    assert!(!capsule_mutation_ids.is_empty());
+    for mutation_id in capsule_mutation_ids {
+        assert!(events.iter().any(|stored| {
+            matches!(
+                &stored.event,
+                EvolutionEvent::MutationDeclared { mutation }
+                    if mutation.intent.id == mutation_id
+            )
+        }));
+    }
 }

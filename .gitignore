@@ -11,3 +11,6 @@ Cargo.lock
 *.db
 .oris/
 crates/oris-runtime/.oris/*
+docs/evokernel/demo_runs/
+docs/evokernel/latest-store/
+docs/evokernel/official_reuse_runs/
