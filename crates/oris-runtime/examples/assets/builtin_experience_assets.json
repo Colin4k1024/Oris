@@ -1,0 +1,106 @@
+[
+  {
+    "id": "builtin-experience-docs-rewrite-v1",
+    "signals": [
+      "docs.rewrite",
+      "docs",
+      "rewrite"
+    ],
+    "strategy": [
+      "asset_origin=builtin",
+      "task_class=docs.rewrite",
+      "task_label=Docs rewrite",
+      "template_id=builtin-docs-rewrite-v1",
+      "summary=baseline docs rewrite experience"
+    ],
+    "validation": [
+      "builtin-template",
+      "origin=builtin"
+    ],
+    "state": "Promoted"
+  },
+  {
+    "id": "builtin-experience-ci-fix-v1",
+    "signals": [
+      "ci.fix",
+      "ci",
+      "test",
+      "failure"
+    ],
+    "strategy": [
+      "asset_origin=builtin",
+      "task_class=ci.fix",
+      "task_label=CI fix",
+      "template_id=builtin-ci-fix-v1",
+      "summary=baseline ci stabilization experience"
+    ],
+    "validation": [
+      "builtin-template",
+      "origin=builtin"
+    ],
+    "state": "Promoted"
+  },
+  {
+    "id": "builtin-experience-task-decomposition-v1",
+    "signals": [
+      "task.decomposition",
+      "task",
+      "decomposition",
+      "planning"
+    ],
+    "strategy": [
+      "asset_origin=builtin",
+      "task_class=task.decomposition",
+      "task_label=Task decomposition",
+      "template_id=builtin-task-decomposition-v1",
+      "summary=baseline task decomposition and routing experience"
+    ],
+    "validation": [
+      "builtin-template",
+      "origin=builtin"
+    ],
+    "state": "Promoted"
+  },
+  {
+    "id": "builtin-experience-project-workflow-v1",
+    "signals": [
+      "project.workflow",
+      "project",
+      "workflow",
+      "milestone"
+    ],
+    "strategy": [
+      "asset_origin=builtin",
+      "task_class=project.workflow",
+      "task_label=Project workflow",
+      "template_id=builtin-project-workflow-v1",
+      "summary=baseline project proposal and merge workflow experience"
+    ],
+    "validation": [
+      "builtin-template",
+      "origin=builtin"
+    ],
+    "state": "Promoted"
+  },
+  {
+    "id": "builtin-experience-service-bid-v1",
+    "signals": [
+      "service.bid",
+      "service",
+      "bid",
+      "economics"
+    ],
+    "strategy": [
+      "asset_origin=builtin",
+      "task_class=service.bid",
+      "task_label=Service bid",
+      "template_id=builtin-service-bid-v1",
+      "summary=baseline service bidding and settlement experience"
+    ],
+    "validation": [
+      "builtin-template",
+      "origin=builtin"
+    ],
+    "state": "Promoted"
+  }
+]
