@@ -2995,7 +2995,10 @@ async fn main() -> ExampleResult<()> {
                                             &decision.reason,
                                             &repair_failure_reason,
                                         );
-                                        let fallback_check = quality_gate(&fallback_plan, 10)?;
+                                        let fallback_check = quality_gate(&fallback_plan, 10)
+                                            .expect(
+                                                "fallback template should always pass quality gate",
+                                            );
                                         println!(
                                             "[REPAIR][CONSUMER] fallback template applied and passed quality gate"
                                         );
@@ -3021,7 +3024,8 @@ async fn main() -> ExampleResult<()> {
                                     &decision.reason,
                                     &format!("repair_v2_llm_error: {err_msg}"),
                                 );
-                                let fallback_check = quality_gate(&fallback_plan, 10)?;
+                                let fallback_check = quality_gate(&fallback_plan, 10)
+                                    .expect("fallback template should always pass quality gate");
                                 println!(
                                     "[REPAIR][CONSUMER] fallback template applied and passed quality gate"
                                 );
@@ -3046,7 +3050,8 @@ async fn main() -> ExampleResult<()> {
                     &decision.reason,
                     &format!("v1_llm_error: {err_msg}"),
                 );
-                let fallback_check = quality_gate(&fallback_plan, 10)?;
+                let fallback_check = quality_gate(&fallback_plan, 10)
+                    .expect("fallback template should always pass quality gate");
                 println!("[REPAIR][CONSUMER] fallback template applied and passed quality gate");
                 (
                     fallback_plan,
