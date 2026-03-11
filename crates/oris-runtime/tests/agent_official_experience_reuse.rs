@@ -226,10 +226,7 @@ impl Middleware for RealtimeMiddleware {
         steps: &[(AgentAction, String)],
         context: &mut MiddlewareContext,
     ) -> Result<Option<PromptArgs>, MiddlewareError> {
-        if !Self::should_log_once(
-            context,
-            format!("rt-before-plan-{}", context.iteration),
-        ) {
+        if !Self::should_log_once(context, format!("rt-before-plan-{}", context.iteration)) {
             return Ok(None);
         }
         self.logger.log_event(
@@ -313,7 +310,9 @@ impl Middleware for RealtimeMiddleware {
             context,
             format!(
                 "rt-after-tool-{}-{}-{}",
-                context.iteration, action.tool, observation.len()
+                context.iteration,
+                action.tool,
+                observation.len()
             ),
         ) {
             return Ok(None);
@@ -339,7 +338,11 @@ impl Middleware for RealtimeMiddleware {
     ) -> Result<(), MiddlewareError> {
         if !Self::should_log_once(
             context,
-            format!("rt-after-finish-{}-{}", context.iteration, finish.output.len()),
+            format!(
+                "rt-after-finish-{}-{}",
+                context.iteration,
+                finish.output.len()
+            ),
         ) {
             return Ok(());
         }

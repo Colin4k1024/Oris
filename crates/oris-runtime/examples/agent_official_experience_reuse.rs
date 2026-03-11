@@ -203,10 +203,7 @@ impl RealtimeLogger {
             agent_role,
             phase,
             event,
-            record
-                .get("payload")
-                .cloned()
-                .unwrap_or_else(|| json!({}))
+            record.get("payload").cloned().unwrap_or_else(|| json!({}))
         );
         if emit_stdout {
             println!("{human_line}");
@@ -285,10 +282,7 @@ impl Middleware for RealtimeMiddleware {
         steps: &[(AgentAction, String)],
         context: &mut MiddlewareContext,
     ) -> Result<Option<PromptArgs>, MiddlewareError> {
-        if !Self::should_log_once(
-            context,
-            format!("rt-before-plan-{}", context.iteration),
-        ) {
+        if !Self::should_log_once(context, format!("rt-before-plan-{}", context.iteration)) {
             return Ok(None);
         }
         let mut input_keys = input.keys().cloned().collect::<Vec<_>>();
@@ -376,7 +370,9 @@ impl Middleware for RealtimeMiddleware {
             context,
             format!(
                 "rt-after-tool-{}-{}-{}",
-                context.iteration, action.tool, observation.len()
+                context.iteration,
+                action.tool,
+                observation.len()
             ),
         ) {
             return Ok(None);
@@ -402,7 +398,11 @@ impl Middleware for RealtimeMiddleware {
     ) -> Result<Option<AgentFinish>, MiddlewareError> {
         if !Self::should_log_once(
             context,
-            format!("rt-before-finish-{}-{}", context.iteration, finish.output.len()),
+            format!(
+                "rt-before-finish-{}-{}",
+                context.iteration,
+                finish.output.len()
+            ),
         ) {
             return Ok(None);
         }
@@ -426,7 +426,11 @@ impl Middleware for RealtimeMiddleware {
     ) -> Result<(), MiddlewareError> {
         if !Self::should_log_once(
             context,
-            format!("rt-after-finish-{}-{}", context.iteration, finish.output.len()),
+            format!(
+                "rt-after-finish-{}-{}",
+                context.iteration,
+                finish.output.len()
+            ),
         ) {
             return Ok(());
         }

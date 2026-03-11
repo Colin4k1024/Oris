@@ -113,7 +113,11 @@ async fn run_next_remote_issue_executes_single_selected_issue() {
 async fn run_task_blocks_when_backend_parity_gate_is_false() {
     let runtime = InMemoryRuntimeA2aClient::default();
     let github = InMemoryGitHubAdapter::default();
-    let coordinator = Coordinator::new(Arc::new(runtime), Arc::new(github), CoordinatorConfig::default());
+    let coordinator = Coordinator::new(
+        Arc::new(runtime),
+        Arc::new(github),
+        CoordinatorConfig::default(),
+    );
     let spec = TaskSpec::new("issue-999", "Gate deny path", vec![".".to_string()]).unwrap();
 
     let summary = ValidationSummary {

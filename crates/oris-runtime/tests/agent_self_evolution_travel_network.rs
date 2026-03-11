@@ -181,7 +181,11 @@ fn assert_stub_realtime_logs(jsonl_path: &Path) {
         .filter(|line| !line.trim().is_empty())
     {
         let value: Value = serde_json::from_str(line).unwrap();
-        match value.get("event").and_then(Value::as_str).unwrap_or_default() {
+        match value
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
             "phase_transition" => phase_count += 1,
             "tool_call_before" | "tool_call_after" => tool_count += 1,
             "finish" => finish_count += 1,
@@ -420,8 +424,9 @@ fn count_reported_promoted_genes(store: &JsonlEvolutionStore) -> usize {
 async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     let audit_log =
         create_audit_log_path("travel_network_demo_flow_captures_publishes_imports_and_replays");
-    let (realtime_log_path, realtime_jsonl_path) =
-        create_realtime_log_paths("travel_network_demo_flow_captures_publishes_imports_and_replays");
+    let (realtime_log_path, realtime_jsonl_path) = create_realtime_log_paths(
+        "travel_network_demo_flow_captures_publishes_imports_and_replays",
+    );
     let realtime_run_id = "stub-travel-reuse";
     append_realtime_event(
         &realtime_log_path,
