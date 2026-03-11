@@ -325,7 +325,8 @@ fn copy_workspace(src: &Path, dst: &Path) -> Result<(), SandboxError> {
 fn should_skip(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .map(|name| matches!(name, ".git" | "target"))
+        // Skip generated artifact roots to keep sandbox copies bounded.
+        .map(|name| matches!(name, ".git" | "target" | "demo_runs"))
         .unwrap_or(false)
 }
 
@@ -406,5 +407,13 @@ index 0000000..1111111
         };
         let result = sandbox.apply(&mutation, &SandboxPolicy::default()).await;
         assert!(matches!(result, Err(SandboxError::TargetViolation(_))));
+    }
+
+    #[test]
+    fn should_skip_generated_artifact_roots() {
+        assert!(should_skip(Path::new(".git")));
+        assert!(should_skip(Path::new("target")));
+        assert!(should_skip(Path::new("demo_runs")));
+        assert!(!should_skip(Path::new("docs")));
     }
 }

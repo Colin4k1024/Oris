@@ -470,6 +470,28 @@ where
                 }
             }
 
+            // Log plan_input summary before calling LLM plan
+            {
+                let plan_input_keys: Vec<_> = plan_input.keys().collect();
+                let chat_history_len = plan_input
+                    .get("chat_history")
+                    .and_then(|v| serde_json::from_value::<Vec<Message>>(v.clone()).ok())
+                    .map(|msgs| msgs.len())
+                    .unwrap_or(0);
+                let system_prompt_len = plan_input
+                    .get("system_prompt")
+                    .or_else(|| plan_input.get("dynamic_system_prompt"))
+                    .and_then(|v| v.as_str().map(|s| s.len()))
+                    .unwrap_or(0);
+                log::info!(
+                    "[PLAN] iteration={} plan_input_keys={:?} chat_history_len={} system_prompt_len={}",
+                    middleware_context.iteration,
+                    plan_input_keys,
+                    chat_history_len,
+                    system_prompt_len,
+                );
+            }
+
             let mut agent_event = self
                 .agent
                 .plan(&steps, plan_input.clone())
@@ -598,6 +620,27 @@ where
                         if reject_this_tool {
                             steps.push((action, "Tool call rejected by user.".to_string()));
                             continue;
+                        }
+
+                        // Log tool execution summary
+                        {
+                            let tool_name = &action.tool;
+                            let input_preview = if action.tool_input.len() > 200 {
+                                format!(
+                                    "{}...[truncated {} chars]",
+                                    &action.tool_input[..200],
+                                    action.tool_input.len() - 200
+                                )
+                            } else {
+                                action.tool_input.clone()
+                            };
+                            log::info!(
+                                "[TOOL] iteration={} tool={} input_len={} input_preview={}",
+                                middleware_context.iteration,
+                                tool_name,
+                                action.tool_input.len(),
+                                input_preview
+                            );
                         }
 
                         log::debug!("Action: {:?}", action.tool_input);
