@@ -1,6 +1,6 @@
 #![cfg(feature = "full-evolution-experimental")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -71,17 +71,82 @@ fn preview(text: &str, limit: usize) -> String {
     out
 }
 
-fn quality_gate(plan: &str, days: u32) {
-    assert!(plan.contains("北京"));
-    assert!(plan.contains("上海"));
-    assert!(plan.contains("交通方案") || plan.contains("交通"));
-    assert!(plan.contains("日程表") || plan.contains("行程"));
-    assert!(plan.contains("住宿建议") || plan.contains("住宿"));
-    assert!(plan.contains("预算拆分") || plan.contains("预算"));
-    assert!(plan.contains("风险") && plan.contains("备选"));
-    assert!(plan.contains("第1天") || plan.to_ascii_lowercase().contains("day 1"));
+fn quality_gate_result(plan: &str, days: u32) -> Result<(), String> {
+    let checks = [
+        ("包含“北京”", plan.contains("北京")),
+        ("包含“上海”", plan.contains("上海")),
+        (
+            "包含“交通方案”章节",
+            plan.contains("交通方案") || plan.contains("交通"),
+        ),
+        (
+            "包含“日程表”章节",
+            plan.contains("日程表") || plan.contains("行程"),
+        ),
+        (
+            "包含“住宿建议”章节",
+            plan.contains("住宿建议") || plan.contains("住宿"),
+        ),
+        (
+            "包含“预算拆分”章节",
+            plan.contains("预算拆分") || plan.contains("预算"),
+        ),
+        (
+            "包含“风险与备选”章节",
+            plan.contains("风险") && plan.contains("备选"),
+        ),
+    ];
+    let missing = checks
+        .iter()
+        .filter_map(|(name, passed)| {
+            if *passed {
+                None
+            } else {
+                Some((*name).to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "quality gate failed, missing sections: {:?}",
+            missing
+        ));
+    }
+    let first_day_ok = plan.contains("第1天") || plan.to_ascii_lowercase().contains("day 1");
     let last_day = format!("第{}天", days);
-    assert!(plan.contains(&last_day) || plan.to_ascii_lowercase().contains(&format!("day {days}")));
+    let last_day_ok =
+        plan.contains(&last_day) || plan.to_ascii_lowercase().contains(&format!("day {days}"));
+    if !first_day_ok || !last_day_ok {
+        return Err(format!(
+            "quality gate failed, day markers missing: first_day_ok={first_day_ok}, last_day_ok={last_day_ok}"
+        ));
+    }
+    Ok(())
+}
+
+fn quality_gate(plan: &str, days: u32) {
+    if let Err(err) = quality_gate_result(plan, days) {
+        panic!("{err}");
+    }
+}
+
+fn inject_structural_failure(plan: &str, total_days: u32) -> String {
+    let mut corrupted = plan.replace("风险", "注意").replace("备选", "替代");
+    let last_day_marker = format!("第{}天", total_days);
+    corrupted = corrupted.replace(&last_day_marker, "最后一天");
+    corrupted
+}
+
+fn parse_failed_checks(failure_reason: &str) -> Vec<String> {
+    if let Some(raw) = failure_reason.split("missing sections: ").nth(1) {
+        if let Ok(checks) = serde_json::from_str::<Vec<String>>(raw.trim()) {
+            return checks;
+        }
+    }
+    if failure_reason.contains("day markers missing") {
+        return vec!["包含“第1天/最后一天”标记".to_string()];
+    }
+    vec![failure_reason.to_string()]
 }
 
 fn unique_path(label: &str) -> PathBuf {
@@ -264,11 +329,29 @@ fn build_test_evo(
 
 fn experience_diff(path: &str, plan_preview: &str) -> String {
     let signal_block = FIXED_SIGNAL_TAGS.join(", ");
+    let mut content_lines = vec![
+        "# Beijing Shanghai Longline Experience".to_string(),
+        "".to_string(),
+        format!("signals: {signal_block}"),
+        "".to_string(),
+        "strategy:".to_string(),
+        "- call deterministic tools first".to_string(),
+        "- then generate final integrated plan".to_string(),
+        "".to_string(),
+        "preview:".to_string(),
+    ];
+    content_lines.extend(plan_preview.lines().map(|line| line.to_string()));
+    let hunk_line_count = content_lines.len();
+    let patch_body = content_lines
+        .iter()
+        .map(|line| format!("+{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,12 @@\n+# Beijing Shanghai Longline Experience\n+\n+signals: {signal_block}\n+\n+strategy:\n+- call deterministic tools first\n+- then generate final integrated plan\n+\n+preview:\n+{plan_preview}\n",
+        "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{hunk_line_count} @@\n{patch_body}\n",
         path = path,
-        signal_block = signal_block,
-        plan_preview = plan_preview.replace('\n', "\n+"),
+        hunk_line_count = hunk_line_count,
+        patch_body = patch_body,
     )
 }
 
@@ -420,6 +503,252 @@ fn count_reported_promoted_genes(store: &JsonlEvolutionStore) -> usize {
         .count()
 }
 
+fn load_jsonl_values(path: &Path) -> Vec<Value> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                None
+            } else {
+                serde_json::from_str::<Value>(line).ok()
+            }
+        })
+        .collect()
+}
+
+fn write_jsonl_values(path: &Path, values: &[Value]) {
+    let mut payload = String::new();
+    for value in values {
+        payload.push_str(&serde_json::to_string(value).unwrap());
+        payload.push('\n');
+    }
+    std::fs::write(path, payload).unwrap();
+}
+
+fn event_kind(record: &Value) -> Option<&str> {
+    record
+        .get("event")
+        .and_then(|event| event.get("kind"))
+        .and_then(Value::as_str)
+}
+
+fn event_mutation_id(record: &Value) -> Option<String> {
+    match event_kind(record)? {
+        "mutation_declared" => record
+            .get("event")
+            .and_then(|event| event.get("mutation"))
+            .and_then(|mutation| mutation.get("intent"))
+            .and_then(|intent| intent.get("id"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+        _ => record
+            .get("event")
+            .and_then(|event| event.get("mutation_id"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+    }
+}
+
+fn event_capsule_id(record: &Value) -> Option<String> {
+    match event_kind(record)? {
+        "capsule_committed" => record
+            .get("event")
+            .and_then(|event| event.get("capsule"))
+            .and_then(|capsule| capsule.get("id"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+        "capsule_reused" => record
+            .get("event")
+            .and_then(|event| event.get("capsule_id"))
+            .and_then(Value::as_str)
+            .map(|value| value.to_string()),
+        _ => None,
+    }
+}
+
+fn extract_mutation_snapshot(records: &[Value], mutation_id: &str) -> Option<Value> {
+    records.iter().find_map(|record| {
+        if event_kind(record) == Some("mutation_declared")
+            && event_mutation_id(record).as_deref() == Some(mutation_id)
+        {
+            record
+                .get("event")
+                .and_then(|event| event.get("mutation"))
+                .cloned()
+        } else {
+            None
+        }
+    })
+}
+
+fn extract_validation_report_snapshot(records: &[Value], mutation_id: &str) -> Option<Value> {
+    records.iter().find_map(|record| {
+        let kind = event_kind(record)?;
+        if !matches!(kind, "validation_passed" | "validation_failed")
+            || event_mutation_id(record).as_deref() != Some(mutation_id)
+        {
+            return None;
+        }
+        record
+            .get("event")
+            .and_then(|event| event.get("report"))
+            .cloned()
+    })
+}
+
+fn detect_capsule_reused_event(records: &[Value], capsule_id: &str) -> bool {
+    records.iter().any(|record| {
+        event_kind(record) == Some("capsule_reused")
+            && event_capsule_id(record).as_deref() == Some(capsule_id)
+    })
+}
+
+fn final_reuse_verdict(
+    import_accepted: bool,
+    imported_asset_count: usize,
+    used_capsule: bool,
+    fallback_to_planner: bool,
+    capsule_reused_event_detected: bool,
+) -> bool {
+    import_accepted
+        && imported_asset_count > 0
+        && used_capsule
+        && !fallback_to_planner
+        && capsule_reused_event_detected
+}
+
+fn repair_reuse_verdict(
+    initial_failure_detected: bool,
+    repair_success: bool,
+    import_accepted: bool,
+    imported_asset_count: usize,
+    used_capsule: bool,
+    fallback_to_planner: bool,
+    capsule_reused_event_detected: bool,
+) -> bool {
+    initial_failure_detected
+        && repair_success
+        && import_accepted
+        && imported_asset_count > 0
+        && used_capsule
+        && !fallback_to_planner
+        && capsule_reused_event_detected
+}
+
+fn build_memory_graph_events(
+    run_id: &str,
+    replay_signals: &[String],
+    gene_id: &str,
+    capsule_id: &str,
+    replay_success: bool,
+    reason: &str,
+) -> Vec<Value> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        .to_string();
+    let signal_event_id = format!("signal-{run_id}");
+    let gene_event_id = format!("gene-selected-{run_id}");
+    let outcome_event_id = format!("outcome-{run_id}");
+    let capsule_event_id = format!("capsule-{run_id}");
+    vec![
+        json!({
+            "type": "MemoryGraphEvent",
+            "kind": "signal",
+            "id": signal_event_id,
+            "ts": ts,
+            "signal": {"signals": replay_signals},
+        }),
+        json!({
+            "type": "MemoryGraphEvent",
+            "kind": "gene_selected",
+            "id": gene_event_id,
+            "ts": ts,
+            "gene": {"id": gene_id},
+            "parent": signal_event_id,
+        }),
+        json!({
+            "type": "MemoryGraphEvent",
+            "kind": "outcome",
+            "id": outcome_event_id,
+            "ts": ts,
+            "outcome": {
+                "status": if replay_success { "success" } else { "failed" },
+                "score": if replay_success { 1.0 } else { 0.0 },
+                "note": reason,
+            },
+            "parent": gene_event_id,
+        }),
+        json!({
+            "type": "MemoryGraphEvent",
+            "kind": "capsule_created",
+            "id": capsule_event_id,
+            "ts": ts,
+            "signal": {"capsule_id": capsule_id},
+            "parent": outcome_event_id,
+        }),
+    ]
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestAssetManifestEntry {
+    path: String,
+    exists: bool,
+    summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestAssetManifest {
+    run_id: String,
+    assets: BTreeMap<String, TestAssetManifestEntry>,
+    missing_assets: Vec<String>,
+}
+
+fn build_test_asset_manifest(run_id: &str, root: &Path) -> TestAssetManifest {
+    let specs = [
+        ("gene", "gene.json"),
+        ("capsule", "capsule.json"),
+        ("evolution_events", "evolution_events.jsonl"),
+        ("mutation", "mutation.json"),
+        ("validation_report", "validation_report.json"),
+        ("memory_graph_events", "memory_graph_events.jsonl"),
+        ("self_repair_trace", "self_repair_trace.json"),
+    ];
+    let mut assets = BTreeMap::new();
+    let mut missing_assets = Vec::new();
+    for (asset_name, file_name) in specs {
+        let path = root.join(file_name);
+        let exists = path.exists();
+        if !exists {
+            missing_assets.push(asset_name.to_string());
+        }
+        assets.insert(
+            asset_name.to_string(),
+            TestAssetManifestEntry {
+                path: path.display().to_string(),
+                exists,
+                summary: if exists {
+                    "present".to_string()
+                } else {
+                    "missing".to_string()
+                },
+            },
+        );
+    }
+    missing_assets.sort();
+    TestAssetManifest {
+        run_id: run_id.to_string(),
+        assets,
+        missing_assets,
+    }
+}
+
 #[tokio::test]
 async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     let audit_log =
@@ -436,9 +765,29 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         "phase_transition",
         json!({"stage": "bootstrap"}),
     );
-    let producer_plan = StubBrain::generate_plan(7, 8000, "none");
+    let producer_plan_base = StubBrain::generate_plan(7, 8000, "none");
+    let draft_v1 = inject_structural_failure(&producer_plan_base, 7);
+    let draft_failure_reason = quality_gate_result(&draft_v1, 7)
+        .expect_err("draft_v1 should fail quality gate after deterministic injection");
+    let initial_failure_detected = true;
+    let failed_checks = parse_failed_checks(&draft_failure_reason);
+    assert!(
+        !failed_checks.is_empty(),
+        "failed checks should be extracted from quality gate error"
+    );
+    append_audit_log(
+        &audit_log,
+        format!(
+            "[STEP] draft_v1 failed as expected reason={} failed_checks={:?}",
+            draft_failure_reason, failed_checks
+        ),
+    );
+
+    let producer_plan =
+        StubBrain::generate_plan(7, 8000, &format!("repair:{draft_failure_reason}"));
     quality_gate(&producer_plan, 7);
-    append_audit_log(&audit_log, "[STEP] producer stub plan quality passed");
+    let repair_success = true;
+    append_audit_log(&audit_log, "[STEP] repair_v2 quality gate passed");
     append_realtime_event(
         &realtime_log_path,
         &realtime_jsonl_path,
@@ -570,6 +919,61 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         ),
     );
 
+    let producer_events = load_jsonl_values(&producer_store.root_dir().join("events.jsonl"));
+    let consumer_events = load_jsonl_values(&consumer_store.root_dir().join("events.jsonl"));
+    let mut all_events = Vec::new();
+    all_events.extend(producer_events.clone());
+    all_events.extend(consumer_events.clone());
+
+    let mutation_snapshot = extract_mutation_snapshot(&all_events, &capture.capsule.mutation_id)
+        .expect("expected mutation_declared snapshot for the captured mutation_id");
+    assert_eq!(
+        mutation_snapshot
+            .get("intent")
+            .and_then(|intent| intent.get("id"))
+            .and_then(Value::as_str),
+        Some(capture.capsule.mutation_id.as_str())
+    );
+    let mutation_snapshot_text = serde_json::to_string(&mutation_snapshot).unwrap();
+    assert!(
+        !mutation_snapshot_text.contains("InjectedFailure"),
+        "capture payload should come from repaired plan, not injected draft_v1"
+    );
+
+    let validation_snapshot =
+        extract_validation_report_snapshot(&all_events, &capture.capsule.mutation_id)
+            .expect("expected validation_passed/failed report snapshot for captured mutation_id");
+    assert!(
+        validation_snapshot
+            .get("profile")
+            .and_then(Value::as_str)
+            .is_some(),
+        "validation snapshot should include profile"
+    );
+
+    let capsule_reused_event_detected =
+        detect_capsule_reused_event(&consumer_events, &capture.capsule.id);
+    assert_eq!(capsule_reused_event_detected, decision.used_capsule);
+
+    let success_reuse_verdict = final_reuse_verdict(
+        import.accepted,
+        import.imported_asset_ids.len(),
+        decision.used_capsule,
+        decision.fallback_to_planner,
+        capsule_reused_event_detected,
+    );
+    assert!(success_reuse_verdict);
+    let success_repair_reuse_verdict = repair_reuse_verdict(
+        initial_failure_detected,
+        repair_success,
+        import.accepted,
+        import.imported_asset_ids.len(),
+        decision.used_capsule,
+        decision.fallback_to_planner,
+        capsule_reused_event_detected,
+    );
+    assert!(success_repair_reuse_verdict);
+
     let consumer_projection = consumer_store.rebuild_projection().unwrap();
     assert!(consumer_projection
         .genes
@@ -612,6 +1016,113 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
             realtime_jsonl_path.display()
         ),
     );
+
+    let replay_signals = merge_signals(&fixed_signals, &capture.gene.signals);
+    let memory_graph_events = build_memory_graph_events(
+        realtime_run_id,
+        &replay_signals,
+        &capture.gene.id,
+        &capture.capsule.id,
+        decision.used_capsule && !decision.fallback_to_planner,
+        &decision.reason,
+    );
+    let memory_graph_path = unique_path("memory-graph-events").join("memory_graph_events.jsonl");
+    std::fs::create_dir_all(memory_graph_path.parent().unwrap()).unwrap();
+    write_jsonl_values(&memory_graph_path, &memory_graph_events);
+    let loaded_memory_graph_events = load_jsonl_values(&memory_graph_path);
+    assert_eq!(loaded_memory_graph_events.len(), 4);
+    assert_eq!(
+        loaded_memory_graph_events[0]
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "signal"
+    );
+    assert_eq!(
+        loaded_memory_graph_events[1]
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "gene_selected"
+    );
+    assert_eq!(
+        loaded_memory_graph_events[2]
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "outcome"
+    );
+    assert_eq!(
+        loaded_memory_graph_events[3]
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        "capsule_created"
+    );
+    assert_eq!(
+        loaded_memory_graph_events[1]
+            .get("parent")
+            .and_then(Value::as_str),
+        loaded_memory_graph_events[0]
+            .get("id")
+            .and_then(Value::as_str)
+    );
+    assert_eq!(
+        loaded_memory_graph_events[2]
+            .get("parent")
+            .and_then(Value::as_str),
+        loaded_memory_graph_events[1]
+            .get("id")
+            .and_then(Value::as_str)
+    );
+    assert_eq!(
+        loaded_memory_graph_events[3]
+            .get("parent")
+            .and_then(Value::as_str),
+        loaded_memory_graph_events[2]
+            .get("id")
+            .and_then(Value::as_str)
+    );
+
+    let experience_assets_root = unique_path("experience-assets-repair-flow");
+    std::fs::create_dir_all(&experience_assets_root).unwrap();
+    std::fs::write(experience_assets_root.join("gene.json"), "{}").unwrap();
+    std::fs::write(experience_assets_root.join("capsule.json"), "{}").unwrap();
+    std::fs::write(
+        experience_assets_root.join("evolution_events.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    std::fs::write(experience_assets_root.join("mutation.json"), "{}").unwrap();
+    std::fs::write(experience_assets_root.join("validation_report.json"), "{}").unwrap();
+    std::fs::write(
+        experience_assets_root.join("memory_graph_events.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        experience_assets_root.join("self_repair_trace.json"),
+        serde_json::to_string_pretty(&json!({
+            "initial_failure_detected": initial_failure_detected,
+            "failed_checks": failed_checks,
+            "failure_reason": draft_failure_reason,
+            "repair_applied": true,
+            "repair_success": repair_success,
+            "failed_plan_path": "/tmp/failed-plan.md",
+            "repaired_plan_path": "/tmp/repaired-plan.md"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let manifest = build_test_asset_manifest("run-repair-flow", &experience_assets_root);
+    assert!(manifest
+        .assets
+        .get("self_repair_trace")
+        .map(|entry| entry.exists)
+        .unwrap_or(false));
+    assert!(!manifest
+        .missing_assets
+        .contains(&"self_repair_trace".to_string()));
 }
 
 #[tokio::test]
@@ -782,4 +1293,54 @@ fn four_gate_solidification_only_runs_when_all_conditions_pass() {
             published.assets.len()
         ),
     );
+}
+
+#[test]
+fn final_reuse_verdict_is_false_for_fallback_path() {
+    let verdict = final_reuse_verdict(true, 2, false, true, false);
+    assert!(!verdict);
+    let repair_verdict = repair_reuse_verdict(true, true, true, 2, false, true, false);
+    assert!(!repair_verdict);
+}
+
+#[test]
+fn asset_manifest_marks_missing_assets_without_panicking() {
+    let asset_root = unique_path("experience-assets-manifest");
+    std::fs::create_dir_all(&asset_root).unwrap();
+    std::fs::write(asset_root.join("gene.json"), "{}").unwrap();
+    std::fs::write(asset_root.join("capsule.json"), "{}").unwrap();
+    std::fs::write(asset_root.join("evolution_events.jsonl"), "{}\n").unwrap();
+    std::fs::write(asset_root.join("memory_graph_events.jsonl"), "{}\n").unwrap();
+    // Keep mutation/validation_report absent on purpose to validate missing_assets behavior.
+
+    let manifest = build_test_asset_manifest("run-test", &asset_root);
+    assert_eq!(manifest.assets.len(), 7);
+    assert!(manifest
+        .assets
+        .get("gene")
+        .map(|entry| entry.exists)
+        .unwrap_or(false));
+    assert!(!manifest
+        .assets
+        .get("mutation")
+        .map(|entry| entry.exists)
+        .unwrap_or(true));
+    assert!(manifest.missing_assets.contains(&"mutation".to_string()));
+    assert!(manifest
+        .missing_assets
+        .contains(&"validation_report".to_string()));
+    assert!(manifest
+        .missing_assets
+        .contains(&"self_repair_trace".to_string()));
+
+    let manifest_path = asset_root.join("asset_manifest.json");
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let round_trip: TestAssetManifest =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    assert_eq!(round_trip.assets.len(), 7);
+    assert_eq!(round_trip.missing_assets, manifest.missing_assets);
 }
