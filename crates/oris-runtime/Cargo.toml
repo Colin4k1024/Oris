@@ -33,7 +33,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-oris-execution-runtime = { version = "0.2.14", path = "../oris-execution-runtime", default-features = false }
+oris-execution-runtime = { version = "0.2.15", path = "../oris-execution-runtime", default-features = false }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel", default-features = false }
 oris-evokernel = { version = "0.7.0", path = "../oris-evokernel", optional = true }
 scraper = "0.21"
