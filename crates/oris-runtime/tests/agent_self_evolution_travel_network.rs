@@ -608,6 +608,20 @@ fn detect_capsule_reused_event(records: &[Value], capsule_id: &str) -> bool {
     })
 }
 
+fn collect_promotion_reason_codes(records: &[Value]) -> BTreeSet<String> {
+    records
+        .iter()
+        .filter(|record| event_kind(record) == Some("promotion_evaluated"))
+        .filter_map(|record| {
+            record
+                .get("event")
+                .and_then(|event| event.get("reason_code"))
+                .and_then(Value::as_str)
+                .map(|value| value.to_string())
+        })
+        .collect()
+}
+
 fn final_reuse_verdict(
     import_accepted: bool,
     imported_asset_count: usize,
@@ -953,7 +967,14 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
 
     let capsule_reused_event_detected =
         detect_capsule_reused_event(&consumer_events, &capture.capsule.id);
+    let promotion_reason_codes = collect_promotion_reason_codes(&consumer_events);
     assert_eq!(capsule_reused_event_detected, decision.used_capsule);
+    assert!(promotion_reason_codes.contains("downgrade_remote_requires_local_validation"));
+    assert!(promotion_reason_codes.contains("promotion_remote_replay_validated"));
+    append_audit_log(
+        &audit_log,
+        format!("[STEP] promotion reason_codes={:?}", promotion_reason_codes),
+    );
 
     let success_reuse_verdict = final_reuse_verdict(
         import.accepted,

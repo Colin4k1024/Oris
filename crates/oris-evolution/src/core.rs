@@ -50,6 +50,27 @@ pub enum CandidateSource {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionReasonCode {
+    #[default]
+    Unspecified,
+    PromotionSuccessThreshold,
+    PromotionRemoteReplayValidated,
+    PromotionBuiltinColdStartCompatibility,
+    PromotionTrustedLocalReport,
+    RevalidationConfidenceDecay,
+    DowngradeReplayRegression,
+    DowngradeConfidenceRegression,
+    DowngradeRemoteRequiresLocalValidation,
+    DowngradeBootstrapRequiresLocalValidation,
+    DowngradeBuiltinRequiresValidation,
+    CandidateRateLimited,
+    CandidateCoolingWindow,
+    CandidateBlastRadiusExceeded,
+    CandidateCollectingEvidence,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlastRadius {
     pub files_changed: usize,
     pub lines_changed: usize,
@@ -217,6 +238,8 @@ pub enum EvolutionEvent {
         gene_id: GeneId,
         state: AssetState,
         reason: String,
+        #[serde(default)]
+        reason_code: TransitionReasonCode,
     },
     RemoteAssetImported {
         source: CandidateSource,

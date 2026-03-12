@@ -21,7 +21,7 @@ use oris_evokernel::{
 };
 use oris_evolution::{
     compute_artifact_hash, rebuild_projection_from_events, stable_hash_json, EvolutionEvent,
-    PreparedMutation, StoredEvolutionEvent,
+    PreparedMutation, StoredEvolutionEvent, TransitionReasonCode,
 };
 use oris_governor::{DefaultGovernor, GovernorConfig};
 use oris_kernel::{
@@ -691,7 +691,7 @@ async fn single_task_learns_and_replays_on_second_run() {
 async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
     let _audit =
         TestAuditGuard::new("replay_feedback_surfaces_planner_hints_and_reasoning_savings");
-    let (workspace, _store, evo) = test_evo("replay-feedback");
+    let (workspace, store, evo) = test_evo("replay-feedback");
     let signals = vec!["missing readme".to_string()];
 
     let cold_start = evo
@@ -724,6 +724,7 @@ async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
         .await
         .unwrap();
     let replay_feedback = EvoKernel::<TestState>::replay_feedback_for_agent(&signals, &replay);
+    let events = store.scan(1).unwrap();
 
     assert_eq!(
         replay_feedback.planner_directive,
@@ -735,6 +736,17 @@ async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
     assert_eq!(replay_feedback.fallback_reason, None);
     assert_eq!(replay_feedback.task_class_id, cold_feedback.task_class_id);
     assert_eq!(replay_feedback.task_label, "missing readme");
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::PromotionEvaluated {
+            gene_id,
+            state,
+            reason_code,
+            ..
+        } if gene_id == &captured.gene_id
+            && *state == EvoAssetState::Promoted
+            && reason_code == &TransitionReasonCode::PromotionSuccessThreshold
+    )));
 }
 
 #[tokio::test]
@@ -1031,9 +1043,15 @@ async fn stale_confidence_forces_revalidation_before_replay() {
     assert_eq!(projection.capsules[0].state, EvoAssetState::Quarantined);
     assert!(events.iter().any(|stored| matches!(
         &stored.event,
-        EvolutionEvent::PromotionEvaluated { gene_id, state, reason }
+        EvolutionEvent::PromotionEvaluated {
+            gene_id,
+            state,
+            reason,
+            reason_code,
+        }
             if gene_id == &gene.id
                 && *state == EvoAssetState::Quarantined
+                && reason_code == &TransitionReasonCode::RevalidationConfidenceDecay
                 && reason.contains("confidence decayed")
     )));
     assert_eq!(metrics.confidence_revalidations_total, 1);
@@ -1695,6 +1713,16 @@ async fn local_capture_uses_existing_confidence_context_for_governor() {
     assert_eq!(second.capsule.state, EvoAssetState::Revoked);
     let events = store.scan(1).unwrap();
     let metrics = evo.metrics_snapshot().unwrap();
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::PromotionEvaluated {
+            gene_id,
+            state: EvoAssetState::Revoked,
+            reason_code,
+            ..
+        } if gene_id == &second.gene.id
+            && reason_code == &TransitionReasonCode::DowngradeConfidenceRegression
+    )));
     assert!(events.iter().any(|stored| matches!(
         &stored.event,
         EvolutionEvent::GeneRevoked { gene_id, .. } if gene_id == &second.gene.id

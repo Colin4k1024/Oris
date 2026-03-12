@@ -1,4 +1,4 @@
-use oris_evolution::{AssetState, BlastRadius, CandidateSource};
+use oris_evolution::{AssetState, BlastRadius, CandidateSource, TransitionReasonCode};
 use oris_governor::{DefaultGovernor, Governor, GovernorConfig, GovernorInput, RevocationReason};
 
 fn input(
@@ -36,6 +36,10 @@ fn replay_failures_revoke_before_promotion() {
         decision.revocation_reason,
         Some(RevocationReason::ReplayRegression)
     ));
+    assert_eq!(
+        decision.reason_code,
+        TransitionReasonCode::DowngradeReplayRegression
+    );
     assert_eq!(decision.cooling_window.unwrap().cooldown_secs, 45);
 }
 
@@ -47,6 +51,10 @@ fn blast_radius_limit_blocks_promotion_at_success_threshold() {
 
     assert_eq!(decision.target_state, AssetState::Candidate);
     assert!(decision.reason.contains("blast radius"));
+    assert_eq!(
+        decision.reason_code,
+        TransitionReasonCode::CandidateBlastRadiusExceeded
+    );
 }
 
 #[test]
@@ -60,6 +68,10 @@ fn promotion_threshold_emits_configured_cooling_window() {
     let decision = governor.evaluate(input(2, 1, 10, 0));
 
     assert_eq!(decision.target_state, AssetState::Promoted);
+    assert_eq!(
+        decision.reason_code,
+        TransitionReasonCode::PromotionSuccessThreshold
+    );
     assert_eq!(decision.cooling_window.unwrap().cooldown_secs, 42);
 }
 
@@ -78,6 +90,10 @@ fn mutation_rate_limit_returns_window_cooldown() {
 
     assert_eq!(decision.target_state, AssetState::Candidate);
     assert!(decision.reason.contains("rate limit"));
+    assert_eq!(
+        decision.reason_code,
+        TransitionReasonCode::CandidateRateLimited
+    );
     assert_eq!(decision.cooling_window.unwrap().cooldown_secs, 35);
 }
 
@@ -94,6 +110,10 @@ fn cooling_window_blocks_rapid_repromotion_attempts() {
 
     assert_eq!(decision.target_state, AssetState::Candidate);
     assert!(decision.reason.contains("cooling"));
+    assert_eq!(
+        decision.reason_code,
+        TransitionReasonCode::CandidateCoolingWindow
+    );
     assert_eq!(decision.cooling_window.unwrap().cooldown_secs, 60);
 }
 
@@ -118,5 +138,9 @@ fn confidence_decay_can_trigger_regression_revocation() {
         decision.revocation_reason,
         Some(RevocationReason::ReplayRegression)
     ));
+    assert_eq!(
+        decision.reason_code,
+        TransitionReasonCode::DowngradeConfidenceRegression
+    );
     assert_eq!(decision.cooling_window.unwrap().cooldown_secs, 30);
 }

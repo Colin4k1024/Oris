@@ -20,7 +20,7 @@ use oris_evolution::{
     BlastRadius, CandidateSource, Capsule, CapsuleId, EnvFingerprint, EvolutionError,
     EvolutionEvent, EvolutionProjection, EvolutionStore, Gene, GeneCandidate, MutationId,
     PreparedMutation, Selector, SelectorInput, StoreBackedSelector, StoredEvolutionEvent,
-    ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
+    TransitionReasonCode, ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -38,7 +38,7 @@ pub use oris_evolution::{
     BlastRadius as EvoBlastRadius, CandidateSource as EvoCandidateSource,
     EnvFingerprint as EvoEnvFingerprint, EvolutionStore as EvoEvolutionStore, JsonlEvolutionStore,
     MutationArtifact, MutationIntent, MutationTarget, Outcome, RiskLevel,
-    SelectorInput as EvoSelectorInput,
+    SelectorInput as EvoSelectorInput, TransitionReasonCode as EvoTransitionReasonCode,
 };
 pub use oris_evolution_network::{
     FetchQuery, FetchResponse, MessageType, PublishRequest, RevokeNotice,
@@ -796,6 +796,7 @@ impl StoreReplayExecutor {
                     gene_id: target.gene_id.clone(),
                     state: AssetState::Quarantined,
                     reason: reason.clone(),
+                    reason_code: TransitionReasonCode::RevalidationConfidenceDecay,
                 })
                 .is_err()
             {
@@ -905,6 +906,7 @@ impl StoreReplayExecutor {
                         gene_id: best.gene.id.clone(),
                         state: AssetState::Promoted,
                         reason: "remote asset locally validated via replay".into(),
+                        reason_code: TransitionReasonCode::PromotionRemoteReplayValidated,
                     })
                     .map_err(|err| ReplayError::Store(err.to_string()))?;
                 self.store
@@ -1080,6 +1082,7 @@ impl StoreReplayExecutor {
                     gene_id: best.gene.id.clone(),
                     state: AssetState::Revoked,
                     reason: governor_decision.reason.clone(),
+                    reason_code: governor_decision.reason_code.clone(),
                 })
                 .map_err(|err| ReplayError::Store(err.to_string()))?;
             self.store
@@ -1499,6 +1502,7 @@ impl<S: KernelState> EvoKernel<S> {
                     gene_id: gene.id.clone(),
                     state: AssetState::Quarantined,
                     reason: "bootstrap seeds require local validation before replay".into(),
+                    reason_code: TransitionReasonCode::DowngradeBootstrapRequiresLocalValidation,
                 })
                 .map_err(store_err)?;
             self.store
@@ -1664,6 +1668,7 @@ impl<S: KernelState> EvoKernel<S> {
                 gene_id: gene.id.clone(),
                 state: governor_decision.target_state.clone(),
                 reason: governor_decision.reason.clone(),
+                reason_code: governor_decision.reason_code.clone(),
             })
             .map_err(store_err)?;
         if matches!(governor_decision.target_state, AssetState::Promoted) {
@@ -2817,6 +2822,7 @@ fn import_remote_envelope_into_store(
                         gene_id: quarantined_gene.id,
                         state: AssetState::Quarantined,
                         reason: "remote asset requires local validation before promotion".into(),
+                        reason_code: TransitionReasonCode::DowngradeRemoteRequiresLocalValidation,
                     })
                     .map_err(store_err)?;
             }
@@ -3556,6 +3562,7 @@ fn ensure_builtin_experience_assets_in_store(
                         reason:
                             "built-in EvoMap asset requires additional validation before promotion"
                                 .into(),
+                        reason_code: TransitionReasonCode::DowngradeBuiltinRequiresValidation,
                     })
                     .map_err(store_err)?;
             }
@@ -3566,6 +3573,7 @@ fn ensure_builtin_experience_assets_in_store(
                         state: AssetState::Promoted,
                         reason: "built-in experience asset promoted for cold-start compatibility"
                             .into(),
+                        reason_code: TransitionReasonCode::PromotionBuiltinColdStartCompatibility,
                     })
                     .map_err(store_err)?;
                 store
@@ -3828,6 +3836,7 @@ fn record_reported_experience_in_store(
             gene_id: gene.id.clone(),
             state: AssetState::Promoted,
             reason: "trusted local report promoted reusable experience".into(),
+            reason_code: TransitionReasonCode::PromotionTrustedLocalReport,
         })
         .map_err(store_err)?;
     store
@@ -4344,9 +4353,16 @@ fn is_replay_validation_failure(event: &EvolutionEvent) -> bool {
 fn is_confidence_revalidation_event(event: &EvolutionEvent) -> bool {
     matches!(
         event,
-        EvolutionEvent::PromotionEvaluated { state, reason, .. }
+        EvolutionEvent::PromotionEvaluated {
+            state,
+            reason,
+            reason_code,
+            ..
+        }
             if *state == AssetState::Quarantined
-                && reason.contains("confidence decayed")
+                && (reason_code == &TransitionReasonCode::RevalidationConfidenceDecay
+                    || (reason_code == &TransitionReasonCode::Unspecified
+                        && reason.contains("confidence decayed")))
     )
 }
 

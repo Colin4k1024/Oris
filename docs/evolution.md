@@ -103,7 +103,13 @@ Main enums/structs:
   - `PromotionEvaluated`
 - Federation/spec metadata:
   - `RemoteAssetImported`
+  - `ManifestValidated`
   - `SpecLinked`
+
+`PromotionEvaluated` includes both:
+
+- `reason` (human-readable explanation)
+- `reason_code` (`TransitionReasonCode`, machine-readable and stable for regression/audit)
 
 Stored records use:
 

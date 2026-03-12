@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use oris_evolution::{AssetState, BlastRadius, CandidateSource};
+use oris_evolution::{AssetState, BlastRadius, CandidateSource, TransitionReasonCode};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GovernorConfig {
@@ -63,6 +63,8 @@ pub struct GovernorInput {
 pub struct GovernorDecision {
     pub target_state: AssetState,
     pub reason: String,
+    #[serde(default)]
+    pub reason_code: TransitionReasonCode,
     pub cooling_window: Option<CoolingWindow>,
     pub revocation_reason: Option<RevocationReason>,
 }
@@ -142,6 +144,7 @@ impl Governor for DefaultGovernor {
             return GovernorDecision {
                 target_state: AssetState::Revoked,
                 reason: "replay validation failures exceeded threshold".into(),
+                reason_code: TransitionReasonCode::DowngradeReplayRegression,
                 cooling_window: self.cooling_window_for(self.config.retry_cooldown_secs),
                 revocation_reason: Some(RevocationReason::ReplayRegression),
             };
@@ -156,6 +159,7 @@ impl Governor for DefaultGovernor {
             return GovernorDecision {
                 target_state: AssetState::Revoked,
                 reason: "confidence regression exceeded threshold".into(),
+                reason_code: TransitionReasonCode::DowngradeConfidenceRegression,
                 cooling_window: self.cooling_window_for(self.config.retry_cooldown_secs),
                 revocation_reason: Some(RevocationReason::ReplayRegression),
             };
@@ -165,6 +169,7 @@ impl Governor for DefaultGovernor {
             return GovernorDecision {
                 target_state: AssetState::Candidate,
                 reason: "mutation rate limit exceeded".into(),
+                reason_code: TransitionReasonCode::CandidateRateLimited,
                 cooling_window: self.cooling_window_for(cooldown_secs),
                 revocation_reason: None,
             };
@@ -174,6 +179,7 @@ impl Governor for DefaultGovernor {
             return GovernorDecision {
                 target_state: AssetState::Candidate,
                 reason: "cooling window active after recent mutation".into(),
+                reason_code: TransitionReasonCode::CandidateCoolingWindow,
                 cooling_window: self.cooling_window_for(cooldown_secs),
                 revocation_reason: None,
             };
@@ -185,6 +191,7 @@ impl Governor for DefaultGovernor {
             return GovernorDecision {
                 target_state: AssetState::Candidate,
                 reason: "blast radius exceeds promotion threshold".into(),
+                reason_code: TransitionReasonCode::CandidateBlastRadiusExceeded,
                 cooling_window: self.cooling_window_for(self.config.retry_cooldown_secs),
                 revocation_reason: None,
             };
@@ -194,6 +201,7 @@ impl Governor for DefaultGovernor {
             return GovernorDecision {
                 target_state: AssetState::Promoted,
                 reason: "success threshold reached".into(),
+                reason_code: TransitionReasonCode::PromotionSuccessThreshold,
                 cooling_window: Some(CoolingWindow {
                     cooldown_secs: self.config.cooldown_secs,
                 }),
@@ -204,6 +212,7 @@ impl Governor for DefaultGovernor {
         GovernorDecision {
             target_state: AssetState::Candidate,
             reason: "collecting more successful executions".into(),
+            reason_code: TransitionReasonCode::CandidateCollectingEvidence,
             cooling_window: None,
             revocation_reason: None,
         }
