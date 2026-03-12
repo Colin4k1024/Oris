@@ -20,6 +20,7 @@ Add incremental GEP synchronization primitives so peers can pull deltas with res
 - cargo publish -p oris-evolution --registry crates-io
 - cargo publish -p oris-governor --registry crates-io
 - cargo publish -p oris-sandbox --registry crates-io
+- cargo publish -p oris-spec --registry crates-io
 - cargo publish -p oris-evolution-network --registry crates-io
 - cargo publish -p oris-evokernel --registry crates-io
 - cargo publish -p oris-runtime --all-features --dry-run --registry crates-io
