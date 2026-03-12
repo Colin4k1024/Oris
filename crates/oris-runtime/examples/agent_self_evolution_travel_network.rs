@@ -1611,6 +1611,8 @@ fn migrate_sources_to_latest(
         match latest_node.accept_publish_request(&PublishRequest {
             sender_id: envelope.sender_id.clone(),
             assets: envelope.assets.clone(),
+            since_cursor: None,
+            resume_token: None,
         }) {
             Ok(outcome) => {
                 summary.import_success_sources += 1;
@@ -2895,6 +2897,8 @@ async fn main() -> ExampleResult<()> {
         &FetchQuery {
             sender_id: "agent-consumer".to_string(),
             signals: normalized_selector_signals(),
+            since_cursor: None,
+            resume_token: None,
         },
     )?;
     let experience_summary = experience_summary_from_fetch(
@@ -3135,6 +3139,8 @@ async fn main() -> ExampleResult<()> {
         let producer_sync = latest_producer_node.accept_publish_request(&PublishRequest {
             sender_id: envelope.sender_id.clone(),
             assets: envelope.assets.clone(),
+            since_cursor: None,
+            resume_token: None,
         })?;
         solidification_summary.producer_latest_sync_imported_asset_ids =
             producer_sync.imported_asset_ids.len();

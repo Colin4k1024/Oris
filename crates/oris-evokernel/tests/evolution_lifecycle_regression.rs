@@ -1936,6 +1936,8 @@ fn builtin_evomap_assets_are_fetchable() {
             &oris_evokernel::FetchQuery {
                 sender_id: "compat-agent".into(),
                 signals: vec!["error".into()],
+                since_cursor: None,
+                resume_token: None,
             },
         )
         .unwrap();

@@ -52,18 +52,45 @@ pub struct EnvelopeManifest {
 pub struct PublishRequest {
     pub sender_id: String,
     pub assets: Vec<NetworkAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FetchQuery {
     pub sender_id: String,
     pub signals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncAudit {
+    pub batch_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_cursor: Option<String>,
+    pub scanned_count: usize,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FetchResponse {
     pub sender_id: String,
     pub assets: Vec<NetworkAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<String>,
+    #[serde(default)]
+    pub sync_audit: SyncAudit,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

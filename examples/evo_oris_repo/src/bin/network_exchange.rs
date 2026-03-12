@@ -102,6 +102,8 @@ async fn main() -> ExampleResult<()> {
         &FetchQuery {
             sender_id: "node-b".into(),
             signals: imported_gene_signals,
+            since_cursor: None,
+            resume_token: None,
         },
     )?;
     println!(

@@ -22,7 +22,7 @@ use oris_evolution::{
     PreparedMutation, Selector, SelectorInput, StoreBackedSelector, StoredEvolutionEvent,
     TransitionReasonCode, ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
 };
-use oris_evolution_network::{EvolutionEnvelope, NetworkAsset};
+use oris_evolution_network::{EvolutionEnvelope, NetworkAsset, SyncAudit};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
 use oris_kernel::{Kernel, KernelState, RunId};
 use oris_sandbox::{
@@ -1235,6 +1235,12 @@ pub struct CaptureOutcome {
 pub struct ImportOutcome {
     pub imported_asset_ids: Vec<String>,
     pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_token: Option<String>,
+    #[serde(default)]
+    pub sync_audit: SyncAudit,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1284,10 +1290,16 @@ impl EvolutionNetworkNode {
         &self,
         request: &PublishRequest,
     ) -> Result<ImportOutcome, EvoKernelError> {
+        let requested_cursor = resolve_requested_cursor(
+            &request.sender_id,
+            request.since_cursor.as_deref(),
+            request.resume_token.as_deref(),
+        )?;
         import_remote_envelope_into_store(
             self.store.as_ref(),
             &EvolutionEnvelope::publish(request.sender_id.clone(), request.assets.clone()),
             None,
+            requested_cursor,
         )
     }
 
@@ -1884,6 +1896,7 @@ impl<S: KernelState> EvoKernel<S> {
             self.store.as_ref(),
             envelope,
             Some(self.remote_publishers.as_ref()),
+            None,
         )
     }
 
@@ -2742,10 +2755,138 @@ fn replay_export_events_for_mutations(
     assets
 }
 
+const SYNC_CURSOR_PREFIX: &str = "seq:";
+const SYNC_RESUME_TOKEN_PREFIX: &str = "gep-rt1|";
+
+#[derive(Clone, Debug)]
+struct DeltaWindow {
+    changed_gene_ids: BTreeSet<String>,
+    changed_capsule_ids: BTreeSet<String>,
+    changed_mutation_ids: BTreeSet<String>,
+}
+
+fn normalize_sync_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_sync_cursor_seq(cursor: &str) -> Option<u64> {
+    let trimmed = cursor.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let raw = trimmed.strip_prefix(SYNC_CURSOR_PREFIX).unwrap_or(trimmed);
+    raw.parse::<u64>().ok()
+}
+
+fn format_sync_cursor(seq: u64) -> String {
+    format!("{SYNC_CURSOR_PREFIX}{seq}")
+}
+
+fn encode_resume_token(sender_id: &str, cursor: &str) -> String {
+    format!("{SYNC_RESUME_TOKEN_PREFIX}{sender_id}|{cursor}")
+}
+
+fn decode_resume_token(sender_id: &str, token: &str) -> Result<String, EvoKernelError> {
+    let token = token.trim();
+    let Some(encoded) = token.strip_prefix(SYNC_RESUME_TOKEN_PREFIX) else {
+        return Ok(token.to_string());
+    };
+    let (token_sender, cursor) = encoded.split_once('|').ok_or_else(|| {
+        EvoKernelError::Validation(
+            "invalid resume_token format; expected gep-rt1|<sender>|<seq>".into(),
+        )
+    })?;
+    if token_sender != sender_id.trim() {
+        return Err(EvoKernelError::Validation(
+            "resume_token sender mismatch".into(),
+        ));
+    }
+    Ok(cursor.to_string())
+}
+
+fn resolve_requested_cursor(
+    sender_id: &str,
+    since_cursor: Option<&str>,
+    resume_token: Option<&str>,
+) -> Result<Option<String>, EvoKernelError> {
+    let cursor = if let Some(token) = normalize_sync_value(resume_token) {
+        Some(decode_resume_token(sender_id, &token)?)
+    } else {
+        normalize_sync_value(since_cursor)
+    };
+
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let seq = parse_sync_cursor_seq(&cursor).ok_or_else(|| {
+        EvoKernelError::Validation("invalid since_cursor/resume_token cursor format".into())
+    })?;
+    Ok(Some(format_sync_cursor(seq)))
+}
+
+fn latest_store_cursor(store: &dyn EvolutionStore) -> Result<Option<String>, EvoKernelError> {
+    let events = store.scan(1).map_err(store_err)?;
+    Ok(events.last().map(|stored| format_sync_cursor(stored.seq)))
+}
+
+fn delta_window(events: &[StoredEvolutionEvent], since_seq: u64) -> DeltaWindow {
+    let mut changed_gene_ids = BTreeSet::new();
+    let mut changed_capsule_ids = BTreeSet::new();
+    let mut changed_mutation_ids = BTreeSet::new();
+
+    for stored in events {
+        if stored.seq <= since_seq {
+            continue;
+        }
+        match &stored.event {
+            EvolutionEvent::MutationDeclared { mutation } => {
+                changed_mutation_ids.insert(mutation.intent.id.clone());
+            }
+            EvolutionEvent::SpecLinked { mutation_id, .. } => {
+                changed_mutation_ids.insert(mutation_id.clone());
+            }
+            EvolutionEvent::GeneProjected { gene } => {
+                changed_gene_ids.insert(gene.id.clone());
+            }
+            EvolutionEvent::GenePromoted { gene_id }
+            | EvolutionEvent::GeneRevoked { gene_id, .. }
+            | EvolutionEvent::PromotionEvaluated { gene_id, .. } => {
+                changed_gene_ids.insert(gene_id.clone());
+            }
+            EvolutionEvent::CapsuleCommitted { capsule } => {
+                changed_capsule_ids.insert(capsule.id.clone());
+                changed_gene_ids.insert(capsule.gene_id.clone());
+                changed_mutation_ids.insert(capsule.mutation_id.clone());
+            }
+            EvolutionEvent::CapsuleReleased { capsule_id, .. }
+            | EvolutionEvent::CapsuleQuarantined { capsule_id } => {
+                changed_capsule_ids.insert(capsule_id.clone());
+            }
+            EvolutionEvent::RemoteAssetImported { asset_ids, .. } => {
+                for asset_id in asset_ids {
+                    changed_gene_ids.insert(asset_id.clone());
+                    changed_capsule_ids.insert(asset_id.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    DeltaWindow {
+        changed_gene_ids,
+        changed_capsule_ids,
+        changed_mutation_ids,
+    }
+}
+
 fn import_remote_envelope_into_store(
     store: &dyn EvolutionStore,
     envelope: &EvolutionEnvelope,
     remote_publishers: Option<&Mutex<BTreeMap<String, String>>>,
+    requested_cursor: Option<String>,
 ) -> Result<ImportOutcome, EvoKernelError> {
     if !envelope.verify_content_hash() {
         record_manifest_validation(store, envelope, false, "invalid evolution envelope hash")?;
@@ -2795,13 +2936,17 @@ fn import_remote_envelope_into_store(
         }
     }
     let mut imported_asset_ids = Vec::new();
+    let mut applied_count = 0usize;
+    let mut skipped_count = 0usize;
     for asset in &envelope.assets {
         match asset {
             NetworkAsset::Gene { gene } => {
                 if !known_gene_ids.insert(gene.id.clone()) {
+                    skipped_count += 1;
                     continue;
                 }
                 imported_asset_ids.push(gene.id.clone());
+                applied_count += 1;
                 let mut quarantined_gene = gene.clone();
                 quarantined_gene.state = AssetState::Quarantined;
                 store
@@ -2828,9 +2973,11 @@ fn import_remote_envelope_into_store(
             }
             NetworkAsset::Capsule { capsule } => {
                 if !known_capsule_ids.insert(capsule.id.clone()) {
+                    skipped_count += 1;
                     continue;
                 }
                 imported_asset_ids.push(capsule.id.clone());
+                applied_count += 1;
                 store
                     .append_event(EvolutionEvent::RemoteAssetImported {
                         source: CandidateSource::Remote,
@@ -2866,14 +3013,32 @@ fn import_remote_envelope_into_store(
                 };
                 if should_append {
                     store.append_event(event.clone()).map_err(store_err)?;
+                    applied_count += 1;
+                } else {
+                    skipped_count += 1;
                 }
             }
         }
     }
+    let next_cursor = latest_store_cursor(store)?;
+    let resume_token = next_cursor.as_ref().and_then(|cursor| {
+        normalized_sender_id(&envelope.sender_id).map(|sender| encode_resume_token(&sender, cursor))
+    });
 
     Ok(ImportOutcome {
         imported_asset_ids,
         accepted: true,
+        next_cursor: next_cursor.clone(),
+        resume_token,
+        sync_audit: SyncAudit {
+            batch_id: next_id("sync-import"),
+            requested_cursor,
+            scanned_count: envelope.assets.len(),
+            applied_count,
+            skipped_count,
+            failed_count: 0,
+            failure_reasons: Vec::new(),
+        },
     })
 }
 
@@ -3524,7 +3689,7 @@ fn ensure_builtin_experience_assets_in_store(
             known_mutation_ids.insert(mutation.intent.id.clone());
         }
     }
-    let sender_id = normalized_sender_id(&sender_id);
+    let normalized_sender = normalized_sender_id(&sender_id);
     let mut imported_asset_ids = Vec::new();
     // Keep legacy compatibility templates available even when EvoMap snapshots
     // are present, so A2A compatibility fetch flows retain stable builtin IDs.
@@ -3536,6 +3701,7 @@ fn ensure_builtin_experience_assets_in_store(
         bundle.genes.extend(snapshot_bundle.genes);
         bundle.capsules.extend(snapshot_bundle.capsules);
     }
+    let scanned_count = bundle.genes.len() + bundle.capsules.len();
 
     for gene in bundle.genes {
         if !known_gene_ids.insert(gene.id.clone()) {
@@ -3546,7 +3712,7 @@ fn ensure_builtin_experience_assets_in_store(
             .append_event(EvolutionEvent::RemoteAssetImported {
                 source: CandidateSource::Local,
                 asset_ids: vec![gene.id.clone()],
-                sender_id: sender_id.clone(),
+                sender_id: normalized_sender.clone(),
             })
             .map_err(store_err)?;
         store
@@ -3607,7 +3773,7 @@ fn ensure_builtin_experience_assets_in_store(
             .append_event(EvolutionEvent::RemoteAssetImported {
                 source: CandidateSource::Local,
                 asset_ids: vec![seed.capsule.id.clone()],
-                sender_id: sender_id.clone(),
+                sender_id: normalized_sender.clone(),
             })
             .map_err(store_err)?;
         store
@@ -3636,9 +3802,29 @@ fn ensure_builtin_experience_assets_in_store(
         imported_asset_ids.push(seed.capsule.id.clone());
     }
 
+    let next_cursor = latest_store_cursor(store)?;
+    let resume_token = next_cursor.as_ref().and_then(|cursor| {
+        normalized_sender
+            .as_deref()
+            .map(|sender| encode_resume_token(sender, cursor))
+    });
+    let applied_count = imported_asset_ids.len();
+    let skipped_count = scanned_count.saturating_sub(applied_count);
+
     Ok(ImportOutcome {
         imported_asset_ids,
         accepted: true,
+        next_cursor: next_cursor.clone(),
+        resume_token,
+        sync_audit: SyncAudit {
+            batch_id: next_id("sync-import"),
+            requested_cursor: None,
+            scanned_count,
+            applied_count,
+            skipped_count,
+            failed_count: 0,
+            failure_reasons: Vec::new(),
+        },
     })
 }
 
@@ -3819,13 +4005,13 @@ fn record_reported_experience_in_store(
         validation: normalized_validation,
         state: AssetState::Promoted,
     };
-    let sender_id = normalized_sender_id(&sender_id);
+    let normalized_sender = normalized_sender_id(&sender_id);
 
     store
         .append_event(EvolutionEvent::RemoteAssetImported {
             source: CandidateSource::Local,
             asset_ids: vec![gene.id.clone()],
-            sender_id,
+            sender_id: normalized_sender.clone(),
         })
         .map_err(store_err)?;
     store
@@ -3850,9 +4036,27 @@ fn record_reported_experience_in_store(
         REPORTED_EXPERIENCE_RETENTION_LIMIT,
     )?;
 
+    let imported_asset_ids = vec![gene.id];
+    let next_cursor = latest_store_cursor(store)?;
+    let resume_token = next_cursor.as_ref().and_then(|cursor| {
+        normalized_sender
+            .as_deref()
+            .map(|sender| encode_resume_token(sender, cursor))
+    });
     Ok(ImportOutcome {
-        imported_asset_ids: vec![gene.id],
+        imported_asset_ids,
         accepted: true,
+        next_cursor,
+        resume_token,
+        sync_audit: SyncAudit {
+            batch_id: next_id("sync-import"),
+            requested_cursor: None,
+            scanned_count: 1,
+            applied_count: 1,
+            skipped_count: 0,
+            failed_count: 0,
+            failure_reasons: Vec::new(),
+        },
     })
 }
 
@@ -3982,6 +4186,15 @@ fn fetch_assets_from_store(
     query: &FetchQuery,
 ) -> Result<FetchResponse, EvoKernelError> {
     let (events, projection) = scan_projection(store)?;
+    let requested_cursor = resolve_requested_cursor(
+        &query.sender_id,
+        query.since_cursor.as_deref(),
+        query.resume_token.as_deref(),
+    )?;
+    let since_seq = requested_cursor
+        .as_deref()
+        .and_then(parse_sync_cursor_seq)
+        .unwrap_or(0);
     let normalized_signals: Vec<String> = query
         .signals
         .iter()
@@ -4012,12 +4225,52 @@ fn fetch_assets_from_store(
         .filter(|capsule| capsule.state == AssetState::Promoted)
         .filter(|capsule| matched_gene_ids.contains(&capsule.gene_id))
         .collect();
-
-    let assets = replay_export_assets(&events, matched_genes, matched_capsules);
+    let all_assets = replay_export_assets(&events, matched_genes.clone(), matched_capsules.clone());
+    let (selected_genes, selected_capsules) = if requested_cursor.is_some() {
+        let delta = delta_window(&events, since_seq);
+        let selected_capsules = matched_capsules
+            .into_iter()
+            .filter(|capsule| {
+                delta.changed_capsule_ids.contains(&capsule.id)
+                    || delta.changed_mutation_ids.contains(&capsule.mutation_id)
+            })
+            .collect::<Vec<_>>();
+        let selected_gene_ids = selected_capsules
+            .iter()
+            .map(|capsule| capsule.gene_id.clone())
+            .collect::<BTreeSet<_>>();
+        let selected_genes = matched_genes
+            .into_iter()
+            .filter(|gene| {
+                delta.changed_gene_ids.contains(&gene.id) || selected_gene_ids.contains(&gene.id)
+            })
+            .collect::<Vec<_>>();
+        (selected_genes, selected_capsules)
+    } else {
+        (matched_genes, matched_capsules)
+    };
+    let assets = replay_export_assets(&events, selected_genes, selected_capsules);
+    let next_cursor = events.last().map(|stored| format_sync_cursor(stored.seq));
+    let resume_token = next_cursor
+        .as_ref()
+        .map(|cursor| encode_resume_token(&query.sender_id, cursor));
+    let applied_count = assets.len();
+    let skipped_count = all_assets.len().saturating_sub(applied_count);
 
     Ok(FetchResponse {
         sender_id: responder_id.into(),
         assets,
+        next_cursor: next_cursor.clone(),
+        resume_token,
+        sync_audit: SyncAudit {
+            batch_id: next_id("sync-fetch"),
+            requested_cursor,
+            scanned_count: all_assets.len(),
+            applied_count,
+            skipped_count,
+            failed_count: 0,
+            failure_reasons: Vec::new(),
+        },
     })
 }
 
@@ -5555,6 +5808,8 @@ index 0000000..1111111
                 &FetchQuery {
                     sender_id: "node-client".into(),
                     signals: vec!["missing readme".into()],
+                    since_cursor: None,
+                    resume_token: None,
                 },
             )
             .unwrap();
@@ -5576,6 +5831,98 @@ index 0000000..1111111
     }
 
     #[test]
+    fn fetch_assets_delta_sync_supports_since_cursor_and_resume_token() {
+        let store_root =
+            std::env::temp_dir().join(format!("oris-evokernel-fetch-delta-store-{}", next_id("t")));
+        if store_root.exists() {
+            fs::remove_dir_all(&store_root).unwrap();
+        }
+        let store: Arc<dyn EvolutionStore> =
+            Arc::new(oris_evolution::JsonlEvolutionStore::new(&store_root));
+        let node = EvolutionNetworkNode::new(store.clone());
+        node.record_reported_experience(
+            "delta-agent",
+            "gene-delta-a",
+            vec!["delta.signal".into()],
+            vec![
+                "task_class=delta.signal".into(),
+                "task_label=delta replay".into(),
+            ],
+            vec!["a2a.tasks.report".into()],
+        )
+        .unwrap();
+
+        let first = node
+            .fetch_assets(
+                "execution-api",
+                &FetchQuery {
+                    sender_id: "delta-agent".into(),
+                    signals: vec!["delta.signal".into()],
+                    since_cursor: None,
+                    resume_token: None,
+                },
+            )
+            .unwrap();
+        let first_cursor = first.next_cursor.clone().expect("first next_cursor");
+        let first_token = first.resume_token.clone().expect("first resume_token");
+        assert!(first.assets.iter().any(
+            |asset| matches!(asset, NetworkAsset::Gene { gene } if gene.id == "gene-delta-a")
+        ));
+
+        let restarted = EvolutionNetworkNode::new(store.clone());
+        restarted
+            .record_reported_experience(
+                "delta-agent",
+                "gene-delta-b",
+                vec!["delta.signal".into()],
+                vec![
+                    "task_class=delta.signal".into(),
+                    "task_label=delta replay".into(),
+                ],
+                vec!["a2a.tasks.report".into()],
+            )
+            .unwrap();
+
+        let from_token = restarted
+            .fetch_assets(
+                "execution-api",
+                &FetchQuery {
+                    sender_id: "delta-agent".into(),
+                    signals: vec!["delta.signal".into()],
+                    since_cursor: None,
+                    resume_token: Some(first_token),
+                },
+            )
+            .unwrap();
+        assert!(from_token.assets.iter().any(
+            |asset| matches!(asset, NetworkAsset::Gene { gene } if gene.id == "gene-delta-b")
+        ));
+        assert!(!from_token.assets.iter().any(
+            |asset| matches!(asset, NetworkAsset::Gene { gene } if gene.id == "gene-delta-a")
+        ));
+        assert_eq!(
+            from_token.sync_audit.requested_cursor,
+            Some(first_cursor.clone())
+        );
+        assert!(from_token.sync_audit.applied_count >= 1);
+
+        let from_cursor = restarted
+            .fetch_assets(
+                "execution-api",
+                &FetchQuery {
+                    sender_id: "delta-agent".into(),
+                    signals: vec!["delta.signal".into()],
+                    since_cursor: Some(first_cursor),
+                    resume_token: None,
+                },
+            )
+            .unwrap();
+        assert!(from_cursor.assets.iter().any(
+            |asset| matches!(asset, NetworkAsset::Gene { gene } if gene.id == "gene-delta-b")
+        ));
+    }
+
+    #[test]
     fn partial_remote_import_keeps_publisher_for_already_imported_assets() {
         let store_root = std::env::temp_dir().join(format!(
             "oris-evokernel-remote-partial-store-{}",
@@ -5584,7 +5931,7 @@ index 0000000..1111111
         if store_root.exists() {
             fs::remove_dir_all(&store_root).unwrap();
         }
-        let store: Arc<dyn EvolutionStore> = Arc::new(FailOnAppendStore::new(store_root, 4));
+        let store: Arc<dyn EvolutionStore> = Arc::new(FailOnAppendStore::new(store_root, 5));
         let evo = build_test_evo_with_store(
             "remote-partial",
             "run-remote-partial",
@@ -5627,7 +5974,7 @@ index 0000000..1111111
         if store_root.exists() {
             fs::remove_dir_all(&store_root).unwrap();
         }
-        let store: Arc<dyn EvolutionStore> = Arc::new(FailOnAppendStore::new(store_root, 4));
+        let store: Arc<dyn EvolutionStore> = Arc::new(FailOnAppendStore::new(store_root, 5));
         let evo = build_test_evo_with_store(
             "remote-partial-retry",
             "run-remote-partial-retry",
@@ -5813,6 +6160,12 @@ index 0000000..1111111
                 .count(),
             1
         );
+
+        assert_eq!(first.sync_audit.scanned_count, envelope.assets.len());
+        assert_eq!(first.sync_audit.failed_count, 0);
+        assert_eq!(second.sync_audit.applied_count, 0);
+        assert_eq!(second.sync_audit.skipped_count, envelope.assets.len());
+        assert!(second.resume_token.is_some());
     }
 
     #[tokio::test]
@@ -6235,6 +6588,8 @@ index 0000000..1111111
                 &FetchQuery {
                     sender_id: "compat-agent".into(),
                     signals: vec!["error".into()],
+                    since_cursor: None,
+                    resume_token: None,
                 },
             )
             .unwrap();
@@ -6330,6 +6685,8 @@ index 0000000..1111111
                 &FetchQuery {
                     sender_id: "consumer-b".into(),
                     signals: vec!["docs.rewrite".into()],
+                    since_cursor: None,
+                    resume_token: None,
                 },
             )
             .unwrap();

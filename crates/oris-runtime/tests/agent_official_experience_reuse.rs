@@ -698,6 +698,8 @@ async fn official_experience_reuse_with_real_qwen() {
                     "unstable".to_string(),
                     "log_error".to_string(),
                 ],
+                since_cursor: None,
+                resume_token: None,
             },
         )
         .unwrap();

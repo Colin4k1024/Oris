@@ -1313,6 +1313,8 @@ async fn main() -> ExampleResult<()> {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            since_cursor: None,
+            resume_token: None,
         },
     )?;
     if fetched.assets.is_empty() {

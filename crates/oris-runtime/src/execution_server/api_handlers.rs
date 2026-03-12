@@ -2051,6 +2051,10 @@ pub struct A2aCompatFetchRequest {
     #[serde(default)]
     protocol_version: Option<String>,
     #[serde(default)]
+    since_cursor: Option<String>,
+    #[serde(default)]
+    resume_token: Option<String>,
+    #[serde(default)]
     asset_type: Option<String>,
     #[serde(default)]
     local_id: Option<String>,
@@ -2093,6 +2097,11 @@ pub struct A2aCompatFetchTask {
 pub struct A2aCompatFetchResponse {
     sender_id: String,
     assets: Vec<crate::evolution_network::NetworkAsset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_token: Option<String>,
+    sync_audit: crate::evolution_network::SyncAudit,
     #[serde(skip_serializing_if = "Option::is_none")]
     tasks: Option<Vec<A2aCompatFetchTask>>,
 }
@@ -5665,6 +5674,15 @@ pub async fn evolution_a2a_fetch_compat(
         if let Some(assets) = payload.get("assets") {
             root.insert("assets".into(), assets.clone());
         }
+        if let Some(next_cursor) = payload.get("next_cursor") {
+            root.insert("next_cursor".into(), next_cursor.clone());
+        }
+        if let Some(resume_token) = payload.get("resume_token") {
+            root.insert("resume_token".into(), resume_token.clone());
+        }
+        if let Some(sync_audit) = payload.get("sync_audit") {
+            root.insert("sync_audit".into(), sync_audit.clone());
+        }
     }
     Ok(Json(body))
 }
@@ -6010,6 +6028,16 @@ fn compat_fetch_payload(response: &A2aCompatFetchResponse) -> Value {
         "results".into(),
         Value::Array(compat_fetch_results(&response.assets)),
     );
+    if let Some(next_cursor) = response.next_cursor.as_ref() {
+        payload.insert("next_cursor".into(), Value::String(next_cursor.clone()));
+    }
+    if let Some(resume_token) = response.resume_token.as_ref() {
+        payload.insert("resume_token".into(), Value::String(resume_token.clone()));
+    }
+    payload.insert(
+        "sync_audit".into(),
+        serde_json::to_value(&response.sync_audit).unwrap_or_else(|_| Value::Null),
+    );
     Value::Object(payload)
 }
 
@@ -6321,11 +6349,19 @@ pub async fn evolution_a2a_fetch(
             &FetchQuery {
                 sender_id: sender_id.clone(),
                 signals,
+                since_cursor: req.since_cursor.clone(),
+                resume_token: req.resume_token.clone(),
             },
         )
         .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
-
-    let mut assets = fetch.assets;
+    let crate::evolution_network::FetchResponse {
+        sender_id: fetch_sender_id,
+        assets: fetched_assets,
+        next_cursor,
+        resume_token,
+        sync_audit: mut fetch_sync_audit,
+    } = fetch;
+    let mut assets = fetched_assets;
     if requested_asset_type.is_some()
         || requested_local_id.is_some()
         || requested_content_hash.is_some()
@@ -6341,6 +6377,10 @@ pub async fn evolution_a2a_fetch(
             )
         });
     }
+    if assets.len() < fetch_sync_audit.applied_count {
+        fetch_sync_audit.skipped_count += fetch_sync_audit.applied_count - assets.len();
+    }
+    fetch_sync_audit.applied_count = assets.len();
 
     let tasks = if req.include_tasks && !req.search_only {
         Some(list_a2a_fetch_tasks(&state, &sender_id, &protocol_version, &rid).await?)
@@ -6352,8 +6392,11 @@ pub async fn evolution_a2a_fetch(
         meta: ApiMeta::ok(),
         request_id: rid,
         data: A2aCompatFetchResponse {
-            sender_id: fetch.sender_id,
+            sender_id: fetch_sender_id,
             assets,
+            next_cursor,
+            resume_token,
+            sync_audit: fetch_sync_audit,
             tasks,
         },
     }))
@@ -11626,6 +11669,130 @@ mod tests {
                 .as_u64()
                 .expect("lease_expires_at_ms should exist after claim")
                 > 0
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_fetch_returns_sync_cursor_and_supports_resume_token_delta() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        state
+            .evolution_node
+            .record_reported_experience(
+                "compat-delta-agent",
+                "compat-delta-gene-a".to_string(),
+                vec!["compat.delta".into()],
+                vec![
+                    "task_class=compat.delta".into(),
+                    "task_label=Compat delta".into(),
+                ],
+                vec!["a2a.tasks.report".into()],
+            )
+            .expect("seed delta gene a");
+        let router = build_router(state.clone());
+
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "compat-delta-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let first_fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-delta-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "signals": ["compat.delta"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let first_fetch_resp = router.clone().oneshot(first_fetch_req).await.unwrap();
+        assert_eq!(first_fetch_resp.status(), StatusCode::OK);
+        let first_fetch_body = axum::body::to_bytes(first_fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("first fetch body");
+        let first_fetch_json: serde_json::Value =
+            serde_json::from_slice(&first_fetch_body).expect("first fetch json");
+        let first_cursor = first_fetch_json["data"]["next_cursor"]
+            .as_str()
+            .expect("first next_cursor");
+        let first_token = first_fetch_json["data"]["resume_token"]
+            .as_str()
+            .expect("first resume_token");
+        assert_eq!(
+            first_fetch_json["next_cursor"],
+            serde_json::json!(first_cursor)
+        );
+        assert_eq!(
+            first_fetch_json["resume_token"],
+            serde_json::json!(first_token)
+        );
+        assert!(
+            first_fetch_json["payload"]["sync_audit"]["applied_count"]
+                .as_u64()
+                .unwrap_or_default()
+                >= 1
+        );
+
+        state
+            .evolution_node
+            .record_reported_experience(
+                "compat-delta-agent",
+                "compat-delta-gene-b".to_string(),
+                vec!["compat.delta".into()],
+                vec![
+                    "task_class=compat.delta".into(),
+                    "task_label=Compat delta".into(),
+                ],
+                vec!["a2a.tasks.report".into()],
+            )
+            .expect("seed delta gene b");
+
+        let second_fetch_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "compat-delta-agent",
+                    "protocol_version": crate::agent_contract::A2A_PROTOCOL_VERSION_V1,
+                    "signals": ["compat.delta"],
+                    "resume_token": first_token
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let second_fetch_resp = router.clone().oneshot(second_fetch_req).await.unwrap();
+        assert_eq!(second_fetch_resp.status(), StatusCode::OK);
+        let second_fetch_body = axum::body::to_bytes(second_fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("second fetch body");
+        let second_fetch_json: serde_json::Value =
+            serde_json::from_slice(&second_fetch_body).expect("second fetch json");
+        assert_eq!(
+            second_fetch_json["data"]["sync_audit"]["requested_cursor"],
+            serde_json::json!(first_cursor)
+        );
+        assert_eq!(
+            second_fetch_json["data"]["assets"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(second_fetch_json["data"]["assets"][0]["kind"], "gene");
+        assert_eq!(
+            second_fetch_json["data"]["assets"][0]["gene"]["id"],
+            "compat-delta-gene-b"
         );
     }
 
@@ -23544,6 +23711,8 @@ async fn evomap_assets_discovery(
             &FetchQuery {
                 sender_id: sender_id.clone(),
                 signals: fetch_signals.clone(),
+                since_cursor: None,
+                resume_token: None,
             },
         )
         .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.clone()))?;
@@ -26289,6 +26458,8 @@ async fn evomap_fetch_assets_for_sender(
             &FetchQuery {
                 sender_id: sender_id.to_string(),
                 signals: Vec::new(),
+                since_cursor: None,
+                resume_token: None,
             },
         )
         .map_err(|e| ApiError::internal(e.to_string()).with_request_id(rid.to_string()))?;

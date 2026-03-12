@@ -439,6 +439,8 @@ fn migrate_sources_to_latest(
             .accept_publish_request(&PublishRequest {
                 sender_id: envelope.sender_id.clone(),
                 assets: envelope.assets.clone(),
+                since_cursor: None,
+                resume_token: None,
             })
             .unwrap();
         imported_asset_ids += import.imported_asset_ids.len();
@@ -1297,6 +1299,8 @@ fn four_gate_solidification_only_runs_when_all_conditions_pass() {
             &FetchQuery {
                 sender_id: "agent-consumer".to_string(),
                 signals: vec!["travel.longline.beijing-shanghai".to_string()],
+                since_cursor: None,
+                resume_token: None,
             },
         )
         .unwrap();
