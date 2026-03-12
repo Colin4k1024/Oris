@@ -17,6 +17,8 @@ Add incremental GEP synchronization primitives so peers can pull deltas with res
 - cargo test --workspace -- --skip official_experience_reuse_with_real_qwen
 - cargo build --verbose --all --release --all-features
 - cargo test --release --all-features -- --skip official_experience_reuse_with_real_qwen
+- cargo publish -p oris-evolution-network --registry crates-io
+- cargo publish -p oris-evokernel --registry crates-io
 - cargo publish -p oris-runtime --all-features --dry-run --registry crates-io
 - cargo publish -p oris-runtime --all-features --registry crates-io
 
