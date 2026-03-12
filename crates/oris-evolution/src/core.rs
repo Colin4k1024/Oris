@@ -224,6 +224,16 @@ pub enum EvolutionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    ManifestValidated {
+        accepted: bool,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sender_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        publisher: Option<String>,
+        #[serde(default)]
+        asset_ids: Vec<String>,
+    },
     SpecLinked {
         mutation_id: MutationId,
         spec_id: String,

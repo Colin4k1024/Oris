@@ -2743,10 +2743,23 @@ fn import_remote_envelope_into_store(
     remote_publishers: Option<&Mutex<BTreeMap<String, String>>>,
 ) -> Result<ImportOutcome, EvoKernelError> {
     if !envelope.verify_content_hash() {
+        record_manifest_validation(store, envelope, false, "invalid evolution envelope hash")?;
         return Err(EvoKernelError::Validation(
             "invalid evolution envelope hash".into(),
         ));
     }
+    if let Err(reason) = envelope.verify_manifest() {
+        record_manifest_validation(
+            store,
+            envelope,
+            false,
+            format!("manifest validation failed: {reason}"),
+        )?;
+        return Err(EvoKernelError::Validation(format!(
+            "invalid evolution envelope manifest: {reason}"
+        )));
+    }
+    record_manifest_validation(store, envelope, true, "manifest validated")?;
 
     let sender_id = normalized_sender_id(&envelope.sender_id);
     let (events, projection) = scan_projection(store)?;
@@ -3841,6 +3854,33 @@ fn normalized_sender_id(sender_id: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn record_manifest_validation(
+    store: &dyn EvolutionStore,
+    envelope: &EvolutionEnvelope,
+    accepted: bool,
+    reason: impl Into<String>,
+) -> Result<(), EvoKernelError> {
+    let manifest = envelope.manifest.as_ref();
+    let sender_id = manifest
+        .and_then(|value| normalized_sender_id(&value.sender_id))
+        .or_else(|| normalized_sender_id(&envelope.sender_id));
+    let publisher = manifest.and_then(|value| normalized_sender_id(&value.publisher));
+    let asset_ids = manifest
+        .map(|value| value.asset_ids.clone())
+        .unwrap_or_else(|| EvolutionEnvelope::manifest_asset_ids(&envelope.assets));
+
+    store
+        .append_event(EvolutionEvent::ManifestValidated {
+            accepted,
+            reason: reason.into(),
+            sender_id,
+            publisher,
+            asset_ids,
+        })
+        .map_err(store_err)?;
+    Ok(())
 }
 
 fn record_remote_publisher_for_asset(
@@ -5398,6 +5438,88 @@ index 0000000..1111111
 
         assert!(decision.used_capsule);
         assert!(!decision.fallback_to_planner);
+    }
+
+    #[tokio::test]
+    async fn import_remote_envelope_records_manifest_validation_event() {
+        let (source, source_store) = build_test_evo(
+            "remote-manifest-success-source",
+            "run-remote-manifest-success-source",
+            command_validator(),
+        );
+        source
+            .capture_successful_mutation(
+                &"run-remote-manifest-success-source".into(),
+                sample_mutation(),
+            )
+            .await
+            .unwrap();
+        let envelope = EvolutionNetworkNode::new(source_store.clone())
+            .publish_local_assets("node-source")
+            .unwrap();
+
+        let (remote, remote_store) = build_test_evo(
+            "remote-manifest-success-remote",
+            "run-remote-manifest-success-remote",
+            command_validator(),
+        );
+        remote.import_remote_envelope(&envelope).unwrap();
+
+        let events = remote_store.scan(1).unwrap();
+        assert!(events.iter().any(|stored| matches!(
+            &stored.event,
+            EvolutionEvent::ManifestValidated {
+                accepted: true,
+                reason,
+                sender_id: Some(sender_id),
+                publisher: Some(publisher),
+                asset_ids,
+            } if reason == "manifest validated"
+                && sender_id == "node-source"
+                && publisher == "node-source"
+                && !asset_ids.is_empty()
+        )));
+    }
+
+    #[test]
+    fn import_remote_envelope_rejects_invalid_manifest_and_records_audit_event() {
+        let (remote, remote_store) = build_test_evo(
+            "remote-manifest-invalid",
+            "run-remote-manifest-invalid",
+            command_validator(),
+        );
+        let mut envelope = remote_publish_envelope(
+            "node-remote",
+            "run-remote-manifest-invalid",
+            "gene-remote",
+            "capsule-remote",
+            "mutation-remote",
+            "manifest-signal",
+            "MANIFEST.md",
+            "# drift",
+        );
+        if let Some(manifest) = envelope.manifest.as_mut() {
+            manifest.asset_hash = "tampered-hash".to_string();
+        }
+        envelope.content_hash = envelope.compute_content_hash();
+
+        let error = remote.import_remote_envelope(&envelope).unwrap_err();
+        assert!(error.to_string().contains("manifest"));
+
+        let events = remote_store.scan(1).unwrap();
+        assert!(events.iter().any(|stored| matches!(
+            &stored.event,
+            EvolutionEvent::ManifestValidated {
+                accepted: false,
+                reason,
+                sender_id: Some(sender_id),
+                publisher: Some(publisher),
+                asset_ids,
+            } if reason.contains("manifest asset_hash mismatch")
+                && sender_id == "node-remote"
+                && publisher == "node-remote"
+                && !asset_ids.is_empty()
+        )));
     }
 
     #[tokio::test]

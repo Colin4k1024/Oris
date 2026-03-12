@@ -1107,6 +1107,7 @@ async fn remote_learning_requires_local_validation_before_becoming_shareable() {
     let (consumer_workspace, consumer) =
         test_evo_with_store("self-evolve-remote-consumer", consumer_store.clone());
     let import = consumer.import_remote_envelope(&publish).unwrap();
+    let events_after_import = consumer_store.scan(1).unwrap();
     let before = consumer_store.rebuild_projection().unwrap();
     let before_publish = oris_evokernel::EvolutionNetworkNode::new(consumer_store.clone())
         .publish_local_assets("node-consumer")
@@ -1114,6 +1115,19 @@ async fn remote_learning_requires_local_validation_before_becoming_shareable() {
 
     assert!(import.accepted);
     assert!(!import.imported_asset_ids.is_empty());
+    assert!(events_after_import.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::ManifestValidated {
+            accepted: true,
+            reason,
+            sender_id: Some(sender_id),
+            publisher: Some(publisher),
+            asset_ids,
+        } if reason == "manifest validated"
+            && sender_id == "node-producer"
+            && publisher == "node-producer"
+            && !asset_ids.is_empty()
+    )));
     let quarantined_gene = before
         .genes
         .iter()
