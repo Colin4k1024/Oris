@@ -14,8 +14,10 @@ Strengthen GEP envelope/schema compatibility validation so protocol mismatch and
 - cargo test -p oris-evolution --lib
 - cargo build --verbose --all --release --all-features
 - cargo test --release --all-features
-- cargo publish -p oris-runtime --all-features --dry-run
-- cargo publish -p oris-runtime --all-features
+- cargo publish -p oris-execution-runtime --dry-run --registry crates-io
+- cargo publish -p oris-execution-runtime --registry crates-io
+- cargo publish -p oris-runtime --all-features --dry-run --registry crates-io
+- cargo publish -p oris-runtime --all-features --registry crates-io
 
 ## Links
 
