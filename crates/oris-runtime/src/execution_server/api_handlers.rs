@@ -824,11 +824,361 @@ const GEP_A2A_PROTOCOL_VERSION: &str = "1.0.0";
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+const GEP_A2A_SCHEMA_PROFILE_CURRENT: &str = "gep-a2a-envelope-schema@1";
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+const GEP_A2A_SCHEMA_PROFILE_LEGACY: &str = "gep-a2a-envelope-schema@0";
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, serde::Serialize)]
+struct GepA2aNegotiationEvidence {
+    protocol_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sender_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_hash: Option<String>,
+    schema_mode: String,
+    requested_capabilities: Vec<String>,
+    negotiated_capabilities: Vec<String>,
+    downgraded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    downgrade_reason: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn capability_to_gep_wire_name(capability: &A2aCapability) -> &'static str {
+    match capability {
+        A2aCapability::Coordination => "coordination",
+        A2aCapability::SupervisedDevloop => "supervised_devloop",
+        A2aCapability::ReplayFeedback => "replay_feedback",
+        A2aCapability::EvolutionFetch => "evolution_fetch",
+        A2aCapability::EvolutionPublish => "evolution_publish",
+        A2aCapability::EvolutionRevoke => "evolution_revoke",
+        A2aCapability::MutationProposal => "mutation_proposal",
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn capability_from_gep_wire_name(value: &str) -> Option<A2aCapability> {
+    let normalized = value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "coordination" => Some(A2aCapability::Coordination),
+        "superviseddevloop" => Some(A2aCapability::SupervisedDevloop),
+        "replayfeedback" => Some(A2aCapability::ReplayFeedback),
+        "evolutionfetch" => Some(A2aCapability::EvolutionFetch),
+        "evolutionpublish" => Some(A2aCapability::EvolutionPublish),
+        "evolutionrevoke" => Some(A2aCapability::EvolutionRevoke),
+        "mutationproposal" => Some(A2aCapability::MutationProposal),
+        _ => None,
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn dedup_capabilities(input: Vec<A2aCapability>) -> Vec<A2aCapability> {
+    let mut deduped = Vec::new();
+    for capability in input {
+        if !deduped.contains(&capability) {
+            deduped.push(capability);
+        }
+    }
+    deduped
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn parse_gep_capabilities_field(
+    capabilities: Option<&Value>,
+    rid: &str,
+) -> Result<Vec<A2aCapability>, ApiError> {
+    let Some(capabilities) = capabilities else {
+        return Ok(Vec::new());
+    };
+
+    let mut parsed = Vec::new();
+    match capabilities {
+        Value::Array(items) => {
+            for item in items {
+                let Some(raw_name) = item.as_str() else {
+                    return Err(ApiError::bad_request(
+                        "invalid gep-a2a capabilities: expected string items",
+                    )
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "a2a_error_code": A2aErrorCode::ValidationFailed
+                    })));
+                };
+                let Some(capability) = capability_from_gep_wire_name(raw_name) else {
+                    return Err(ApiError::bad_request("unsupported gep-a2a capability")
+                        .with_request_id(rid.to_string())
+                        .with_details(serde_json::json!({
+                            "a2a_error_code": A2aErrorCode::UnsupportedCapability,
+                            "actual_capability": raw_name
+                        })));
+                };
+                parsed.push(capability);
+            }
+        }
+        Value::Object(items) => {
+            for (name, enabled) in items {
+                let is_enabled = enabled.as_bool().ok_or_else(|| {
+                    ApiError::bad_request("invalid gep-a2a capability flag")
+                        .with_request_id(rid.to_string())
+                        .with_details(serde_json::json!({
+                            "a2a_error_code": A2aErrorCode::ValidationFailed,
+                            "capability": name
+                        }))
+                })?;
+                if !is_enabled {
+                    continue;
+                }
+                let Some(capability) = capability_from_gep_wire_name(name) else {
+                    return Err(ApiError::bad_request("unsupported gep-a2a capability")
+                        .with_request_id(rid.to_string())
+                        .with_details(serde_json::json!({
+                            "a2a_error_code": A2aErrorCode::UnsupportedCapability,
+                            "actual_capability": name
+                        })));
+                };
+                parsed.push(capability);
+            }
+        }
+        _ => {
+            return Err(ApiError::bad_request(
+                "invalid gep-a2a capabilities: expected array or object",
+            )
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "a2a_error_code": A2aErrorCode::ValidationFailed
+            })));
+        }
+    }
+    Ok(dedup_capabilities(parsed))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn gep_schema_hash_from_profile(profile: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(profile.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn gep_supported_schema_hashes() -> Vec<String> {
+    vec![
+        gep_schema_hash_from_profile(GEP_A2A_SCHEMA_PROFILE_CURRENT),
+        gep_schema_hash_from_profile(GEP_A2A_SCHEMA_PROFILE_LEGACY),
+    ]
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn legacy_schema_capability_window() -> Vec<A2aCapability> {
+    vec![
+        A2aCapability::Coordination,
+        A2aCapability::SupervisedDevloop,
+        A2aCapability::ReplayFeedback,
+        A2aCapability::EvolutionFetch,
+        A2aCapability::EvolutionPublish,
+    ]
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn normalize_gep_schema_hash(
+    schema_hash: Option<String>,
+    rid: &str,
+) -> Result<(Option<String>, bool, String, Option<String>), ApiError> {
+    let provided = schema_hash
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let current = gep_schema_hash_from_profile(GEP_A2A_SCHEMA_PROFILE_CURRENT);
+    let legacy = gep_schema_hash_from_profile(GEP_A2A_SCHEMA_PROFILE_LEGACY);
+
+    match provided {
+        Some(hash) if hash == current => Ok((Some(hash), false, "current".to_string(), None)),
+        Some(hash) if hash == legacy => Ok((
+            Some(hash),
+            true,
+            "legacy-compat".to_string(),
+            Some("legacy_schema_hash".to_string()),
+        )),
+        Some(hash) => Err(ApiError::bad_request("unsupported gep-a2a schema hash")
+            .with_request_id(rid.to_string())
+            .with_details(serde_json::json!({
+                "a2a_error_code": A2aErrorCode::UnsupportedProtocol,
+                "expected_schema_hashes": gep_supported_schema_hashes(),
+                "actual_schema_hash": hash
+            }))),
+        None => Ok((
+            None,
+            true,
+            "legacy-compat".to_string(),
+            Some("missing_schema_hash_compat_window".to_string()),
+        )),
+    }
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn negotiate_gep_capabilities(
+    requested: &[A2aCapability],
+    legacy_schema_window: bool,
+    rid: &str,
+) -> Result<(Vec<A2aCapability>, bool, Option<String>), ApiError> {
+    if requested.is_empty() {
+        return Ok((Vec::new(), legacy_schema_window, None));
+    }
+
+    let runtime_caps = runtime_a2a_capabilities();
+    let mut negotiated = runtime_caps
+        .into_iter()
+        .filter(|capability| requested.contains(capability))
+        .collect::<Vec<_>>();
+    if negotiated.is_empty() {
+        return Err(
+            ApiError::bad_request("unsupported compatibility capabilities")
+                .with_request_id(rid.to_string())
+                .with_details(serde_json::json!({
+                    "a2a_error_code": A2aErrorCode::UnsupportedCapability,
+                    "requested_capabilities": requested
+                        .iter()
+                        .map(capability_to_gep_wire_name)
+                        .collect::<Vec<_>>(),
+                    "supported_capabilities": runtime_a2a_capabilities()
+                        .iter()
+                        .map(capability_to_gep_wire_name)
+                        .collect::<Vec<_>>(),
+                })),
+        );
+    }
+
+    let mut downgrade_reasons = Vec::new();
+    if negotiated.len() < requested.len() {
+        downgrade_reasons.push("runtime_capability_intersection");
+    }
+
+    if legacy_schema_window {
+        let legacy_window = legacy_schema_capability_window();
+        let before = negotiated.len();
+        negotiated.retain(|capability| legacy_window.contains(capability));
+        if negotiated.is_empty() {
+            return Err(
+                ApiError::bad_request("legacy schema capability window rejected request")
+                    .with_request_id(rid.to_string())
+                    .with_details(serde_json::json!({
+                        "a2a_error_code": A2aErrorCode::UnsupportedCapability,
+                        "legacy_supported_capabilities": legacy_window
+                            .iter()
+                            .map(capability_to_gep_wire_name)
+                            .collect::<Vec<_>>(),
+                    })),
+            );
+        }
+        if negotiated.len() < before {
+            downgrade_reasons.push("legacy_schema_compatibility_window");
+        }
+    }
+
+    let downgraded = !downgrade_reasons.is_empty();
+    let downgrade_reason = if downgraded {
+        Some(downgrade_reasons.join(","))
+    } else {
+        None
+    };
+    Ok((negotiated, downgraded, downgrade_reason))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[cfg(feature = "sqlite-persistence")]
+fn append_gep_negotiation_audit_log(
+    state: &ExecutionApiState,
+    sender_id: Option<&str>,
+    endpoint: &str,
+    negotiation: &GepA2aNegotiationEvidence,
+    rid: &str,
+) {
+    let Some(repo) = state.runtime_repo.as_ref() else {
+        return;
+    };
+    let entry = AuditLogEntry {
+        actor_type: "agent".to_string(),
+        actor_id: sender_id.map(|value| value.to_string()),
+        actor_role: None,
+        action: format!("a2a.compat.negotiation.{endpoint}"),
+        resource_type: "sender_id".to_string(),
+        resource_id: sender_id.map(|value| value.to_string()),
+        result: "accepted".to_string(),
+        request_id: rid.to_string(),
+        details_json: serde_json::to_string(negotiation).ok(),
+    };
+    let _ = repo.append_audit_log(&entry);
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[cfg(not(feature = "sqlite-persistence"))]
+fn append_gep_negotiation_audit_log(
+    _state: &ExecutionApiState,
+    _sender_id: Option<&str>,
+    _endpoint: &str,
+    _negotiation: &GepA2aNegotiationEvidence,
+    _rid: &str,
+) {
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 #[derive(Clone, Debug, serde::Deserialize)]
 struct GepA2aEnvelope<T> {
     protocol: String,
     #[serde(default)]
     protocol_version: Option<String>,
+    #[serde(default)]
+    schema_hash: Option<String>,
+    #[serde(default)]
+    capabilities: Option<Value>,
     #[serde(default)]
     message_type: Option<String>,
     #[serde(default)]
@@ -860,7 +1210,7 @@ fn parse_gep_envelope_or_plain<T>(
     raw: Value,
     expected_message_type: Option<&str>,
     rid: &str,
-) -> Result<T, ApiError>
+) -> Result<(T, Option<GepA2aNegotiationEvidence>), ApiError>
 where
     T: DeserializeOwned + GepA2aEnvelopeCompatible,
 {
@@ -869,10 +1219,11 @@ where
         .map(|obj| obj.contains_key("protocol") && obj.contains_key("payload"))
         .unwrap_or(false);
     if !is_envelope {
-        return serde_json::from_value(raw).map_err(|e| {
+        let req = serde_json::from_value(raw).map_err(|e| {
             ApiError::bad_request(format!("invalid compatibility payload: {e}"))
                 .with_request_id(rid.to_string())
-        });
+        })?;
+        return Ok((req, None));
     }
 
     let envelope: GepA2aEnvelope<Value> = serde_json::from_value(raw).map_err(|e| {
@@ -915,6 +1266,50 @@ where
         }
     }
 
+    let requested_capabilities = {
+        let parsed = parse_gep_capabilities_field(envelope.capabilities.as_ref(), rid)?;
+        if parsed.is_empty() {
+            runtime_a2a_capabilities()
+        } else {
+            parsed
+        }
+    };
+    let (schema_hash, legacy_schema_window, schema_mode, schema_downgrade_reason) =
+        normalize_gep_schema_hash(envelope.schema_hash.clone(), rid)?;
+    let (negotiated_capabilities, capabilities_downgraded, capabilities_downgrade_reason) =
+        negotiate_gep_capabilities(&requested_capabilities, legacy_schema_window, rid)?;
+    let mut downgrade_reasons = Vec::new();
+    if let Some(reason) = schema_downgrade_reason {
+        downgrade_reasons.push(reason);
+    }
+    if let Some(reason) = capabilities_downgrade_reason {
+        downgrade_reasons.push(reason);
+    }
+    let sender = envelope.sender_id.clone().or(envelope.node_id.clone());
+    let negotiation = GepA2aNegotiationEvidence {
+        protocol_version: envelope_protocol_version.clone(),
+        message_type: envelope.message_type.clone(),
+        sender_id: sender.clone(),
+        schema_hash,
+        schema_mode,
+        requested_capabilities: requested_capabilities
+            .iter()
+            .map(capability_to_gep_wire_name)
+            .map(str::to_string)
+            .collect(),
+        negotiated_capabilities: negotiated_capabilities
+            .iter()
+            .map(capability_to_gep_wire_name)
+            .map(str::to_string)
+            .collect(),
+        downgraded: legacy_schema_window || capabilities_downgraded,
+        downgrade_reason: if downgrade_reasons.is_empty() {
+            None
+        } else {
+            Some(downgrade_reasons.join(","))
+        },
+    };
+
     let payload = envelope.payload.ok_or_else(|| {
         ApiError::bad_request("gep-a2a envelope payload is required")
             .with_request_id(rid.to_string())
@@ -929,7 +1324,6 @@ where
                 "a2a_error_code": A2aErrorCode::ValidationFailed
             }))
     })?;
-    let sender = envelope.sender_id.or(envelope.node_id);
     if req
         .sender_id_mut()
         .as_ref()
@@ -949,23 +1343,27 @@ where
     if req.protocol_version_mut().is_none() {
         *req.protocol_version_mut() = Some(envelope_protocol_version);
     }
-    Ok(req)
+    Ok((req, Some(negotiation)))
 }
 
 #[cfg(all(
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
-fn parse_gep_hello_or_plain(raw: Value, rid: &str) -> Result<A2aHandshakeRequest, ApiError> {
+fn parse_gep_hello_or_plain(
+    raw: Value,
+    rid: &str,
+) -> Result<(A2aHandshakeRequest, Option<GepA2aNegotiationEvidence>), ApiError> {
     let maybe_obj = raw.as_object();
     let is_envelope = maybe_obj
         .map(|obj| obj.contains_key("protocol") && obj.contains_key("payload"))
         .unwrap_or(false);
     if !is_envelope {
-        return serde_json::from_value(raw).map_err(|e| {
+        let req = serde_json::from_value(raw).map_err(|e| {
             ApiError::bad_request(format!("invalid hello payload: {e}"))
                 .with_request_id(rid.to_string())
-        });
+        })?;
+        return Ok((req, None));
     }
 
     let envelope: GepA2aEnvelope<Value> = serde_json::from_value(raw).map_err(|e| {
@@ -1005,6 +1403,7 @@ fn parse_gep_hello_or_plain(raw: Value, rid: &str) -> Result<A2aHandshakeRequest
                 "actual_message_type": envelope.message_type
             })));
     }
+    let payload = envelope.payload.unwrap_or_else(|| serde_json::json!({}));
     let sender_id = envelope.sender_id.or(envelope.node_id).ok_or_else(|| {
         ApiError::bad_request("sender_id must be present in gep-a2a hello envelope")
             .with_request_id(rid.to_string())
@@ -1012,69 +1411,58 @@ fn parse_gep_hello_or_plain(raw: Value, rid: &str) -> Result<A2aHandshakeRequest
                 "a2a_error_code": A2aErrorCode::ValidationFailed
             }))
     })?;
-    let payload = envelope.payload.unwrap_or_else(|| serde_json::json!({}));
-    let capabilities_from_payload = payload
-        .get("capabilities")
-        .and_then(|value| value.as_object())
-        .map(|caps| {
-            let mut mapped = Vec::new();
-            if caps
-                .get("coordination")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                mapped.push(A2aCapability::Coordination);
-            }
-            if caps
-                .get("supervised_devloop")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                mapped.push(A2aCapability::SupervisedDevloop);
-            }
-            if caps
-                .get("replay_feedback")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                mapped.push(A2aCapability::ReplayFeedback);
-            }
-            if caps
-                .get("evolution_fetch")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                mapped.push(A2aCapability::EvolutionFetch);
-            }
-            if caps
-                .get("evolution_publish")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                mapped.push(A2aCapability::EvolutionPublish);
-            }
-            if caps
-                .get("evolution_revoke")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-            {
-                mapped.push(A2aCapability::EvolutionRevoke);
-            }
-            mapped
-        })
-        .unwrap_or_default();
-    let advertised_capabilities = if capabilities_from_payload.is_empty() {
-        vec![
+    let mut requested_capabilities =
+        parse_gep_capabilities_field(payload.get("capabilities"), rid)?;
+    requested_capabilities.extend(parse_gep_capabilities_field(
+        envelope.capabilities.as_ref(),
+        rid,
+    )?);
+    requested_capabilities = dedup_capabilities(requested_capabilities);
+    if requested_capabilities.is_empty() {
+        requested_capabilities = vec![
             A2aCapability::Coordination,
             A2aCapability::SupervisedDevloop,
             A2aCapability::ReplayFeedback,
             A2aCapability::EvolutionFetch,
-        ]
-    } else {
-        capabilities_from_payload
+        ];
+    }
+
+    let (schema_hash, legacy_schema_window, schema_mode, schema_downgrade_reason) =
+        normalize_gep_schema_hash(envelope.schema_hash.clone(), rid)?;
+    let (advertised_capabilities, capabilities_downgraded, capabilities_downgrade_reason) =
+        negotiate_gep_capabilities(&requested_capabilities, legacy_schema_window, rid)?;
+    let mut downgrade_reasons = Vec::new();
+    if let Some(reason) = schema_downgrade_reason {
+        downgrade_reasons.push(reason);
+    }
+    if let Some(reason) = capabilities_downgrade_reason {
+        downgrade_reasons.push(reason);
+    }
+    let negotiation = GepA2aNegotiationEvidence {
+        protocol_version: envelope_protocol_version.clone(),
+        message_type: Some("hello".to_string()),
+        sender_id: Some(sender_id.clone()),
+        schema_hash,
+        schema_mode,
+        requested_capabilities: requested_capabilities
+            .iter()
+            .map(capability_to_gep_wire_name)
+            .map(str::to_string)
+            .collect(),
+        negotiated_capabilities: advertised_capabilities
+            .iter()
+            .map(capability_to_gep_wire_name)
+            .map(str::to_string)
+            .collect(),
+        downgraded: legacy_schema_window || capabilities_downgraded,
+        downgrade_reason: if downgrade_reasons.is_empty() {
+            None
+        } else {
+            Some(downgrade_reasons.join(","))
+        },
     };
 
-    Ok(A2aHandshakeRequest {
+    let req = A2aHandshakeRequest {
         agent_id: sender_id,
         role: AgentRole::Planner,
         capability_level: AgentCapabilityLevel::A4,
@@ -1089,7 +1477,8 @@ fn parse_gep_hello_or_plain(raw: Value, rid: &str) -> Result<A2aHandshakeRequest
             },
         ],
         advertised_capabilities,
-    })
+    };
+    Ok((req, Some(negotiation)))
 }
 
 #[cfg(all(
@@ -5187,7 +5576,10 @@ pub async fn evolution_a2a_hello_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_hello_or_plain(raw, &rid)?;
+    let (req, negotiation) = parse_gep_hello_or_plain(raw, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(&state, item.sender_id.as_deref(), "hello", item, &rid);
+    }
     let sender_id = req.agent_id.clone();
     let handshake = evolution_a2a_hello(state.clone(), headers, Json(req)).await?;
     let handshake_envelope = handshake.0;
@@ -5222,6 +5614,7 @@ pub async fn evolution_a2a_hello_compat(
     };
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         if let Some(payload) = payload {
             let payload_value = serde_json::to_value(payload).map_err(|e| {
                 ApiError::internal(format!("serialize hello compat payload: {e}"))
@@ -5252,12 +5645,16 @@ pub async fn evolution_a2a_fetch_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, Some("fetch"), &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, Some("fetch"), &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(&state, item.sender_id.as_deref(), "fetch", item, &rid);
+    }
     state.runtime_metrics.record_a2a_fetch();
     let envelope = evolution_a2a_fetch(state, headers, Json(req)).await?.0;
     let payload = compat_fetch_payload(&envelope.data);
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert("payload".into(), payload.clone());
         if let Some(tasks) = payload.get("tasks") {
             root.insert("tasks".into(), tasks.clone());
@@ -5282,12 +5679,22 @@ pub async fn evolution_a2a_tasks_distribute_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(
+            &state,
+            item.sender_id.as_deref(),
+            "tasks.distribute",
+            item,
+            &rid,
+        );
+    }
     let envelope = evolution_a2a_tasks_distribute(state, headers, Json(req))
         .await?
         .0;
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert(
             "payload".into(),
             serde_json::to_value(&envelope.data).map_err(|e| {
@@ -5309,13 +5716,23 @@ pub async fn evolution_a2a_tasks_claim_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(
+            &state,
+            item.sender_id.as_deref(),
+            "task.claim",
+            item,
+            &rid,
+        );
+    }
     state.runtime_metrics.record_a2a_task_claim();
     let envelope = evolution_a2a_tasks_claim(state, headers, Json(req))
         .await?
         .0;
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert(
             "payload".into(),
             serde_json::to_value(&envelope.data).map_err(|e| {
@@ -5337,12 +5754,22 @@ pub async fn evolution_a2a_tasks_report_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(
+            &state,
+            item.sender_id.as_deref(),
+            "tasks.report",
+            item,
+            &rid,
+        );
+    }
     let envelope = evolution_a2a_tasks_report(state, headers, Json(req))
         .await?
         .0;
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert(
             "payload".into(),
             serde_json::to_value(&envelope.data).map_err(|e| {
@@ -5364,13 +5791,23 @@ pub async fn evolution_a2a_task_complete_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(
+            &state,
+            item.sender_id.as_deref(),
+            "task.complete",
+            item,
+            &rid,
+        );
+    }
     state.runtime_metrics.record_a2a_task_complete();
     let envelope = evolution_a2a_task_complete(state, headers, Json(req))
         .await?
         .0;
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert(
             "payload".into(),
             serde_json::to_value(&envelope.data).map_err(|e| {
@@ -5392,11 +5829,21 @@ pub async fn evolution_a2a_work_claim_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(
+            &state,
+            item.sender_id.as_deref(),
+            "work.claim",
+            item,
+            &rid,
+        );
+    }
     state.runtime_metrics.record_a2a_work_claim();
     let envelope = evolution_a2a_work_claim(state, headers, Json(req)).await?.0;
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert(
             "payload".into(),
             serde_json::to_value(&envelope.data).map_err(|e| {
@@ -5425,13 +5872,23 @@ pub async fn evolution_a2a_work_complete_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(
+            &state,
+            item.sender_id.as_deref(),
+            "work.complete",
+            item,
+            &rid,
+        );
+    }
     state.runtime_metrics.record_a2a_work_complete();
     let envelope = evolution_a2a_work_complete(state, headers, Json(req))
         .await?
         .0;
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert(
             "payload".into(),
             serde_json::to_value(&envelope.data).map_err(|e| {
@@ -5453,11 +5910,21 @@ pub async fn evolution_a2a_heartbeat_compat(
     Json(raw): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let rid = request_id(&headers);
-    let req = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    let (req, negotiation) = parse_gep_envelope_or_plain(raw, None, &rid)?;
+    if let Some(item) = negotiation.as_ref() {
+        append_gep_negotiation_audit_log(
+            &state,
+            item.sender_id.as_deref(),
+            "heartbeat",
+            item,
+            &rid,
+        );
+    }
     state.runtime_metrics.record_a2a_heartbeat();
     let envelope = evolution_a2a_heartbeat(state, headers, Json(req)).await?.0;
     let mut body = compat_envelope_value(&envelope, &rid)?;
     if let Some(root) = body.as_object_mut() {
+        attach_protocol_negotiation(root, negotiation.as_ref(), &rid)?;
         root.insert(
             "payload".into(),
             serde_json::to_value(&envelope.data).map_err(|e| {
@@ -5499,6 +5966,25 @@ fn compat_envelope_value<T: serde::Serialize>(
         ApiError::internal(format!("serialize a2a compatibility envelope: {e}"))
             .with_request_id(rid.to_string())
     })
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+fn attach_protocol_negotiation(
+    root: &mut serde_json::Map<String, Value>,
+    negotiation: Option<&GepA2aNegotiationEvidence>,
+    rid: &str,
+) -> Result<(), ApiError> {
+    if let Some(negotiation) = negotiation {
+        let payload = serde_json::to_value(negotiation).map_err(|e| {
+            ApiError::internal(format!("serialize gep protocol negotiation: {e}"))
+                .with_request_id(rid.to_string())
+        })?;
+        root.insert("protocol_negotiation".into(), payload);
+    }
+    Ok(())
 }
 
 #[cfg(all(
@@ -12712,6 +13198,138 @@ mod tests {
             .as_str()
             .unwrap_or_default();
         assert!(invalid_payload_message.contains("invalid gep-a2a envelope payload"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_fetch_gep_envelope_rejects_unknown_schema_hash_fail_closed() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/fetch")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "schema_hash": "sha256:not-supported",
+                    "capabilities": ["evolution_fetch"],
+                    "message_type": "fetch",
+                    "sender_id": "schema-hash-agent",
+                    "payload": {
+                        "include_tasks": true
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("schema hash body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("schema hash json");
+        assert_eq!(
+            json["error"]["details"]["a2a_error_code"],
+            serde_json::json!("UnsupportedProtocol")
+        );
+        assert_eq!(
+            json["error"]["details"]["actual_schema_hash"],
+            serde_json::json!("sha256:not-supported")
+        );
+        let expected_hashes = json["error"]["details"]["expected_schema_hashes"]
+            .as_array()
+            .expect("expected_schema_hashes array");
+        let current_hash =
+            super::gep_schema_hash_from_profile(super::GEP_A2A_SCHEMA_PROFILE_CURRENT);
+        let legacy_hash = super::gep_schema_hash_from_profile(super::GEP_A2A_SCHEMA_PROFILE_LEGACY);
+        assert!(expected_hashes
+            .iter()
+            .any(|item| item == &serde_json::json!(current_hash)));
+        assert!(expected_hashes
+            .iter()
+            .any(|item| item == &serde_json::json!(legacy_hash)));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn evolution_a2a_hello_gep_envelope_records_legacy_negotiation_downgrade() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let legacy_hash = super::gep_schema_hash_from_profile(super::GEP_A2A_SCHEMA_PROFILE_LEGACY);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "protocol": "gep-a2a",
+                    "protocol_version": "1.0.0",
+                    "schema_hash": legacy_hash,
+                    "capabilities": ["coordination", "supervised_devloop", "evolution_fetch", "mutation_proposal"],
+                    "message_type": "hello",
+                    "sender_id": "hello-negotiation-agent",
+                    "payload": {
+                        "capabilities": {
+                            "coordination": true,
+                            "supervised_devloop": true,
+                            "evolution_fetch": true,
+                            "mutation_proposal": true
+                        }
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("legacy negotiation body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("legacy negotiation json");
+        assert_eq!(json["protocol_negotiation"]["schema_mode"], "legacy-compat");
+        assert_eq!(json["protocol_negotiation"]["downgraded"], true);
+        let requested_caps = json["protocol_negotiation"]["requested_capabilities"]
+            .as_array()
+            .expect("requested caps");
+        assert!(requested_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("mutation_proposal")));
+        let negotiated_caps = json["protocol_negotiation"]["negotiated_capabilities"]
+            .as_array()
+            .expect("negotiated caps");
+        assert!(negotiated_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("coordination")));
+        assert!(negotiated_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("evolution_fetch")));
+        assert!(!negotiated_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("mutation_proposal")));
+        assert!(negotiated_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("supervised_devloop")));
+        let enabled_caps = json["data"]["enabled_capabilities"]
+            .as_array()
+            .expect("enabled capabilities");
+        assert!(enabled_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("Coordination")));
+        assert!(enabled_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("EvolutionFetch")));
+        assert!(!enabled_caps
+            .iter()
+            .any(|item| item == &serde_json::json!("MutationProposal")));
     }
 
     #[cfg(all(
