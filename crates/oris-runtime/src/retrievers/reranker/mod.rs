@@ -8,9 +8,9 @@ mod cohere_reranker;
 #[cfg(feature = "cohere")]
 pub use cohere_reranker::*;
 
-#[cfg(feature = "flashrank")]
+#[cfg(any(feature = "flashrank", test))]
 mod flashrank_reranker;
-#[cfg(feature = "flashrank")]
+#[cfg(any(feature = "flashrank", test))]
 pub use flashrank_reranker::*;
 
 #[cfg(feature = "contextual-ai")]
