@@ -31,6 +31,7 @@ use oris_kernel::{
 };
 use oris_sandbox::Sandbox;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct TestState;
@@ -72,6 +73,24 @@ fn append_audit_log(path: &PathBuf, line: impl AsRef<str>) {
         .unwrap();
     file.write_all(line.as_ref().as_bytes()).unwrap();
     file.write_all(b"\n").unwrap();
+}
+
+fn create_false_positive_snapshot_path(test_name: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::current_dir()
+        .unwrap()
+        .join("target/test-audit/evolution_lifecycle_regression/false-positive-snapshots");
+    fs::create_dir_all(&root).unwrap();
+    root.join(format!("{test_name}-{nonce}.json"))
+}
+
+fn write_false_positive_snapshot(test_name: &str, payload: &Value) -> PathBuf {
+    let path = create_false_positive_snapshot_path(test_name);
+    fs::write(&path, serde_json::to_string_pretty(payload).unwrap()).unwrap();
+    path
 }
 
 struct TestAuditGuard {
@@ -1391,6 +1410,104 @@ async fn mixed_task_sequence_only_replays_for_learned_signals() {
             ))
             .count(),
         hits
+    );
+}
+
+#[tokio::test]
+async fn task_class_false_positive_goldens_keep_false_replay_rate_zero() {
+    let _audit =
+        TestAuditGuard::new("task_class_false_positive_goldens_keep_false_replay_rate_zero");
+    let (workspace, _store, evo) = test_evo("self-evolve-task-class-fp-goldens");
+
+    let captured = evo
+        .capture_successful_mutation(
+            &"run-self-evolve-task-class-fp-goldens".to_string(),
+            sample_mutation_with_id("mutation-self-evolve-task-class-fp-goldens"),
+        )
+        .await
+        .unwrap();
+
+    let goldens = [
+        ("near_signal", "missing readmee"),
+        ("single_token_overlap", "missing cargo"),
+        ("cross_domain_noise", "network timeout in grpc gateway"),
+    ];
+    let total_cases = goldens.len() as u64;
+    let mut false_hits = 0_u64;
+    let mut cases = Vec::<Value>::new();
+
+    for (case_id, signal) in goldens {
+        let input_for_select = replay_input(signal, &workspace);
+        let candidates = evo.select_candidates(&input_for_select);
+        let decision = evo
+            .replay_or_fallback(replay_input(signal, &workspace))
+            .await
+            .unwrap();
+        let feedback =
+            EvoKernel::<TestState>::replay_feedback_for_agent(&[signal.to_string()], &decision);
+
+        let false_hit = !candidates.is_empty() || decision.used_capsule;
+        if false_hit {
+            false_hits += 1;
+        }
+
+        assert!(
+            candidates.is_empty(),
+            "case={case_id} should not produce select candidates"
+        );
+        assert!(
+            !decision.used_capsule,
+            "case={case_id} should not replay-hit capsule_id={:?}",
+            decision.capsule_id
+        );
+        assert!(decision.fallback_to_planner, "case={case_id} must fallback");
+        assert_eq!(decision.reason, "no matching gene", "case={case_id}");
+        assert_eq!(
+            feedback.reason_code,
+            Some(ReplayFallbackReasonCode::NoCandidateAfterSelect),
+            "case={case_id}"
+        );
+        assert_eq!(
+            feedback.planner_directive,
+            ReplayPlannerDirective::PlanFallback,
+            "case={case_id}"
+        );
+        assert_eq!(
+            feedback.next_action,
+            Some(ReplayFallbackNextAction::PlanFromScratch),
+            "case={case_id}"
+        );
+
+        cases.push(json!({
+            "case_id": case_id,
+            "signal": signal,
+            "select_candidates": candidates.len(),
+            "used_capsule": decision.used_capsule,
+            "fallback_to_planner": decision.fallback_to_planner,
+            "reason": decision.reason,
+            "reason_code": feedback.reason_code.map(|code| format!("{:?}", code)),
+            "planner_directive": format!("{:?}", feedback.planner_directive),
+            "next_action": feedback.next_action.map(|action| format!("{:?}", action)),
+        }));
+    }
+
+    let false_replay_rate = false_hits as f64 / total_cases as f64;
+    let payload = json!({
+        "suite": "task-class-false-positive-goldens",
+        "captured_capsule_id": captured.id,
+        "total_cases": total_cases,
+        "false_hits": false_hits,
+        "false_replay_rate": false_replay_rate,
+        "cases": cases,
+    });
+    let snapshot_path =
+        write_false_positive_snapshot("task-class-false-positive-goldens", &payload);
+    assert!(snapshot_path.exists());
+    assert_eq!(
+        false_hits,
+        0,
+        "task-class false-positive drift detected; snapshot={}",
+        snapshot_path.display()
     );
 }
 
