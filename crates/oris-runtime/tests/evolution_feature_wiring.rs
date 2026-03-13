@@ -70,6 +70,10 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::economics::StakePolicy>();
     assert_type::<oris_runtime::evolution::SignalExtractionInput>();
     assert_type::<oris_runtime::evolution::SignalExtractionOutput>();
+    assert_type::<oris_runtime::evolution::ReplayDetectEvidence>();
+    assert_type::<oris_runtime::evolution::ReplayCandidateEvidence>();
+    assert_type::<oris_runtime::evolution::ReplaySelectEvidence>();
+    assert_type::<oris_runtime::evolution::ReplayDecision>();
     assert_type::<oris_runtime::evolution::SeedTemplate>();
     assert_type::<oris_runtime::evolution::BootstrapReport>();
     assert_type::<oris_runtime::evolution::ValidationPlan>();
