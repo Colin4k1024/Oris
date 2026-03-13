@@ -5338,6 +5338,73 @@ fn append_a2a_privilege_audit_log(
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
+#[cfg(feature = "sqlite-persistence")]
+fn append_a2a_replay_feedback_audit_log(
+    state: &ExecutionApiState,
+    sender_id: &str,
+    session_id: &str,
+    task_id: &str,
+    terminal_state: &A2aTaskLifecycleState,
+    replay_feedback: &ReplayFeedback,
+    principal: Option<&A2aSessionPrincipal>,
+    request_id: &str,
+) {
+    let Some(repo) = state.runtime_repo.as_ref() else {
+        return;
+    };
+    let entry = AuditLogEntry {
+        actor_type: principal
+            .map(|p| p.actor_type.clone())
+            .unwrap_or_else(|| "anonymous".to_string()),
+        actor_id: principal.and_then(|p| p.actor_id.clone()),
+        actor_role: principal.map(|p| p.actor_role.clone()),
+        action: "a2a.task_session.directive".to_string(),
+        resource_type: "session".to_string(),
+        resource_id: Some(session_id.to_string()),
+        result: match replay_feedback.planner_directive {
+            ReplayPlannerDirective::SkipPlanner => "skip_planner",
+            ReplayPlannerDirective::PlanFallback => "plan_fallback",
+        }
+        .to_string(),
+        request_id: request_id.to_string(),
+        details_json: serde_json::to_string(&serde_json::json!({
+            "sender_id": sender_id,
+            "task_id": task_id,
+            "terminal_state": terminal_state,
+            "used_capsule": replay_feedback.used_capsule,
+            "planner_directive": replay_feedback.planner_directive,
+            "fallback_reason": replay_feedback.fallback_reason,
+            "reason_code": replay_feedback.reason_code,
+            "repair_hint": replay_feedback.repair_hint,
+            "next_action": replay_feedback.next_action,
+            "confidence": replay_feedback.confidence,
+        }))
+        .ok(),
+    };
+    let _ = repo.append_audit_log(&entry);
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[cfg(not(feature = "sqlite-persistence"))]
+fn append_a2a_replay_feedback_audit_log(
+    _state: &ExecutionApiState,
+    _sender_id: &str,
+    _session_id: &str,
+    _task_id: &str,
+    _terminal_state: &A2aTaskLifecycleState,
+    _replay_feedback: &ReplayFeedback,
+    _principal: Option<&A2aSessionPrincipal>,
+    _request_id: &str,
+) {
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
 async fn ensure_a2a_authorized_action(
     state: &ExecutionApiState,
     sender_id: &str,
@@ -7821,6 +7888,16 @@ pub async fn evolution_a2a_session_complete(
             A2aTaskSessionCompletionResponse { ack, result },
         )
     };
+    append_a2a_replay_feedback_audit_log(
+        &state,
+        &req.sender_id,
+        &session_id,
+        &task_id,
+        &req.terminal_state,
+        &completion_response.result.replay_feedback,
+        principal.as_ref(),
+        &rid,
+    );
 
     match req.terminal_state {
         A2aTaskLifecycleState::Succeeded => {
@@ -16333,6 +16410,23 @@ mod tests {
                 && log.result == "success"
                 && log.request_id == "req-a2a-compat-report-complete"
         }));
+        let directive_log = logs
+            .iter()
+            .find(|log| {
+                log.action == "a2a.task_session.directive"
+                    && log.request_id == "req-a2a-compat-report-complete"
+            })
+            .expect("directive audit log");
+        assert_eq!(directive_log.result, "skip_planner");
+        let details: serde_json::Value = serde_json::from_str(
+            directive_log
+                .details_json
+                .as_deref()
+                .expect("directive audit details"),
+        )
+        .expect("directive details json");
+        assert_eq!(details["planner_directive"], "SkipPlanner");
+        assert_eq!(details["reason_code"], serde_json::Value::Null);
     }
 
     #[cfg(all(
