@@ -9,11 +9,13 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
-    infer_replay_fallback_reason_code, normalize_replay_fallback_contract, AgentRole,
+    infer_mutation_needed_failure_reason_code, infer_replay_fallback_reason_code,
+    normalize_mutation_needed_failure_contract, normalize_replay_fallback_contract, AgentRole,
     BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
-    CoordinationResult, CoordinationTask, ExecutionFeedback,
-    MutationProposal as AgentMutationProposal, ReplayFeedback, ReplayPlannerDirective,
-    SupervisedDevloopOutcome, SupervisedDevloopRequest, SupervisedDevloopStatus,
+    CoordinationResult, CoordinationTask, ExecutionFeedback, MutationNeededFailureContract,
+    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal, ReplayFeedback,
+    ReplayPlannerDirective, SupervisedDevloopOutcome, SupervisedDevloopRequest,
+    SupervisedDevloopStatus,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -170,6 +172,10 @@ const SHADOW_PROMOTION_MIN_DECAYED_CONFIDENCE: f32 = MIN_REPLAY_CONFIDENCE;
 const REPLAY_REASONING_TOKEN_FLOOR: u64 = 192;
 const REPLAY_REASONING_TOKEN_SIGNAL_WEIGHT: u64 = 24;
 const COLD_START_LOOKUP_PENALTY: f32 = 0.05;
+const MUTATION_NEEDED_MAX_DIFF_BYTES: usize = 128 * 1024;
+const MUTATION_NEEDED_MAX_CHANGED_LINES: usize = 600;
+const MUTATION_NEEDED_MAX_SANDBOX_DURATION_MS: u64 = 120_000;
+const MUTATION_NEEDED_MAX_VALIDATION_BUDGET_MS: u64 = 900_000;
 pub const REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS: [&str; 2] =
     ["task_class", "source_sender_id"];
 
@@ -2306,13 +2312,20 @@ impl<S: KernelState> EvoKernel<S> {
         let receipt = match self.sandbox.apply(&mutation, &self.sandbox_policy).await {
             Ok(receipt) => receipt,
             Err(err) => {
+                let message = err.to_string();
+                let contract = mutation_needed_contract_for_error_message(&message);
                 self.store
                     .append_event(EvolutionEvent::MutationRejected {
                         mutation_id: mutation.intent.id.clone(),
-                        reason: err.to_string(),
+                        reason: contract.failure_reason,
+                        reason_code: Some(
+                            mutation_needed_reason_code_key(contract.reason_code).to_string(),
+                        ),
+                        recovery_hint: Some(contract.recovery_hint),
+                        fail_closed: contract.fail_closed,
                     })
                     .map_err(store_err)?;
-                return Err(EvoKernelError::Sandbox(err.to_string()));
+                return Err(EvoKernelError::Sandbox(message));
             }
         };
 
@@ -2328,17 +2341,46 @@ impl<S: KernelState> EvoKernel<S> {
             })
             .map_err(store_err)?;
 
-        let report = self
-            .validator
-            .run(&receipt, &self.validation_plan)
-            .await
-            .map_err(|err| EvoKernelError::Validation(err.to_string()))?;
+        let report = match self.validator.run(&receipt, &self.validation_plan).await {
+            Ok(report) => report,
+            Err(err) => {
+                let message = format!("mutation-needed validation execution error: {err}");
+                let contract = mutation_needed_contract_for_error_message(&message);
+                self.store
+                    .append_event(EvolutionEvent::MutationRejected {
+                        mutation_id: mutation.intent.id.clone(),
+                        reason: contract.failure_reason,
+                        reason_code: Some(
+                            mutation_needed_reason_code_key(contract.reason_code).to_string(),
+                        ),
+                        recovery_hint: Some(contract.recovery_hint),
+                        fail_closed: contract.fail_closed,
+                    })
+                    .map_err(store_err)?;
+                return Err(EvoKernelError::Validation(message));
+            }
+        };
         if !report.success {
             self.store
                 .append_event(EvolutionEvent::ValidationFailed {
                     mutation_id: mutation.intent.id.clone(),
                     report: report.to_snapshot(&self.validation_plan.profile),
                     gene_id: None,
+                })
+                .map_err(store_err)?;
+            let contract = mutation_needed_contract_for_validation_failure(
+                &self.validation_plan.profile,
+                &report,
+            );
+            self.store
+                .append_event(EvolutionEvent::MutationRejected {
+                    mutation_id: mutation.intent.id.clone(),
+                    reason: contract.failure_reason,
+                    reason_code: Some(
+                        mutation_needed_reason_code_key(contract.reason_code).to_string(),
+                    ),
+                    recovery_hint: Some(contract.recovery_hint),
+                    fail_closed: contract.fail_closed,
                 })
                 .map_err(store_err)?;
             return Err(EvoKernelError::ValidationFailed(report));
@@ -2577,6 +2619,48 @@ impl<S: KernelState> EvoKernel<S> {
             summary,
         }
     }
+
+    fn mutation_needed_failure_outcome(
+        &self,
+        request: &SupervisedDevloopRequest,
+        task_class: Option<BoundedTaskClass>,
+        status: SupervisedDevloopStatus,
+        contract: MutationNeededFailureContract,
+        mutation_id_for_audit: Option<String>,
+    ) -> Result<SupervisedDevloopOutcome, EvoKernelError> {
+        if let Some(mutation_id) = mutation_id_for_audit {
+            self.store
+                .append_event(EvolutionEvent::MutationRejected {
+                    mutation_id,
+                    reason: contract.failure_reason.clone(),
+                    reason_code: Some(
+                        mutation_needed_reason_code_key(contract.reason_code).to_string(),
+                    ),
+                    recovery_hint: Some(contract.recovery_hint.clone()),
+                    fail_closed: contract.fail_closed,
+                })
+                .map_err(store_err)?;
+        }
+        let status_label = match status {
+            SupervisedDevloopStatus::AwaitingApproval => "awaiting_approval",
+            SupervisedDevloopStatus::RejectedByPolicy => "rejected_by_policy",
+            SupervisedDevloopStatus::FailedClosed => "failed_closed",
+            SupervisedDevloopStatus::Executed => "executed",
+        };
+        let reason_code_key = mutation_needed_reason_code_key(contract.reason_code);
+        Ok(SupervisedDevloopOutcome {
+            task_id: request.task.id.clone(),
+            task_class,
+            status,
+            execution_feedback: None,
+            failure_contract: Some(contract.clone()),
+            summary: format!(
+                "supervised devloop {status_label} task '{}' [{reason_code_key}]: {}",
+                request.task.id, contract.failure_reason
+            ),
+        })
+    }
+
     pub async fn run_supervised_devloop(
         &self,
         run_id: &RunId,
@@ -2584,18 +2668,23 @@ impl<S: KernelState> EvoKernel<S> {
         diff_payload: String,
         base_revision: Option<String>,
     ) -> Result<SupervisedDevloopOutcome, EvoKernelError> {
+        let audit_mutation_id = mutation_needed_audit_mutation_id(request);
         let task_class = classify_supervised_devloop_request(request);
         let Some(task_class) = task_class else {
-            return Ok(SupervisedDevloopOutcome {
-                task_id: request.task.id.clone(),
-                task_class: None,
-                status: SupervisedDevloopStatus::RejectedByPolicy,
-                execution_feedback: None,
-                summary: format!(
+            let contract = normalize_mutation_needed_failure_contract(
+                Some(&format!(
                     "supervised devloop rejected task '{}' because it is an unsupported task outside the bounded scope",
                     request.task.id
-                ),
-            });
+                )),
+                Some(MutationNeededFailureReasonCode::PolicyDenied),
+            );
+            return self.mutation_needed_failure_outcome(
+                request,
+                None,
+                SupervisedDevloopStatus::RejectedByPolicy,
+                contract,
+                Some(audit_mutation_id),
+            );
         };
 
         if !request.approval.approved {
@@ -2604,6 +2693,7 @@ impl<S: KernelState> EvoKernel<S> {
                 task_class: Some(task_class),
                 status: SupervisedDevloopStatus::AwaitingApproval,
                 execution_feedback: None,
+                failure_contract: None,
                 summary: format!(
                     "supervised devloop paused task '{}' until explicit human approval is granted",
                     request.task.id
@@ -2611,9 +2701,123 @@ impl<S: KernelState> EvoKernel<S> {
             });
         }
 
-        let capture = self
+        if diff_payload.len() > MUTATION_NEEDED_MAX_DIFF_BYTES {
+            let contract = normalize_mutation_needed_failure_contract(
+                Some(&format!(
+                    "mutation-needed diff payload exceeds bounded byte budget (size={}, max={})",
+                    diff_payload.len(),
+                    MUTATION_NEEDED_MAX_DIFF_BYTES
+                )),
+                Some(MutationNeededFailureReasonCode::PolicyDenied),
+            );
+            return self.mutation_needed_failure_outcome(
+                request,
+                Some(task_class),
+                SupervisedDevloopStatus::RejectedByPolicy,
+                contract,
+                Some(audit_mutation_id),
+            );
+        }
+
+        let blast_radius = compute_blast_radius(&diff_payload);
+        if blast_radius.lines_changed > MUTATION_NEEDED_MAX_CHANGED_LINES {
+            let contract = normalize_mutation_needed_failure_contract(
+                Some(&format!(
+                    "mutation-needed patch exceeds bounded changed-line budget (lines_changed={}, max={})",
+                    blast_radius.lines_changed,
+                    MUTATION_NEEDED_MAX_CHANGED_LINES
+                )),
+                Some(MutationNeededFailureReasonCode::UnsafePatch),
+            );
+            return self.mutation_needed_failure_outcome(
+                request,
+                Some(task_class),
+                SupervisedDevloopStatus::FailedClosed,
+                contract,
+                Some(audit_mutation_id),
+            );
+        }
+
+        if self.sandbox_policy.max_duration_ms > MUTATION_NEEDED_MAX_SANDBOX_DURATION_MS {
+            let contract = normalize_mutation_needed_failure_contract(
+                Some(&format!(
+                    "mutation-needed sandbox duration budget exceeds bounded policy (configured={}ms, max={}ms)",
+                    self.sandbox_policy.max_duration_ms,
+                    MUTATION_NEEDED_MAX_SANDBOX_DURATION_MS
+                )),
+                Some(MutationNeededFailureReasonCode::PolicyDenied),
+            );
+            return self.mutation_needed_failure_outcome(
+                request,
+                Some(task_class),
+                SupervisedDevloopStatus::RejectedByPolicy,
+                contract,
+                Some(audit_mutation_id),
+            );
+        }
+
+        let validation_budget_ms = validation_plan_timeout_budget_ms(&self.validation_plan);
+        if validation_budget_ms > MUTATION_NEEDED_MAX_VALIDATION_BUDGET_MS {
+            let contract = normalize_mutation_needed_failure_contract(
+                Some(&format!(
+                    "mutation-needed validation timeout budget exceeds bounded policy (configured={}ms, max={}ms)",
+                    validation_budget_ms,
+                    MUTATION_NEEDED_MAX_VALIDATION_BUDGET_MS
+                )),
+                Some(MutationNeededFailureReasonCode::PolicyDenied),
+            );
+            return self.mutation_needed_failure_outcome(
+                request,
+                Some(task_class),
+                SupervisedDevloopStatus::RejectedByPolicy,
+                contract,
+                Some(audit_mutation_id),
+            );
+        }
+
+        let capture = match self
             .capture_from_proposal(run_id, &request.proposal, diff_payload, base_revision)
-            .await?;
+            .await
+        {
+            Ok(capture) => capture,
+            Err(EvoKernelError::Sandbox(message)) => {
+                let contract = mutation_needed_contract_for_error_message(&message);
+                let status = mutation_needed_status_from_reason_code(contract.reason_code);
+                return self.mutation_needed_failure_outcome(
+                    request,
+                    Some(task_class),
+                    status,
+                    contract,
+                    None,
+                );
+            }
+            Err(EvoKernelError::ValidationFailed(report)) => {
+                let contract = mutation_needed_contract_for_validation_failure(
+                    &self.validation_plan.profile,
+                    &report,
+                );
+                let status = mutation_needed_status_from_reason_code(contract.reason_code);
+                return self.mutation_needed_failure_outcome(
+                    request,
+                    Some(task_class),
+                    status,
+                    contract,
+                    None,
+                );
+            }
+            Err(EvoKernelError::Validation(message)) => {
+                let contract = mutation_needed_contract_for_error_message(&message);
+                let status = mutation_needed_status_from_reason_code(contract.reason_code);
+                return self.mutation_needed_failure_outcome(
+                    request,
+                    Some(task_class),
+                    status,
+                    contract,
+                    None,
+                );
+            }
+            Err(err) => return Err(err),
+        };
         let approver = request
             .approval
             .approver
@@ -2625,6 +2829,7 @@ impl<S: KernelState> EvoKernel<S> {
             task_class: Some(task_class),
             status: SupervisedDevloopStatus::Executed,
             execution_feedback: Some(Self::feedback_for_agent(&capture)),
+            failure_contract: None,
             summary: format!(
                 "supervised devloop executed task '{}' with explicit approval from {approver}",
                 request.task.id
@@ -3265,6 +3470,71 @@ fn is_rust_error_code(value: &str) -> bool {
     value.len() == 5
         && matches!(value.as_bytes().first(), Some(b'e') | Some(b'E'))
         && value[1..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn validation_plan_timeout_budget_ms(plan: &ValidationPlan) -> u64 {
+    plan.stages.iter().fold(0_u64, |acc, stage| match stage {
+        ValidationStage::Command { timeout_ms, .. } => acc.saturating_add(*timeout_ms),
+    })
+}
+
+fn mutation_needed_reason_code_key(reason_code: MutationNeededFailureReasonCode) -> &'static str {
+    match reason_code {
+        MutationNeededFailureReasonCode::PolicyDenied => "policy_denied",
+        MutationNeededFailureReasonCode::ValidationFailed => "validation_failed",
+        MutationNeededFailureReasonCode::UnsafePatch => "unsafe_patch",
+        MutationNeededFailureReasonCode::Timeout => "timeout",
+        MutationNeededFailureReasonCode::MutationPayloadMissing => "mutation_payload_missing",
+        MutationNeededFailureReasonCode::UnknownFailClosed => "unknown_fail_closed",
+    }
+}
+
+fn mutation_needed_status_from_reason_code(
+    reason_code: MutationNeededFailureReasonCode,
+) -> SupervisedDevloopStatus {
+    if matches!(reason_code, MutationNeededFailureReasonCode::PolicyDenied) {
+        SupervisedDevloopStatus::RejectedByPolicy
+    } else {
+        SupervisedDevloopStatus::FailedClosed
+    }
+}
+
+fn mutation_needed_contract_for_validation_failure(
+    profile: &str,
+    report: &ValidationReport,
+) -> MutationNeededFailureContract {
+    let lower_logs = report.logs.to_ascii_lowercase();
+    if lower_logs.contains("timed out") {
+        normalize_mutation_needed_failure_contract(
+            Some(&format!(
+                "mutation-needed validation command timed out under profile '{profile}'"
+            )),
+            Some(MutationNeededFailureReasonCode::Timeout),
+        )
+    } else {
+        normalize_mutation_needed_failure_contract(
+            Some(&format!(
+                "mutation-needed validation failed under profile '{profile}'"
+            )),
+            Some(MutationNeededFailureReasonCode::ValidationFailed),
+        )
+    }
+}
+
+fn mutation_needed_contract_for_error_message(message: &str) -> MutationNeededFailureContract {
+    let reason_code = infer_mutation_needed_failure_reason_code(message);
+    normalize_mutation_needed_failure_contract(Some(message), reason_code)
+}
+
+fn mutation_needed_audit_mutation_id(request: &SupervisedDevloopRequest) -> String {
+    stable_hash_json(&(
+        "mutation-needed-audit",
+        &request.task.id,
+        &request.proposal.intent,
+        &request.proposal.files,
+    ))
+    .map(|hash| format!("mutation-needed-{hash}"))
+    .unwrap_or_else(|_| format!("mutation-needed-{}", request.task.id))
 }
 
 fn classify_supervised_devloop_request(

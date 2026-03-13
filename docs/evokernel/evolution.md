@@ -232,18 +232,30 @@ Release gate evaluator output is deterministic and machine-readable:
 `evidence_refs` always points to metric or threshold dimensions used by each
 check.
 
-## 8.2 Supervised DEVLOOP (Bounded Scope)
+## 8.2 Supervised DEVLOOP (Bounded Scope + Fail-Closed Taxonomy)
 
-The checked-in runtime now exposes `run_supervised_devloop(...)` for one bounded
-task class: a single Markdown file under `docs/`. The flow stays policy-first:
+`run_supervised_devloop(...)` remains bounded to one task class (single
+Markdown file under `docs/`) and now enforces deterministic fail-closed
+constraints before execution:
 
-- classify the incoming proposal into the bounded scope
-- stop immediately if the proposal is outside that scope
-- stop at an explicit human approval boundary when approval is not granted
-- only then reuse the existing proposal capture and validation pipeline
+- reject out-of-scope proposals (`policy_denied`)
+- reject over-budget payload size / validation budget (`policy_denied`)
+- reject oversized or boundary-violating patch shapes (`unsafe_patch`)
+- fail closed on runtime timeout (`timeout`)
+- fail closed on validation failure (`validation_failed`)
 
-This keeps the DEVLOOP supervised and auditable while stopping short of
-autonomous branch, PR, or release behavior.
+The response now carries machine-readable failure metadata through
+`failure_contract`:
+
+- `reason_code`
+- `failure_reason`
+- `recovery_hint`
+- `recovery_action`
+- `fail_closed`
+
+For audit consistency, failure events are also recorded in
+`EvolutionEvent::MutationRejected` with the same `reason_code` and
+`recovery_hint`.
 
 ## 9. Evolution Store Requirements
 
