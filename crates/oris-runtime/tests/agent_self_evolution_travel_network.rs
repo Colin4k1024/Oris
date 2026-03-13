@@ -10,7 +10,8 @@ use oris_runtime::agent_contract::MutationProposal;
 use oris_runtime::evolution::{
     CommandValidator, EvoAssetState, EvoEvolutionStore as EvolutionStore, EvoKernel,
     EvoSandboxPolicy as SandboxPolicy, EvoSelectorInput as SelectorInput, EvolutionNetworkNode,
-    FetchQuery, JsonlEvolutionStore, LocalProcessSandbox, PublishRequest, ValidationPlan,
+    FetchQuery, JsonlEvolutionStore, LocalProcessSandbox, PublishRequest,
+    ReplayRoiReleaseGateStatus, ReplayRoiReleaseGateThresholds, ValidationPlan,
 };
 use oris_runtime::governor::{DefaultGovernor, GovernorConfig};
 use oris_runtime::kernel::{
@@ -530,6 +531,13 @@ fn write_jsonl_values(path: &Path, values: &[Value]) {
         payload.push('\n');
     }
     std::fs::write(path, payload).unwrap();
+}
+
+fn write_json_value(path: &Path, value: &Value) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, serde_json::to_string_pretty(value).unwrap()).unwrap();
 }
 
 fn event_kind(record: &Value) -> Option<&str> {
@@ -1065,6 +1073,17 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     assert!(roi_summary.replay_attempts_total >= 2);
     assert!(roi_summary.replay_success_total >= 1);
     assert!(roi_summary.reasoning_avoided_tokens_total >= 1);
+    let release_gate_contract = consumer_evo
+        .replay_roi_release_gate_contract(24 * 60 * 60, ReplayRoiReleaseGateThresholds::default())
+        .unwrap();
+    assert_eq!(
+        release_gate_contract.output.status,
+        ReplayRoiReleaseGateStatus::FailClosed
+    );
+    assert!(
+        !release_gate_contract.output.failed_checks.is_empty(),
+        "release gate should expose failed checks in demo flow"
+    );
     append_audit_log(
         &audit_log,
         format!(
@@ -1084,6 +1103,45 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
             roi_summary.replay_roi
         ),
     );
+    append_audit_log(
+        &audit_log,
+        format!(
+            "[STEP] release_gate status={:?} failed_checks={:?}",
+            release_gate_contract.output.status, release_gate_contract.output.failed_checks
+        ),
+    );
+    let release_gate_evidence = json!({
+        "gate": "self-evolution-release-gate",
+        "status": release_gate_contract.output.status,
+        "summary": release_gate_contract.output.summary,
+        "failed_checks": release_gate_contract.output.failed_checks,
+        "evidence_refs": release_gate_contract.output.evidence_refs,
+        "window_seconds": release_gate_contract.input.window_seconds,
+        "generated_at": release_gate_contract.input.generated_at,
+        "thresholds": release_gate_contract.input.thresholds,
+        "metrics": {
+            "replay_attempts_total": release_gate_contract.input.replay_attempts_total,
+            "replay_success_total": release_gate_contract.input.replay_success_total,
+            "replay_failure_total": release_gate_contract.input.replay_failure_total,
+            "replay_hit_rate": release_gate_contract.input.replay_hit_rate,
+            "false_replay_rate": release_gate_contract.input.false_replay_rate,
+            "reasoning_avoided_tokens": release_gate_contract.input.reasoning_avoided_tokens,
+            "replay_fallback_cost_total": release_gate_contract.input.replay_fallback_cost_total,
+            "replay_roi": release_gate_contract.input.replay_roi,
+            "replay_safety": release_gate_contract.input.replay_safety
+        }
+    });
+    if let Ok(path) = std::env::var("ORIS_RELEASE_GATE_EVIDENCE_OUT") {
+        let out_path = PathBuf::from(path);
+        write_json_value(&out_path, &release_gate_evidence);
+        append_audit_log(
+            &audit_log,
+            format!(
+                "[PASS] release gate evidence exported path={}",
+                out_path.display()
+            ),
+        );
+    }
     assert!(realtime_log_path.exists());
     assert!(realtime_jsonl_path.exists());
     assert_stub_realtime_logs(&realtime_jsonl_path);
