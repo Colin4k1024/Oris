@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use oris_runtime::agent::middleware::{Middleware, MiddlewareContext, MiddlewareError};
 use oris_runtime::agent::{create_agent_from_llm, UnifiedAgent};
+use oris_runtime::agent_contract::{
+    ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
+};
 use oris_runtime::error::ToolError;
 use oris_runtime::evolution::{
     evaluate_repair_quality_gate, CommandValidator, EvoEvolutionStore as EvolutionStore, EvoKernel,
@@ -516,6 +519,108 @@ fn quality_gate(plan: &str) {
     );
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DirectiveExecutionRoute {
+    ReuseWithoutPlanner,
+    PlanFromScratch,
+    ValidateSignalsThenPlan,
+    RebuildCapsule,
+    RegenerateMutationPayload,
+    RebasePatchAndRetry,
+    RepairAndRevalidate,
+    UnsupportedDirective,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentDirectiveExecution {
+    route: DirectiveExecutionRoute,
+    repair_hint: Option<String>,
+    verification_hint: String,
+    fallback_classification: Option<String>,
+}
+
+fn consume_replay_directive(feedback: &ReplayFeedback) -> AgentDirectiveExecution {
+    match feedback.planner_directive {
+        ReplayPlannerDirective::SkipPlanner => AgentDirectiveExecution {
+            route: DirectiveExecutionRoute::ReuseWithoutPlanner,
+            repair_hint: None,
+            verification_hint: "Run checklist tool to verify reused capsule impact.".to_string(),
+            fallback_classification: None,
+        },
+        ReplayPlannerDirective::PlanFallback => match feedback.next_action {
+            Some(ReplayFallbackNextAction::PlanFromScratch) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::PlanFromScratch,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Generate a minimal patch and run verification checklist."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::ValidateSignalsThenPlan) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::ValidateSignalsThenPlan,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Validate incident signals before generating a patch."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RebuildCapsule) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RebuildCapsule,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Rebuild capsule payload and validate replay boundary."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RegenerateMutationPayload) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RegenerateMutationPayload,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Regenerate mutation payload then validate with checklist tool."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RebasePatchAndRetry) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RebasePatchAndRetry,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Rebase patch, retry replay, and validate regression checks."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RepairAndRevalidate) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RepairAndRevalidate,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint:
+                    "Produce repair mutation and run validation checklist before release."
+                        .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::EscalateFailClosed) | None => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::UnsupportedDirective,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint:
+                    "Directive is not executable; force fail-closed fallback planning.".to_string(),
+                fallback_classification: Some(
+                    "directive_unexecutable_missing_or_escalated_next_action".to_string(),
+                ),
+            },
+        },
+    }
+}
+
+fn directive_guided_prompt(case_text: &str, execution: &AgentDirectiveExecution) -> String {
+    let mut prompt = format!("{}。", case_text.trim());
+    if let Some(repair_hint) = execution.repair_hint.as_deref() {
+        prompt.push_str(&format!(" 优先执行 repair_hint: `{repair_hint}`。"));
+    }
+    prompt.push_str(&format!(
+        " verification_hint: `{}`。",
+        execution.verification_hint
+    ));
+    if let Some(classification) = execution.fallback_classification.as_deref() {
+        prompt.push_str(&format!(
+            " 当前指令不可执行，按 `{classification}` 走 fail-closed 回退。"
+        ));
+    }
+    prompt
+}
+
 #[test]
 fn quality_gate_accepts_semantic_variants() {
     let plan = r#"
@@ -537,6 +642,60 @@ fn quality_gate_rejects_missing_incident_context() {
 回滚方案：git revert HEAD
 "#;
     quality_gate(plan);
+}
+
+#[test]
+fn directive_consumer_maps_fallback_actions_to_execution_routes() {
+    let feedback = ReplayFeedback {
+        used_capsule: false,
+        capsule_id: None,
+        planner_directive: ReplayPlannerDirective::PlanFallback,
+        reasoning_steps_avoided: 0,
+        fallback_reason: Some("replay validation failed".to_string()),
+        reason_code: Some(ReplayFallbackReasonCode::ValidationFailed),
+        repair_hint: Some("produce a repair mutation and rerun validation".to_string()),
+        next_action: Some(ReplayFallbackNextAction::RepairAndRevalidate),
+        confidence: Some(64),
+        task_class_id: "build.fix".to_string(),
+        task_label: "Build fix".to_string(),
+        summary: "fallback".to_string(),
+    };
+    let execution = consume_replay_directive(&feedback);
+    assert_eq!(
+        execution.route,
+        DirectiveExecutionRoute::RepairAndRevalidate
+    );
+    assert!(execution.fallback_classification.is_none());
+    assert!(execution.verification_hint.contains("validation"));
+}
+
+#[test]
+fn directive_consumer_marks_unexecutable_directive_with_fail_closed_classification() {
+    let feedback = ReplayFeedback {
+        used_capsule: false,
+        capsule_id: None,
+        planner_directive: ReplayPlannerDirective::PlanFallback,
+        reasoning_steps_avoided: 0,
+        fallback_reason: Some("unmapped replay fallback reason".to_string()),
+        reason_code: Some(ReplayFallbackReasonCode::UnmappedFallbackReason),
+        repair_hint: Some("manual intervention required".to_string()),
+        next_action: None,
+        confidence: Some(0),
+        task_class_id: "unknown".to_string(),
+        task_label: "Unknown".to_string(),
+        summary: "fallback".to_string(),
+    };
+    let execution = consume_replay_directive(&feedback);
+    assert_eq!(
+        execution.route,
+        DirectiveExecutionRoute::UnsupportedDirective
+    );
+    assert_eq!(
+        execution.fallback_classification.as_deref(),
+        Some("directive_unexecutable_missing_or_escalated_next_action")
+    );
+    let prompt = directive_guided_prompt("处理未知回退", &execution);
+    assert!(prompt.contains("fail-closed"));
 }
 
 fn strategy_value(strategy: &[String], key: &str) -> Option<String> {
@@ -819,7 +978,7 @@ async fn official_experience_reuse_with_real_qwen() {
         .replay_or_fallback_for_run(
             &"test-replay-run".to_string(),
             SelectorInput {
-                signals: merged_signals,
+                signals: merged_signals.clone(),
                 env: official_capsule.env.clone(),
                 spec_id: None,
                 limit: 1,
@@ -827,8 +986,16 @@ async fn official_experience_reuse_with_real_qwen() {
         )
         .await
         .unwrap();
+    let replay_feedback =
+        EvoKernel::<TestState>::replay_feedback_for_agent(&merged_signals, &decision);
+    let directive_execution = consume_replay_directive(&replay_feedback);
     assert!(decision.used_capsule);
     assert!(!decision.fallback_to_planner);
+    assert_eq!(
+        directive_execution.route,
+        DirectiveExecutionRoute::ReuseWithoutPlanner
+    );
+    assert!(directive_execution.fallback_classification.is_none());
     realtime_logger.log_event(
         "worker-node",
         "stage-4",
@@ -837,13 +1004,30 @@ async fn official_experience_reuse_with_real_qwen() {
             "stage": "[4] Worker replay decision",
             "used_capsule": decision.used_capsule,
             "fallback_to_planner": decision.fallback_to_planner,
+            "planner_directive": replay_feedback.planner_directive,
+            "next_action": replay_feedback.next_action,
+            "repair_hint": replay_feedback.repair_hint,
+        }),
+    );
+    realtime_logger.log_event(
+        "worker-node",
+        "stage-4",
+        "directive_consumed",
+        json!({
+            "route": format!("{:?}", directive_execution.route),
+            "verification_hint": &directive_execution.verification_hint,
+            "fallback_classification": &directive_execution.fallback_classification,
         }),
     );
     append_audit_log(
         &audit_log,
         format!(
-            "[STEP] replay used_capsule={} fallback={} reason={}",
-            decision.used_capsule, decision.fallback_to_planner, decision.reason
+            "[STEP] replay used_capsule={} fallback={} reason={} directive={:?} next_action={:?}",
+            decision.used_capsule,
+            decision.fallback_to_planner,
+            decision.reason,
+            replay_feedback.planner_directive,
+            replay_feedback.next_action
         ),
     );
 
@@ -852,9 +1036,10 @@ async fn official_experience_reuse_with_real_qwen() {
         realtime_logger.clone(),
     );
     let plan_a = agent
-        .invoke_messages(vec![Message::new_human_message(
+        .invoke_messages(vec![Message::new_human_message(directive_guided_prompt(
             "处理 case-a：unknown command 'process'。请调用工具并输出四节结构化修复方案。",
-        )])
+            &directive_execution,
+        ))])
         .await
         .unwrap();
     quality_gate(&plan_a);
@@ -873,9 +1058,10 @@ async fn official_experience_reuse_with_real_qwen() {
     );
 
     let plan_b = agent
-        .invoke_messages(vec![Message::new_human_message(
+        .invoke_messages(vec![Message::new_human_message(directive_guided_prompt(
             "处理 case-b：unknown command 'proccess'。请调用工具并输出四节结构化修复方案。",
-        )])
+            &directive_execution,
+        ))])
         .await
         .unwrap();
     quality_gate(&plan_b);
@@ -917,6 +1103,9 @@ async fn official_experience_reuse_with_real_qwen() {
             "used_capsule": decision.used_capsule,
             "fallback_to_planner": decision.fallback_to_planner,
             "reason": decision.reason,
+            "planner_directive": replay_feedback.planner_directive,
+            "next_action": replay_feedback.next_action,
+            "repair_hint": replay_feedback.repair_hint,
             "official_gene_id": official_gene.id,
             "official_capsule_id": official_capsule.id,
             "mutation_id": official_capsule.mutation_id,
