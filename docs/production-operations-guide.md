@@ -199,8 +199,12 @@ Required checklist:
 - contract gate: pass
 - e2e gate: pass
 - backend parity gate (sqlite/postgres): pass, or approved exception recorded
+- self-evolution release gate: pass (`release_gate_status == "pass"`)
 - evidence bundle id from `target/evomap-release-evidence.json` attached to the
   approval record
+- self-evolution evidence from
+  `target/evomap_release_gate/self_evolution_release_gate.json` attached to the
+  same approval record
 
 Do not publish if the release gate summary has `status != "pass"` unless an
 explicit exception is approved and logged with the same evidence bundle id.

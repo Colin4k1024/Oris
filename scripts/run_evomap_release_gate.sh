@@ -12,6 +12,10 @@ SNAPSHOT_DIFF_STATUS="not-run"
 SNAPSHOT_ADDED_COUNT=0
 SNAPSHOT_REMOVED_COUNT=0
 SNAPSHOT_CHANGED_COUNT=0
+RELEASE_GATE_EVIDENCE_FILE="${ARTIFACT_DIR}/self_evolution_release_gate.json"
+RELEASE_GATE_EVIDENCE_OUT_FILE="$(pwd)/${RELEASE_GATE_EVIDENCE_FILE}"
+RELEASE_GATE_STATUS="not-run"
+RELEASE_GATE_FAILED_CHECKS_COUNT=0
 
 mkdir -p "${ARTIFACT_DIR}"
 : > "${LOG_FILE}"
@@ -55,8 +59,36 @@ PY
   IFS='|' read -r SNAPSHOT_DIFF_STATUS SNAPSHOT_ADDED_COUNT SNAPSHOT_REMOVED_COUNT SNAPSHOT_CHANGED_COUNT <<< "${values}"
 }
 
+update_release_gate_metrics() {
+  if [[ ! -f "${RELEASE_GATE_EVIDENCE_OUT_FILE}" ]]; then
+    return 0
+  fi
+
+  local values
+  values="$(
+    python3 - "${RELEASE_GATE_EVIDENCE_OUT_FILE}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+status = str(payload.get("status", "unknown"))
+failed_checks = payload.get("failed_checks")
+if not isinstance(failed_checks, list):
+    failed_checks = []
+
+print(f"{status}|{len(failed_checks)}")
+PY
+  )"
+
+  IFS='|' read -r RELEASE_GATE_STATUS RELEASE_GATE_FAILED_CHECKS_COUNT <<< "${values}"
+}
+
 write_summary() {
   update_snapshot_diff_metrics
+  update_release_gate_metrics
 
   local generated_at
   generated_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -74,7 +106,10 @@ write_summary() {
   "snapshot_diff_status": "${SNAPSHOT_DIFF_STATUS}",
   "snapshot_diff_added_count": ${SNAPSHOT_ADDED_COUNT},
   "snapshot_diff_removed_count": ${SNAPSHOT_REMOVED_COUNT},
-  "snapshot_diff_changed_count": ${SNAPSHOT_CHANGED_COUNT}
+  "snapshot_diff_changed_count": ${SNAPSHOT_CHANGED_COUNT},
+  "release_gate_evidence_file": "${RELEASE_GATE_EVIDENCE_OUT_FILE}",
+  "release_gate_status": "${RELEASE_GATE_STATUS}",
+  "release_gate_failed_checks_count": ${RELEASE_GATE_FAILED_CHECKS_COUNT}
 }
 JSON
 }
@@ -111,6 +146,34 @@ run_step "runtime-audit-core-actions" \
   cargo test -p oris-runtime --features "full-evolution-experimental execution-server sqlite-persistence" \
   execution_server::api_handlers::tests::audit_logs_capture_semantic_protocol_core_actions \
   -- --nocapture --test-threads=1
+
+run_step "runtime-self-evolution-release-gate" \
+  env ORIS_RELEASE_GATE_EVIDENCE_OUT="${RELEASE_GATE_EVIDENCE_OUT_FILE}" \
+  cargo test -p oris-runtime --test agent_self_evolution_travel_network \
+  --features full-evolution-experimental -- --nocapture
+
+run_step "runtime-self-evolution-release-gate-enforce-pass" \
+  python3 - "${RELEASE_GATE_EVIDENCE_OUT_FILE}" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+status = str(payload.get("status", "unknown"))
+if status != "pass":
+    failed_checks = payload.get("failed_checks")
+    if not isinstance(failed_checks, list):
+        failed_checks = []
+    summary = str(payload.get("summary", ""))
+    print(
+        f"[evomap-release-gate] release gate blocked publish status={status} "
+        f"failed_checks={failed_checks} summary={summary}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+PY
 
 run_step "experience-snapshot-export" \
   python3 scripts/export_experience_assets_snapshot.py \
