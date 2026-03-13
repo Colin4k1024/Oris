@@ -249,6 +249,12 @@ pub enum EvolutionEvent {
     MutationRejected {
         mutation_id: MutationId,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recovery_hint: Option<String>,
+        #[serde(default)]
+        fail_closed: bool,
     },
     ValidationPassed {
         mutation_id: MutationId,
@@ -1082,6 +1088,9 @@ mod tests {
             .append_event(EvolutionEvent::MutationRejected {
                 mutation_id: "mutation-1".into(),
                 reason: "no-op".into(),
+                reason_code: None,
+                recovery_hint: None,
+                fail_closed: true,
             })
             .unwrap();
         assert_eq!(first, 1);

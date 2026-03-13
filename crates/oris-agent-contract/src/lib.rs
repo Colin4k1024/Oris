@@ -464,6 +464,93 @@ pub struct ReplayFeedback {
     pub summary: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationNeededFailureReasonCode {
+    PolicyDenied,
+    ValidationFailed,
+    UnsafePatch,
+    Timeout,
+    MutationPayloadMissing,
+    UnknownFailClosed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationNeededRecoveryAction {
+    NarrowScopeAndRetry,
+    RepairAndRevalidate,
+    ProduceSafePatch,
+    ReduceExecutionBudget,
+    RegenerateMutationPayload,
+    EscalateFailClosed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationNeededFailureContract {
+    pub reason_code: MutationNeededFailureReasonCode,
+    pub failure_reason: String,
+    pub recovery_hint: String,
+    pub recovery_action: MutationNeededRecoveryAction,
+    pub fail_closed: bool,
+}
+
+pub fn infer_mutation_needed_failure_reason_code(
+    reason: &str,
+) -> Option<MutationNeededFailureReasonCode> {
+    let normalized = reason.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.contains("mutation payload missing") || normalized == "mutation_payload_missing" {
+        return Some(MutationNeededFailureReasonCode::MutationPayloadMissing);
+    }
+    if normalized.contains("command timed out") || normalized.contains(" timeout") {
+        return Some(MutationNeededFailureReasonCode::Timeout);
+    }
+    if normalized.contains("patch rejected")
+        || normalized.contains("patch apply failed")
+        || normalized.contains("target violation")
+        || normalized.contains("unsafe patch")
+    {
+        return Some(MutationNeededFailureReasonCode::UnsafePatch);
+    }
+    if normalized.contains("validation failed") {
+        return Some(MutationNeededFailureReasonCode::ValidationFailed);
+    }
+    if normalized.contains("command denied by policy")
+        || normalized.contains("rejected task")
+        || normalized.contains("unsupported task outside the bounded scope")
+        || normalized.contains("budget exceeds bounded policy")
+    {
+        return Some(MutationNeededFailureReasonCode::PolicyDenied);
+    }
+    None
+}
+
+pub fn normalize_mutation_needed_failure_contract(
+    failure_reason: Option<&str>,
+    reason_code: Option<MutationNeededFailureReasonCode>,
+) -> MutationNeededFailureContract {
+    let normalized_reason = normalize_optional_text(failure_reason);
+    let resolved_reason_code = reason_code
+        .or_else(|| {
+            normalized_reason
+                .as_deref()
+                .and_then(infer_mutation_needed_failure_reason_code)
+        })
+        .unwrap_or(MutationNeededFailureReasonCode::UnknownFailClosed);
+    let defaults = mutation_needed_failure_defaults(&resolved_reason_code);
+
+    MutationNeededFailureContract {
+        reason_code: resolved_reason_code,
+        failure_reason: normalized_reason.unwrap_or_else(|| defaults.failure_reason.to_string()),
+        recovery_hint: defaults.recovery_hint.to_string(),
+        recovery_action: defaults.recovery_action,
+        fail_closed: true,
+    }
+}
+
 fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     let trimmed = value?.trim();
     if trimmed.is_empty() {
@@ -532,6 +619,55 @@ fn replay_fallback_defaults(reason_code: &ReplayFallbackReasonCode) -> ReplayFal
     }
 }
 
+#[derive(Clone, Copy)]
+struct MutationNeededFailureDefaults {
+    failure_reason: &'static str,
+    recovery_hint: &'static str,
+    recovery_action: MutationNeededRecoveryAction,
+}
+
+fn mutation_needed_failure_defaults(
+    reason_code: &MutationNeededFailureReasonCode,
+) -> MutationNeededFailureDefaults {
+    match reason_code {
+        MutationNeededFailureReasonCode::PolicyDenied => MutationNeededFailureDefaults {
+            failure_reason: "mutation needed denied by bounded execution policy",
+            recovery_hint:
+                "Narrow changed scope to the approved docs boundary and re-run with explicit approval.",
+            recovery_action: MutationNeededRecoveryAction::NarrowScopeAndRetry,
+        },
+        MutationNeededFailureReasonCode::ValidationFailed => MutationNeededFailureDefaults {
+            failure_reason: "mutation needed validation failed",
+            recovery_hint:
+                "Repair mutation and re-run validation to produce a deterministic pass before capture.",
+            recovery_action: MutationNeededRecoveryAction::RepairAndRevalidate,
+        },
+        MutationNeededFailureReasonCode::UnsafePatch => MutationNeededFailureDefaults {
+            failure_reason: "mutation needed rejected unsafe patch",
+            recovery_hint:
+                "Generate a safer minimal diff confined to approved paths and verify patch applicability.",
+            recovery_action: MutationNeededRecoveryAction::ProduceSafePatch,
+        },
+        MutationNeededFailureReasonCode::Timeout => MutationNeededFailureDefaults {
+            failure_reason: "mutation needed execution timed out",
+            recovery_hint:
+                "Reduce execution budget or split the mutation into smaller steps before retrying.",
+            recovery_action: MutationNeededRecoveryAction::ReduceExecutionBudget,
+        },
+        MutationNeededFailureReasonCode::MutationPayloadMissing => MutationNeededFailureDefaults {
+            failure_reason: "mutation payload missing from store",
+            recovery_hint: "Regenerate and persist mutation payload before retrying mutation-needed.",
+            recovery_action: MutationNeededRecoveryAction::RegenerateMutationPayload,
+        },
+        MutationNeededFailureReasonCode::UnknownFailClosed => MutationNeededFailureDefaults {
+            failure_reason: "mutation needed failed with unmapped reason",
+            recovery_hint:
+                "Unknown failure class; fail closed and require explicit maintainer triage before retry.",
+            recovery_action: MutationNeededRecoveryAction::EscalateFailClosed,
+        },
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BoundedTaskClass {
     DocsSingleFile,
@@ -555,6 +691,7 @@ pub struct SupervisedDevloopRequest {
 pub enum SupervisedDevloopStatus {
     AwaitingApproval,
     RejectedByPolicy,
+    FailedClosed,
     Executed,
 }
 
@@ -564,6 +701,8 @@ pub struct SupervisedDevloopOutcome {
     pub task_class: Option<BoundedTaskClass>,
     pub status: SupervisedDevloopStatus,
     pub execution_feedback: Option<ExecutionFeedback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_contract: Option<MutationNeededFailureContract>,
     pub summary: String,
 }
 
@@ -679,6 +818,58 @@ mod tests {
             ReplayFallbackNextAction::EscalateFailClosed
         );
         assert_eq!(contract.confidence, 0);
+    }
+
+    #[test]
+    fn normalize_mutation_needed_failure_contract_maps_policy_denied() {
+        let contract = normalize_mutation_needed_failure_contract(
+            Some("supervised devloop rejected task because it is outside bounded scope"),
+            None,
+        );
+
+        assert_eq!(
+            contract.reason_code,
+            MutationNeededFailureReasonCode::PolicyDenied
+        );
+        assert_eq!(
+            contract.recovery_action,
+            MutationNeededRecoveryAction::NarrowScopeAndRetry
+        );
+        assert!(contract.fail_closed);
+    }
+
+    #[test]
+    fn normalize_mutation_needed_failure_contract_maps_timeout() {
+        let contract = normalize_mutation_needed_failure_contract(
+            Some("command timed out: git apply --check patch.diff"),
+            None,
+        );
+
+        assert_eq!(
+            contract.reason_code,
+            MutationNeededFailureReasonCode::Timeout
+        );
+        assert_eq!(
+            contract.recovery_action,
+            MutationNeededRecoveryAction::ReduceExecutionBudget
+        );
+        assert!(contract.fail_closed);
+    }
+
+    #[test]
+    fn normalize_mutation_needed_failure_contract_fails_closed_for_unknown_reason() {
+        let contract =
+            normalize_mutation_needed_failure_contract(Some("unexpected runner panic"), None);
+
+        assert_eq!(
+            contract.reason_code,
+            MutationNeededFailureReasonCode::UnknownFailClosed
+        );
+        assert_eq!(
+            contract.recovery_action,
+            MutationNeededRecoveryAction::EscalateFailClosed
+        );
+        assert!(contract.fail_closed);
     }
 }
 

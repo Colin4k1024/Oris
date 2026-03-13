@@ -10,9 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
-    AgentTask, BoundedTaskClass, HumanApproval, MutationProposal, ReplayFallbackNextAction,
-    ReplayFallbackReasonCode, ReplayPlannerDirective, SupervisedDevloopRequest,
-    SupervisedDevloopStatus,
+    AgentTask, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
+    ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayPlannerDirective,
+    SupervisedDevloopRequest, SupervisedDevloopStatus,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -302,11 +302,19 @@ fn replay_input(signal: &str, workspace: &std::path::Path) -> EvoSelectorInput {
 }
 
 fn test_evo(label: &str) -> (PathBuf, Arc<JsonlEvolutionStore>, EvoKernel<TestState>) {
+    test_evo_with_policy_and_plan(label, sandbox_policy(), lightweight_plan())
+}
+
+fn test_evo_with_policy_and_plan(
+    label: &str,
+    policy: EvoSandboxPolicy,
+    plan: ValidationPlan,
+) -> (PathBuf, Arc<JsonlEvolutionStore>, EvoKernel<TestState>) {
     let workspace = temp_workspace();
     let sandbox_root = unique_path(&format!("{label}-sandbox"));
     let store_root = unique_path(&format!("{label}-store"));
     let store = Arc::new(JsonlEvolutionStore::new(&store_root));
-    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let validator = Arc::new(CommandValidator::new(policy.clone()));
     let sandbox = Arc::new(LocalProcessSandbox::new(
         format!("run-{label}"),
         &workspace,
@@ -317,8 +325,8 @@ fn test_evo(label: &str) -> (PathBuf, Arc<JsonlEvolutionStore>, EvoKernel<TestSt
             promote_after_successes: 1,
             ..Default::default()
         })))
-        .with_sandbox_policy(sandbox_policy())
-        .with_validation_plan(lightweight_plan());
+        .with_sandbox_policy(policy)
+        .with_validation_plan(plan);
     (workspace, store, evo)
 }
 
@@ -803,6 +811,7 @@ async fn supervised_devloop_executes_bounded_docs_task_after_approval() {
     assert_eq!(outcome.status, SupervisedDevloopStatus::Executed);
     assert_eq!(outcome.task_class, Some(BoundedTaskClass::DocsSingleFile));
     assert!(outcome.execution_feedback.is_some());
+    assert_eq!(outcome.failure_contract, None);
     assert!(outcome.summary.contains("executed"));
     assert!(store
         .scan(1)
@@ -831,6 +840,7 @@ async fn supervised_devloop_stops_before_execution_without_human_approval() {
     assert_eq!(outcome.status, SupervisedDevloopStatus::AwaitingApproval);
     assert_eq!(outcome.task_class, Some(BoundedTaskClass::DocsSingleFile));
     assert_eq!(outcome.execution_feedback, None);
+    assert_eq!(outcome.failure_contract, None);
     assert!(outcome.summary.contains("approval"));
     assert!(store.scan(1).unwrap().is_empty());
 }
@@ -856,8 +866,193 @@ async fn supervised_devloop_rejects_out_of_scope_tasks_without_bypassing_policy(
     assert_eq!(outcome.status, SupervisedDevloopStatus::RejectedByPolicy);
     assert_eq!(outcome.task_class, None);
     assert_eq!(outcome.execution_feedback, None);
+    assert_eq!(
+        outcome
+            .failure_contract
+            .as_ref()
+            .map(|contract| contract.reason_code),
+        Some(MutationNeededFailureReasonCode::PolicyDenied)
+    );
     assert!(outcome.summary.contains("unsupported"));
-    assert!(store.scan(1).unwrap().is_empty());
+    let events = store.scan(1).unwrap();
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::MutationRejected {
+            reason_code: Some(reason_code),
+            fail_closed,
+            ..
+        } if reason_code == "policy_denied" && *fail_closed
+    )));
+}
+
+#[tokio::test]
+async fn supervised_devloop_fails_closed_for_unsafe_patch_and_records_reason_code() {
+    let _audit = TestAuditGuard::new(
+        "supervised_devloop_fails_closed_for_unsafe_patch_and_records_reason_code",
+    );
+    let (_workspace, store, evo) = test_evo("supervised-devloop-unsafe-patch");
+    let request = devloop_request("task-docs-unsafe", "docs/supervised-unsafe.md", true);
+
+    let outcome = evo
+        .run_supervised_devloop(
+            &"run-supervised-devloop-unsafe".to_string(),
+            &request,
+            proposal_diff_for("src/lib.rs", "Unsafe Patch"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, SupervisedDevloopStatus::FailedClosed);
+    assert_eq!(
+        outcome
+            .failure_contract
+            .as_ref()
+            .map(|contract| contract.reason_code),
+        Some(MutationNeededFailureReasonCode::UnsafePatch)
+    );
+    assert!(outcome.summary.contains("unsafe_patch"));
+    assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::MutationRejected {
+            reason_code: Some(reason_code),
+            fail_closed,
+            ..
+        } if reason_code == "unsafe_patch" && *fail_closed
+    )));
+}
+
+#[tokio::test]
+async fn supervised_devloop_fails_closed_on_validation_failure_with_recovery_contract() {
+    let _audit = TestAuditGuard::new(
+        "supervised_devloop_fails_closed_on_validation_failure_with_recovery_contract",
+    );
+    let (_workspace, store, evo) = test_evo_with_policy_and_plan(
+        "supervised-devloop-validation-fail",
+        sandbox_policy(),
+        failing_plan(),
+    );
+    let request = devloop_request("task-docs-validation-fail", "docs/supervised-fail.md", true);
+
+    let outcome = evo
+        .run_supervised_devloop(
+            &"run-supervised-devloop-validation-fail".to_string(),
+            &request,
+            proposal_diff_for("docs/supervised-fail.md", "Validation Fail"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, SupervisedDevloopStatus::FailedClosed);
+    let failure_contract = outcome.failure_contract.as_ref().expect("missing contract");
+    assert_eq!(
+        failure_contract.reason_code,
+        MutationNeededFailureReasonCode::ValidationFailed
+    );
+    assert!(failure_contract.recovery_hint.contains("Repair"));
+    let events = store.scan(1).unwrap();
+    assert!(events
+        .iter()
+        .any(|stored| matches!(&stored.event, EvolutionEvent::ValidationFailed { .. })));
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::MutationRejected {
+            reason_code: Some(reason_code),
+            fail_closed,
+            ..
+        } if reason_code == "validation_failed" && *fail_closed
+    )));
+}
+
+#[tokio::test]
+async fn supervised_devloop_rejects_validation_budget_over_limit_with_policy_reason() {
+    let _audit = TestAuditGuard::new(
+        "supervised_devloop_rejects_validation_budget_over_limit_with_policy_reason",
+    );
+    let over_budget_plan = ValidationPlan {
+        profile: "regression-over-budget".into(),
+        stages: vec![ValidationStage::Command {
+            program: "git".into(),
+            args: vec!["--version".into()],
+            timeout_ms: 900_001,
+        }],
+    };
+    let (_workspace, store, evo) = test_evo_with_policy_and_plan(
+        "supervised-devloop-budget-reject",
+        sandbox_policy(),
+        over_budget_plan,
+    );
+    let request = devloop_request("task-docs-budget-reject", "docs/supervised-budget.md", true);
+
+    let outcome = evo
+        .run_supervised_devloop(
+            &"run-supervised-devloop-budget-reject".to_string(),
+            &request,
+            proposal_diff_for("docs/supervised-budget.md", "Budget Reject"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, SupervisedDevloopStatus::RejectedByPolicy);
+    assert_eq!(
+        outcome
+            .failure_contract
+            .as_ref()
+            .map(|contract| contract.reason_code),
+        Some(MutationNeededFailureReasonCode::PolicyDenied)
+    );
+    assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::MutationRejected {
+            reason_code: Some(reason_code),
+            fail_closed,
+            ..
+        } if reason_code == "policy_denied" && *fail_closed
+    )));
+}
+
+#[tokio::test]
+async fn supervised_devloop_fails_closed_on_timeout_with_consistent_reason_code() {
+    let _audit = TestAuditGuard::new(
+        "supervised_devloop_fails_closed_on_timeout_with_consistent_reason_code",
+    );
+    let mut timeout_policy = sandbox_policy();
+    timeout_policy.max_duration_ms = 0;
+    let (_workspace, store, evo) = test_evo_with_policy_and_plan(
+        "supervised-devloop-timeout",
+        timeout_policy,
+        lightweight_plan(),
+    );
+    let request = devloop_request("task-docs-timeout", "docs/supervised-timeout.md", true);
+
+    let outcome = evo
+        .run_supervised_devloop(
+            &"run-supervised-devloop-timeout".to_string(),
+            &request,
+            proposal_diff_for("docs/supervised-timeout.md", "Timeout"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, SupervisedDevloopStatus::FailedClosed);
+    assert_eq!(
+        outcome
+            .failure_contract
+            .as_ref()
+            .map(|contract| contract.reason_code),
+        Some(MutationNeededFailureReasonCode::Timeout)
+    );
+    assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::MutationRejected {
+            reason_code: Some(reason_code),
+            fail_closed,
+            ..
+        } if reason_code == "timeout" && *fail_closed
+    )));
 }
 
 #[tokio::test]
