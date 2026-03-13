@@ -220,8 +220,17 @@ Fail-closed defaults are explicit in the contract:
 - missing metrics -> `block_release`
 - invalid metrics -> `block_release`
 
-Until a dedicated evaluator is wired, the default output contract status is
-`fail_closed` with `failed_checks=["release_gate_evaluator_not_run"]`.
+Release gate evaluator output is deterministic and machine-readable:
+
+- `status = pass` when all threshold checks pass
+- `status = fail_closed` when threshold checks fail
+- `status = indeterminate` when metrics are missing or invalid (still fail-closed
+  for publish decisions)
+
+`failed_checks` is dimension-addressable and stable (for example
+`replay_hit_rate_below_threshold`, `missing_replay_attempts`), and
+`evidence_refs` always points to metric or threshold dimensions used by each
+check.
 
 ## 8.2 Supervised DEVLOOP (Bounded Scope)
 
