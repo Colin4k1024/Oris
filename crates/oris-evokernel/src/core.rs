@@ -169,6 +169,116 @@ const SHADOW_PROMOTION_MIN_DECAYED_CONFIDENCE: f32 = MIN_REPLAY_CONFIDENCE;
 const REPLAY_REASONING_TOKEN_FLOOR: u64 = 192;
 const REPLAY_REASONING_TOKEN_SIGNAL_WEIGHT: u64 = 24;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RepairQualityGateReport {
+    pub root_cause: bool,
+    pub fix: bool,
+    pub verification: bool,
+    pub rollback: bool,
+    pub incident_anchor: bool,
+    pub structure_score: usize,
+    pub has_actionable_command: bool,
+}
+
+impl RepairQualityGateReport {
+    pub fn passes(&self) -> bool {
+        self.incident_anchor
+            && self.structure_score >= 3
+            && (self.has_actionable_command || self.verification)
+    }
+
+    pub fn failed_checks(&self) -> Vec<String> {
+        let mut failed = Vec::new();
+        if !self.incident_anchor {
+            failed.push("包含unknown command故障上下文".to_string());
+        }
+        if self.structure_score < 3 {
+            failed.push("结构化修复信息至少满足3项（根因/修复/验证/回滚）".to_string());
+        }
+        if !(self.has_actionable_command || self.verification) {
+            failed.push("包含可执行验证命令或验证计划".to_string());
+        }
+        failed
+    }
+}
+
+pub fn evaluate_repair_quality_gate(plan: &str) -> RepairQualityGateReport {
+    fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+        needles.iter().any(|needle| haystack.contains(needle))
+    }
+
+    let lower = plan.to_ascii_lowercase();
+    let root_cause = contains_any(
+        plan,
+        &["根因", "原因分析", "问题定位", "原因定位", "根本原因"],
+    ) || contains_any(
+        &lower,
+        &[
+            "root cause",
+            "cause analysis",
+            "problem diagnosis",
+            "diagnosis",
+        ],
+    );
+    let fix = contains_any(
+        plan,
+        &["修复步骤", "修复方案", "处理步骤", "修复建议", "整改方案"],
+    ) || contains_any(
+        &lower,
+        &[
+            "fix",
+            "remediation",
+            "mitigation",
+            "resolution",
+            "repair steps",
+        ],
+    );
+    let verification = contains_any(
+        plan,
+        &["验证命令", "验证步骤", "回归测试", "验证方式", "验收步骤"],
+    ) || contains_any(
+        &lower,
+        &[
+            "verification",
+            "validate",
+            "regression test",
+            "smoke test",
+            "test command",
+        ],
+    );
+    let rollback = contains_any(plan, &["回滚方案", "回滚步骤", "恢复方案", "撤销方案"])
+        || contains_any(&lower, &["rollback", "revert", "fallback plan", "undo"]);
+    let incident_anchor = contains_any(
+        &lower,
+        &[
+            "unknown command",
+            "process",
+            "proccess",
+            "command not found",
+        ],
+    ) || contains_any(plan, &["命令不存在", "命令未找到", "未知命令"]);
+    let structure_score = [root_cause, fix, verification, rollback]
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
+    let has_actionable_command = contains_any(
+        &lower,
+        &[
+            "cargo ", "git ", "python ", "pip ", "npm ", "pnpm ", "yarn ", "bash ", "make ",
+        ],
+    );
+
+    RepairQualityGateReport {
+        root_cause,
+        fix,
+        verification,
+        rollback,
+        incident_anchor,
+        structure_score,
+        has_actionable_command,
+    }
+}
+
 impl ValidationReport {
     pub fn to_snapshot(&self, profile: &str) -> ValidationSnapshot {
         ValidationSnapshot {
@@ -5436,6 +5546,35 @@ mod tests {
         fn version(&self) -> u32 {
             1
         }
+    }
+
+    #[test]
+    fn repair_quality_gate_accepts_semantic_variants() {
+        let plan = r#"
+根本原因：脚本中拼写错误导致 unknown command 'process'。
+修复建议：将 `proccess` 更正为 `process`，并统一命令入口。
+验证方式：执行 `cargo check -p oris-runtime` 与回归测试。
+恢复方案：若新入口异常，立即回滚到旧命令映射。
+"#;
+        let report = evaluate_repair_quality_gate(plan);
+        assert!(report.passes());
+        assert!(report.failed_checks().is_empty());
+    }
+
+    #[test]
+    fn repair_quality_gate_rejects_missing_incident_anchor() {
+        let plan = r#"
+原因分析：逻辑分支覆盖不足。
+修复方案：补充分支与日志。
+验证命令：cargo check -p oris-runtime
+回滚方案：git revert HEAD
+"#;
+        let report = evaluate_repair_quality_gate(plan);
+        assert!(!report.passes());
+        assert!(report
+            .failed_checks()
+            .iter()
+            .any(|check| check.contains("unknown command")));
     }
 
     fn temp_workspace(name: &str) -> std::path::PathBuf {

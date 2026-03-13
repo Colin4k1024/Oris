@@ -11,7 +11,7 @@ use oris_runtime::agent::middleware::{Middleware, MiddlewareContext, MiddlewareE
 use oris_runtime::agent::{create_agent_from_llm, UnifiedAgent};
 use oris_runtime::error::ToolError;
 use oris_runtime::evolution::{
-    CommandValidator, EvoEvolutionStore as EvolutionStore, EvoKernel,
+    evaluate_repair_quality_gate, CommandValidator, EvoEvolutionStore as EvolutionStore, EvoKernel,
     EvoSandboxPolicy as SandboxPolicy, EvoSelectorInput as SelectorInput, EvolutionNetworkNode,
     FetchQuery, JsonlEvolutionStore, LocalProcessSandbox, ValidationPlan,
 };
@@ -494,83 +494,24 @@ fn build_evo(
 }
 
 fn quality_gate(plan: &str) {
-    fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-        needles.iter().any(|needle| haystack.contains(needle))
-    }
-
-    let lower = plan.to_ascii_lowercase();
-    let root_cause = contains_any(
-        plan,
-        &["根因", "原因分析", "问题定位", "原因定位", "根本原因"],
-    ) || contains_any(
-        &lower,
-        &[
-            "root cause",
-            "cause analysis",
-            "problem diagnosis",
-            "diagnosis",
-        ],
-    );
-    let fix = contains_any(
-        plan,
-        &["修复步骤", "修复方案", "处理步骤", "修复建议", "整改方案"],
-    ) || contains_any(
-        &lower,
-        &[
-            "fix",
-            "remediation",
-            "mitigation",
-            "resolution",
-            "repair steps",
-        ],
-    );
-    let verification = contains_any(
-        plan,
-        &["验证命令", "验证步骤", "回归测试", "验证方式", "验收步骤"],
-    ) || contains_any(
-        &lower,
-        &[
-            "verification",
-            "validate",
-            "regression test",
-            "smoke test",
-            "test command",
-        ],
-    );
-    let rollback = contains_any(plan, &["回滚方案", "回滚步骤", "恢复方案", "撤销方案"])
-        || contains_any(&lower, &["rollback", "revert", "fallback plan", "undo"]);
-    let incident_anchor = contains_any(
-        &lower,
-        &[
-            "unknown command",
-            "process",
-            "proccess",
-            "command not found",
-        ],
-    ) || contains_any(plan, &["命令不存在", "命令未找到", "未知命令"]);
-
-    let structure_score = [root_cause, fix, verification, rollback]
-        .into_iter()
-        .filter(|ok| *ok)
-        .count();
-    let has_actionable_command = contains_any(
-        &lower,
-        &[
-            "cargo ", "git ", "python ", "pip ", "npm ", "pnpm ", "yarn ",
-        ],
-    );
+    let report = evaluate_repair_quality_gate(plan);
     let preview = plan.chars().take(240).collect::<String>();
 
     assert!(
-        incident_anchor,
+        report.incident_anchor,
         "quality_gate missing incident anchor; preview={preview}"
     );
     assert!(
-        structure_score >= 3,
-        "quality_gate structure too weak (score={structure_score}); root={root_cause} fix={fix} verification={verification} rollback={rollback}; preview={preview}"
+        report.structure_score >= 3,
+        "quality_gate structure too weak (score={}); root={} fix={} verification={} rollback={}; preview={preview}",
+        report.structure_score,
+        report.root_cause,
+        report.fix,
+        report.verification,
+        report.rollback
     );
     assert!(
-        has_actionable_command || verification,
+        report.has_actionable_command || report.verification,
         "quality_gate missing actionable verification command; preview={preview}"
     );
 }
