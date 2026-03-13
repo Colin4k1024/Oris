@@ -24,9 +24,10 @@ use oris_runtime::agent::{create_agent_from_llm, UnifiedAgent};
 use oris_runtime::error::ToolError;
 #[cfg(feature = "full-evolution-experimental")]
 use oris_runtime::evolution::{
-    CommandValidator, EvoAssetState, EvoEvolutionStore as EvolutionStore, EvoKernel,
-    EvoSandboxPolicy as SandboxPolicy, EvoSelectorInput as SelectorInput, EvolutionNetworkNode,
-    FetchQuery, JsonlEvolutionStore, LocalProcessSandbox, ValidationPlan, ValidationStage,
+    evaluate_repair_quality_gate, CommandValidator, EvoAssetState,
+    EvoEvolutionStore as EvolutionStore, EvoKernel, EvoSandboxPolicy as SandboxPolicy,
+    EvoSelectorInput as SelectorInput, EvolutionNetworkNode, FetchQuery, JsonlEvolutionStore,
+    LocalProcessSandbox, ValidationPlan, ValidationStage,
 };
 #[cfg(feature = "full-evolution-experimental")]
 use oris_runtime::governor::{DefaultGovernor, GovernorConfig};
@@ -838,49 +839,23 @@ fn merge_signals(base: &[String], extra: &[String]) -> Vec<String> {
 
 #[cfg(feature = "full-evolution-experimental")]
 fn repair_quality_gate(plan: &str) -> ExampleResult<QualityCheckResult> {
-    let lower = plan.to_ascii_lowercase();
+    let report = evaluate_repair_quality_gate(plan);
     let checks = vec![
-        (
-            "包含根因分析".to_string(),
-            plan.contains("根因")
-                || plan.contains("原因分析")
-                || plan.contains("问题定位")
-                || lower.contains("root cause"),
-        ),
-        (
-            "包含修复步骤".to_string(),
-            plan.contains("修复步骤")
-                || plan.contains("修复方案")
-                || plan.contains("修复")
-                || plan.contains("处理步骤")
-                || lower.contains("fix")
-                || lower.contains("remediation"),
-        ),
-        (
-            "包含验证命令".to_string(),
-            plan.contains("验证命令")
-                || plan.contains("验证步骤")
-                || plan.contains("验证")
-                || plan.contains("回归测试")
-                || lower.contains("verification")
-                || lower.contains("validate"),
-        ),
-        (
-            "包含回滚方案".to_string(),
-            plan.contains("回滚方案")
-                || plan.contains("回滚")
-                || plan.contains("恢复方案")
-                || plan.contains("撤销")
-                || lower.contains("rollback"),
-        ),
+        ("包含根因分析".to_string(), report.root_cause),
+        ("包含修复步骤".to_string(), report.fix),
+        ("包含验证命令".to_string(), report.verification),
+        ("包含回滚方案".to_string(), report.rollback),
         (
             "包含unknown command故障上下文".to_string(),
-            lower.contains("unknown command")
-                || lower.contains("process")
-                || lower.contains("proccess")
-                || plan.contains("命令不存在")
-                || plan.contains("命令未找到")
-                || plan.contains("命令错误"),
+            report.incident_anchor,
+        ),
+        (
+            "结构化修复信息至少满足3项（根因/修复/验证/回滚）".to_string(),
+            report.structure_score >= 3,
+        ),
+        (
+            "包含可执行验证命令或验证计划".to_string(),
+            report.has_actionable_command || report.verification,
         ),
     ];
 
