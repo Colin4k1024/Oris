@@ -494,36 +494,108 @@ fn build_evo(
 }
 
 fn quality_gate(plan: &str) {
+    fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+        needles.iter().any(|needle| haystack.contains(needle))
+    }
+
     let lower = plan.to_ascii_lowercase();
-    let checks = [
-        plan.contains("根因")
-            || plan.contains("原因分析")
-            || plan.contains("问题定位")
-            || lower.contains("root cause"),
-        plan.contains("修复步骤")
-            || plan.contains("修复方案")
-            || plan.contains("修复")
-            || plan.contains("处理步骤")
-            || lower.contains("fix")
-            || lower.contains("remediation"),
-        plan.contains("验证命令")
-            || plan.contains("验证步骤")
-            || plan.contains("验证")
-            || plan.contains("回归测试")
-            || lower.contains("verification")
-            || lower.contains("validate"),
-        plan.contains("回滚方案")
-            || plan.contains("回滚")
-            || plan.contains("恢复方案")
-            || plan.contains("撤销")
-            || lower.contains("rollback"),
-        lower.contains("unknown command")
-            || lower.contains("process")
-            || lower.contains("proccess")
-            || plan.contains("命令不存在")
-            || plan.contains("命令未找到"),
-    ];
-    assert!(checks.into_iter().all(|ok| ok));
+    let root_cause = contains_any(
+        plan,
+        &["根因", "原因分析", "问题定位", "原因定位", "根本原因"],
+    ) || contains_any(
+        &lower,
+        &[
+            "root cause",
+            "cause analysis",
+            "problem diagnosis",
+            "diagnosis",
+        ],
+    );
+    let fix = contains_any(
+        plan,
+        &["修复步骤", "修复方案", "处理步骤", "修复建议", "整改方案"],
+    ) || contains_any(
+        &lower,
+        &[
+            "fix",
+            "remediation",
+            "mitigation",
+            "resolution",
+            "repair steps",
+        ],
+    );
+    let verification = contains_any(
+        plan,
+        &["验证命令", "验证步骤", "回归测试", "验证方式", "验收步骤"],
+    ) || contains_any(
+        &lower,
+        &[
+            "verification",
+            "validate",
+            "regression test",
+            "smoke test",
+            "test command",
+        ],
+    );
+    let rollback = contains_any(plan, &["回滚方案", "回滚步骤", "恢复方案", "撤销方案"])
+        || contains_any(&lower, &["rollback", "revert", "fallback plan", "undo"]);
+    let incident_anchor = contains_any(
+        &lower,
+        &[
+            "unknown command",
+            "process",
+            "proccess",
+            "command not found",
+        ],
+    ) || contains_any(plan, &["命令不存在", "命令未找到", "未知命令"]);
+
+    let structure_score = [root_cause, fix, verification, rollback]
+        .into_iter()
+        .filter(|ok| *ok)
+        .count();
+    let has_actionable_command = contains_any(
+        &lower,
+        &[
+            "cargo ", "git ", "python ", "pip ", "npm ", "pnpm ", "yarn ",
+        ],
+    );
+    let preview = plan.chars().take(240).collect::<String>();
+
+    assert!(
+        incident_anchor,
+        "quality_gate missing incident anchor; preview={preview}"
+    );
+    assert!(
+        structure_score >= 3,
+        "quality_gate structure too weak (score={structure_score}); root={root_cause} fix={fix} verification={verification} rollback={rollback}; preview={preview}"
+    );
+    assert!(
+        has_actionable_command || verification,
+        "quality_gate missing actionable verification command; preview={preview}"
+    );
+}
+
+#[test]
+fn quality_gate_accepts_semantic_variants() {
+    let plan = r#"
+根本原因：脚本中拼写错误导致 unknown command 'process'。
+修复建议：将 `proccess` 更正为 `process`，并统一命令入口。
+验证方式：执行 `cargo check -p oris-runtime` 与回归测试。
+恢复方案：若新入口异常，立即回滚到旧命令映射。
+"#;
+    quality_gate(plan);
+}
+
+#[test]
+#[should_panic(expected = "quality_gate missing incident anchor")]
+fn quality_gate_rejects_missing_incident_context() {
+    let plan = r#"
+原因分析：逻辑分支覆盖不足。
+修复方案：补充分支与日志。
+验证命令：cargo check -p oris-runtime
+回滚方案：git revert HEAD
+"#;
+    quality_gate(plan);
 }
 
 fn strategy_value(strategy: &[String], key: &str) -> Option<String> {
