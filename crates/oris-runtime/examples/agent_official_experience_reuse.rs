@@ -21,6 +21,10 @@ use oris_runtime::agent::middleware::{Middleware, MiddlewareContext, MiddlewareE
 #[cfg(feature = "full-evolution-experimental")]
 use oris_runtime::agent::{create_agent_from_llm, UnifiedAgent};
 #[cfg(feature = "full-evolution-experimental")]
+use oris_runtime::agent_contract::{
+    ReplayFallbackNextAction, ReplayFeedback, ReplayPlannerDirective,
+};
+#[cfg(feature = "full-evolution-experimental")]
 use oris_runtime::error::ToolError;
 #[cfg(feature = "full-evolution-experimental")]
 use oris_runtime::evolution::{
@@ -643,6 +647,94 @@ fn make_agent(
 }
 
 #[cfg(feature = "full-evolution-experimental")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DirectiveExecutionRoute {
+    ReuseWithoutPlanner,
+    PlanFromScratch,
+    ValidateSignalsThenPlan,
+    RebuildCapsule,
+    RegenerateMutationPayload,
+    RebasePatchAndRetry,
+    RepairAndRevalidate,
+    UnsupportedDirective,
+}
+
+#[cfg(feature = "full-evolution-experimental")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentDirectiveExecution {
+    route: DirectiveExecutionRoute,
+    repair_hint: Option<String>,
+    verification_hint: String,
+    fallback_classification: Option<String>,
+}
+
+#[cfg(feature = "full-evolution-experimental")]
+fn consume_replay_directive(feedback: &ReplayFeedback) -> AgentDirectiveExecution {
+    match feedback.planner_directive {
+        ReplayPlannerDirective::SkipPlanner => AgentDirectiveExecution {
+            route: DirectiveExecutionRoute::ReuseWithoutPlanner,
+            repair_hint: None,
+            verification_hint: "Run checklist tool to verify reused capsule impact.".to_string(),
+            fallback_classification: None,
+        },
+        ReplayPlannerDirective::PlanFallback => match feedback.next_action {
+            Some(ReplayFallbackNextAction::PlanFromScratch) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::PlanFromScratch,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Generate a minimal patch and run verification checklist."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::ValidateSignalsThenPlan) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::ValidateSignalsThenPlan,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Validate incident signals before generating a patch."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RebuildCapsule) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RebuildCapsule,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Rebuild capsule payload and validate replay boundary."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RegenerateMutationPayload) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RegenerateMutationPayload,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Regenerate mutation payload then validate with checklist tool."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RebasePatchAndRetry) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RebasePatchAndRetry,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint: "Rebase patch, retry replay, and validate regression checks."
+                    .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::RepairAndRevalidate) => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::RepairAndRevalidate,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint:
+                    "Produce repair mutation and run validation checklist before release."
+                        .to_string(),
+                fallback_classification: None,
+            },
+            Some(ReplayFallbackNextAction::EscalateFailClosed) | None => AgentDirectiveExecution {
+                route: DirectiveExecutionRoute::UnsupportedDirective,
+                repair_hint: feedback.repair_hint.clone(),
+                verification_hint:
+                    "Directive is not executable; force fail-closed fallback planning.".to_string(),
+                fallback_classification: Some(
+                    "directive_unexecutable_missing_or_escalated_next_action".to_string(),
+                ),
+            },
+        },
+    }
+}
+
+#[cfg(feature = "full-evolution-experimental")]
 fn timestamp_run_id() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1153,6 +1245,7 @@ async fn generate_repair_plan(
     agent_role: &str,
     case_id: &str,
     user_task: &str,
+    directive_execution: &AgentDirectiveExecution,
 ) -> ExampleResult<String> {
     logger.log_event(
         agent_role,
@@ -1170,7 +1263,18 @@ async fn generate_repair_plan(
 2) 修复步骤\n\
 3) 验证命令\n\
 4) 回滚方案\n\
-并且明确引用 case_id={case_id} 的上下文，包含 unknown command 故障关键词。"
+并且明确引用 case_id={case_id} 的上下文，包含 unknown command 故障关键词。\n\
+directive_route={:?}\n\
+verification_hint={}\n\
+repair_hint={}\n\
+fallback_classification={}",
+        directive_execution.route,
+        directive_execution.verification_hint,
+        directive_execution.repair_hint.as_deref().unwrap_or("none"),
+        directive_execution
+            .fallback_classification
+            .as_deref()
+            .unwrap_or("none")
     );
     let response = agent
         .invoke_messages(vec![Message::new_human_message(&prompt)])
@@ -1400,17 +1504,26 @@ async fn main() -> ExampleResult<()> {
         .replay_or_fallback_for_run(
             &"official-replay-run".to_string(),
             SelectorInput {
-                signals: replay_input_signals,
+                signals: replay_input_signals.clone(),
                 env: imported_capsule.env.clone(),
                 spec_id: None,
                 limit: 1,
             },
         )
         .await?;
+    let replay_feedback =
+        EvoKernel::<DemoState>::replay_feedback_for_agent(&replay_input_signals, &decision);
+    let directive_execution = consume_replay_directive(&replay_feedback);
     println!("[4] Worker replay decision");
     println!("    used_capsule: {}", decision.used_capsule);
     println!("    fallback_to_planner: {}", decision.fallback_to_planner);
     println!("    reason: {}", decision.reason);
+    println!(
+        "    planner_directive: {:?}",
+        replay_feedback.planner_directive
+    );
+    println!("    next_action: {:?}", replay_feedback.next_action);
+    println!("    repair_hint: {:?}", replay_feedback.repair_hint);
     logger.log_event(
         "worker-node",
         "stage-4",
@@ -1420,6 +1533,20 @@ async fn main() -> ExampleResult<()> {
             "used_capsule": decision.used_capsule,
             "fallback_to_planner": decision.fallback_to_planner,
             "reason": &decision.reason,
+            "planner_directive": replay_feedback.planner_directive,
+            "next_action": replay_feedback.next_action,
+            "repair_hint": replay_feedback.repair_hint,
+            "directive_route": format!("{:?}", directive_execution.route),
+        }),
+    );
+    logger.log_event(
+        "worker-node",
+        "stage-4",
+        "directive_consumed",
+        json!({
+            "route": format!("{:?}", directive_execution.route),
+            "verification_hint": &directive_execution.verification_hint,
+            "fallback_classification": &directive_execution.fallback_classification,
         }),
     );
     if !decision.used_capsule || decision.fallback_to_planner {
@@ -1452,6 +1579,7 @@ async fn main() -> ExampleResult<()> {
         "worker-agent",
         "case-primary",
         "处理 unknown command 'process' + windows shell 不兼容导致的执行失败",
+        &directive_execution,
     )
     .await?;
     fs::write(&paths.primary_plan_path, &primary_plan)?;
@@ -1490,6 +1618,7 @@ async fn main() -> ExampleResult<()> {
         "worker-agent",
         "case-similar",
         "处理 unknown command 'proccess' + Linux CI shell 参数风格冲突",
+        &directive_execution,
     )
     .await?;
     fs::write(&paths.similar_plan_path, &similar_plan)?;
