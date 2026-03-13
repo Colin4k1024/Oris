@@ -588,7 +588,7 @@ pub struct ReplayRoiReleaseGateInputContract {
 pub enum ReplayRoiReleaseGateStatus {
     Pass,
     FailClosed,
-    PendingEvaluator,
+    Indeterminate,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -597,21 +597,6 @@ pub struct ReplayRoiReleaseGateOutputContract {
     pub failed_checks: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub summary: String,
-}
-
-impl ReplayRoiReleaseGateOutputContract {
-    fn fail_closed_no_evaluator() -> Self {
-        Self {
-            status: ReplayRoiReleaseGateStatus::FailClosed,
-            failed_checks: vec!["release_gate_evaluator_not_run".to_string()],
-            evidence_refs: vec![
-                "replay_roi_release_gate_summary".to_string(),
-                "replay_roi_release_gate_contract".to_string(),
-            ],
-            summary: "release gate evaluator not configured; fail-closed defaults block publish"
-                .to_string(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -5588,10 +5573,9 @@ fn replay_roi_release_gate_contract(
     summary: &ReplayRoiWindowSummary,
     thresholds: ReplayRoiReleaseGateThresholds,
 ) -> ReplayRoiReleaseGateContract {
-    ReplayRoiReleaseGateContract {
-        input: replay_roi_release_gate_input_contract(summary, thresholds),
-        output: ReplayRoiReleaseGateOutputContract::fail_closed_no_evaluator(),
-    }
+    let input = replay_roi_release_gate_input_contract(summary, thresholds);
+    let output = evaluate_replay_roi_release_gate_contract_input(&input);
+    ReplayRoiReleaseGateContract { input, output }
 }
 
 fn replay_roi_release_gate_input_contract(
@@ -5635,6 +5619,281 @@ fn replay_roi_release_gate_safety_signal(
             == summary.replay_success_total + summary.replay_failure_total,
         has_replay_activity: summary.replay_attempts_total > 0,
     }
+}
+
+pub fn evaluate_replay_roi_release_gate_contract_input(
+    input: &ReplayRoiReleaseGateInputContract,
+) -> ReplayRoiReleaseGateOutputContract {
+    let mut failed_checks = Vec::new();
+    let mut evidence_refs = Vec::new();
+    let mut indeterminate = false;
+
+    replay_release_gate_push_unique(&mut evidence_refs, "replay_roi_release_gate_summary");
+    replay_release_gate_push_unique(
+        &mut evidence_refs,
+        format!("window_seconds:{}", input.window_seconds),
+    );
+    if input.generated_at.trim().is_empty() {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "missing_generated_at",
+            &["field:generated_at"],
+        );
+        indeterminate = true;
+    } else {
+        replay_release_gate_push_unique(
+            &mut evidence_refs,
+            format!("generated_at:{}", input.generated_at),
+        );
+    }
+
+    let expected_attempts_total = input.replay_success_total + input.replay_failure_total;
+    if input.replay_attempts_total != expected_attempts_total {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_attempt_accounting",
+            &[
+                "metric:replay_attempts_total",
+                "metric:replay_success_total",
+                "metric:replay_failure_total",
+            ],
+        );
+        indeterminate = true;
+    }
+
+    if input.replay_attempts_total == 0 {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "missing_replay_attempts",
+            &["metric:replay_attempts_total"],
+        );
+        indeterminate = true;
+    }
+
+    if !replay_release_gate_rate_valid(input.replay_hit_rate) {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_replay_hit_rate",
+            &["metric:replay_hit_rate"],
+        );
+        indeterminate = true;
+    }
+    if !replay_release_gate_rate_valid(input.false_replay_rate) {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_false_replay_rate",
+            &["metric:false_replay_rate"],
+        );
+        indeterminate = true;
+    }
+
+    if !input.replay_roi.is_finite() {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_replay_roi",
+            &["metric:replay_roi"],
+        );
+        indeterminate = true;
+    }
+
+    let expected_hit_rate = safe_ratio(input.replay_success_total, input.replay_attempts_total);
+    let expected_false_rate = safe_ratio(input.replay_failure_total, input.replay_attempts_total);
+    if input.replay_attempts_total > 0
+        && !replay_release_gate_float_eq(input.replay_hit_rate, expected_hit_rate)
+    {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_replay_hit_rate_consistency",
+            &["metric:replay_hit_rate", "metric:replay_success_total"],
+        );
+        indeterminate = true;
+    }
+    if input.replay_attempts_total > 0
+        && !replay_release_gate_float_eq(input.false_replay_rate, expected_false_rate)
+    {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_false_replay_rate_consistency",
+            &["metric:false_replay_rate", "metric:replay_failure_total"],
+        );
+        indeterminate = true;
+    }
+
+    if !(0.0..=1.0).contains(&input.thresholds.min_replay_hit_rate) {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_threshold_min_replay_hit_rate",
+            &["threshold:min_replay_hit_rate"],
+        );
+        indeterminate = true;
+    }
+    if !(0.0..=1.0).contains(&input.thresholds.max_false_replay_rate) {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_threshold_max_false_replay_rate",
+            &["threshold:max_false_replay_rate"],
+        );
+        indeterminate = true;
+    }
+    if !input.thresholds.min_replay_roi.is_finite() {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "invalid_threshold_min_replay_roi",
+            &["threshold:min_replay_roi"],
+        );
+        indeterminate = true;
+    }
+
+    if input.replay_attempts_total < input.thresholds.min_replay_attempts {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "min_replay_attempts_below_threshold",
+            &[
+                "threshold:min_replay_attempts",
+                "metric:replay_attempts_total",
+            ],
+        );
+    }
+    if input.replay_attempts_total > 0
+        && input.replay_hit_rate < input.thresholds.min_replay_hit_rate
+    {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "replay_hit_rate_below_threshold",
+            &["threshold:min_replay_hit_rate", "metric:replay_hit_rate"],
+        );
+    }
+    if input.replay_attempts_total > 0
+        && input.false_replay_rate > input.thresholds.max_false_replay_rate
+    {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "false_replay_rate_above_threshold",
+            &[
+                "threshold:max_false_replay_rate",
+                "metric:false_replay_rate",
+            ],
+        );
+    }
+    if input.reasoning_avoided_tokens < input.thresholds.min_reasoning_avoided_tokens {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "reasoning_avoided_tokens_below_threshold",
+            &[
+                "threshold:min_reasoning_avoided_tokens",
+                "metric:reasoning_avoided_tokens",
+            ],
+        );
+    }
+    if input.replay_roi < input.thresholds.min_replay_roi {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "replay_roi_below_threshold",
+            &["threshold:min_replay_roi", "metric:replay_roi"],
+        );
+    }
+    if input.thresholds.require_replay_safety && !input.replay_safety {
+        replay_release_gate_record_failed_check(
+            &mut failed_checks,
+            &mut evidence_refs,
+            "replay_safety_required",
+            &["metric:replay_safety", "threshold:require_replay_safety"],
+        );
+    }
+
+    let status = if failed_checks.is_empty() {
+        ReplayRoiReleaseGateStatus::Pass
+    } else if indeterminate {
+        ReplayRoiReleaseGateStatus::Indeterminate
+    } else {
+        ReplayRoiReleaseGateStatus::FailClosed
+    };
+    let joined_checks = if failed_checks.is_empty() {
+        "none".to_string()
+    } else {
+        failed_checks.join(",")
+    };
+    let summary = match status {
+        ReplayRoiReleaseGateStatus::Pass => format!(
+            "release gate pass: attempts={} hit_rate={:.3} false_replay_rate={:.3} reasoning_avoided_tokens={} replay_roi={:.3} replay_safety={}",
+            input.replay_attempts_total,
+            input.replay_hit_rate,
+            input.false_replay_rate,
+            input.reasoning_avoided_tokens,
+            input.replay_roi,
+            input.replay_safety
+        ),
+        ReplayRoiReleaseGateStatus::FailClosed => format!(
+            "release gate fail_closed: failed_checks=[{}] attempts={} hit_rate={:.3} false_replay_rate={:.3} reasoning_avoided_tokens={} replay_roi={:.3} replay_safety={}",
+            joined_checks,
+            input.replay_attempts_total,
+            input.replay_hit_rate,
+            input.false_replay_rate,
+            input.reasoning_avoided_tokens,
+            input.replay_roi,
+            input.replay_safety
+        ),
+        ReplayRoiReleaseGateStatus::Indeterminate => format!(
+            "release gate indeterminate (fail-closed): failed_checks=[{}] attempts={} hit_rate={:.3} false_replay_rate={:.3} reasoning_avoided_tokens={} replay_roi={:.3} replay_safety={}",
+            joined_checks,
+            input.replay_attempts_total,
+            input.replay_hit_rate,
+            input.false_replay_rate,
+            input.reasoning_avoided_tokens,
+            input.replay_roi,
+            input.replay_safety
+        ),
+    };
+
+    ReplayRoiReleaseGateOutputContract {
+        status,
+        failed_checks,
+        evidence_refs,
+        summary,
+    }
+}
+
+fn replay_release_gate_record_failed_check(
+    failed_checks: &mut Vec<String>,
+    evidence_refs: &mut Vec<String>,
+    check: &str,
+    refs: &[&str],
+) {
+    replay_release_gate_push_unique(failed_checks, check.to_string());
+    for entry in refs {
+        replay_release_gate_push_unique(evidence_refs, (*entry).to_string());
+    }
+}
+
+fn replay_release_gate_push_unique(values: &mut Vec<String>, entry: impl Into<String>) {
+    let entry = entry.into();
+    if !values.iter().any(|current| current == &entry) {
+        values.push(entry);
+    }
+}
+
+fn replay_release_gate_rate_valid(value: f64) -> bool {
+    value.is_finite() && (0.0..=1.0).contains(&value)
+}
+
+fn replay_release_gate_float_eq(left: f64, right: f64) -> bool {
+    (left - right).abs() <= 1e-9
 }
 
 fn evolution_health_snapshot(snapshot: &EvolutionMetricsSnapshot) -> EvolutionHealthSnapshot {
@@ -6873,12 +7132,23 @@ index 0000000..1111111
             .output
             .failed_checks
             .iter()
-            .any(|check| check == "release_gate_evaluator_not_run"));
+            .any(|check| check == "min_replay_attempts_below_threshold"));
+        assert!(contract
+            .output
+            .failed_checks
+            .iter()
+            .any(|check| check == "replay_hit_rate_below_threshold"));
+        assert!(contract
+            .output
+            .failed_checks
+            .iter()
+            .any(|check| check == "false_replay_rate_above_threshold"));
         assert!(contract
             .output
             .evidence_refs
             .iter()
             .any(|evidence| evidence == "replay_roi_release_gate_summary"));
+        assert!(contract.output.summary.contains("release gate fail_closed"));
     }
 
     #[tokio::test]
@@ -6907,15 +7177,146 @@ index 0000000..1111111
         assert!(!contract.input.replay_safety);
         assert_eq!(
             contract.output.status,
-            ReplayRoiReleaseGateStatus::FailClosed
+            ReplayRoiReleaseGateStatus::Indeterminate
         );
+        assert!(contract
+            .output
+            .failed_checks
+            .iter()
+            .any(|check| check == "missing_replay_attempts"));
+        assert!(contract
+            .output
+            .summary
+            .contains("indeterminate (fail-closed)"));
 
         let rendered = evo
             .render_replay_roi_release_gate_contract_json(60 * 60, thresholds)
             .unwrap();
         assert!(rendered.contains("\"min_replay_attempts\": 8"));
         assert!(rendered.contains("\"min_replay_hit_rate\": 0.75"));
-        assert!(rendered.contains("\"status\": \"fail_closed\""));
+        assert!(rendered.contains("\"status\": \"indeterminate\""));
+    }
+
+    #[test]
+    fn replay_roi_release_gate_summary_evaluator_passes_with_threshold_compliance() {
+        let input = ReplayRoiReleaseGateInputContract {
+            generated_at: Utc::now().to_rfc3339(),
+            window_seconds: 86_400,
+            aggregation_dimensions: REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_string())
+                .collect(),
+            replay_attempts_total: 10,
+            replay_success_total: 9,
+            replay_failure_total: 1,
+            replay_hit_rate: 0.9,
+            false_replay_rate: 0.1,
+            reasoning_avoided_tokens: 960,
+            replay_fallback_cost_total: 64,
+            replay_roi: compute_replay_roi(960, 64),
+            replay_safety: true,
+            replay_safety_signal: ReplayRoiReleaseGateSafetySignal {
+                fail_closed_default: true,
+                rollback_ready: true,
+                audit_trail_complete: true,
+                has_replay_activity: true,
+            },
+            thresholds: ReplayRoiReleaseGateThresholds::default(),
+            fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy::default(),
+        };
+
+        let output = evaluate_replay_roi_release_gate_contract_input(&input);
+        assert_eq!(output.status, ReplayRoiReleaseGateStatus::Pass);
+        assert!(output.failed_checks.is_empty());
+        assert!(output.summary.contains("release gate pass"));
+    }
+
+    #[test]
+    fn replay_roi_release_gate_summary_evaluator_fail_closed_on_threshold_violations() {
+        let input = ReplayRoiReleaseGateInputContract {
+            generated_at: Utc::now().to_rfc3339(),
+            window_seconds: 86_400,
+            aggregation_dimensions: REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_string())
+                .collect(),
+            replay_attempts_total: 10,
+            replay_success_total: 4,
+            replay_failure_total: 6,
+            replay_hit_rate: 0.4,
+            false_replay_rate: 0.6,
+            reasoning_avoided_tokens: 80,
+            replay_fallback_cost_total: 400,
+            replay_roi: compute_replay_roi(80, 400),
+            replay_safety: false,
+            replay_safety_signal: ReplayRoiReleaseGateSafetySignal {
+                fail_closed_default: true,
+                rollback_ready: true,
+                audit_trail_complete: true,
+                has_replay_activity: true,
+            },
+            thresholds: ReplayRoiReleaseGateThresholds::default(),
+            fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy::default(),
+        };
+
+        let output = evaluate_replay_roi_release_gate_contract_input(&input);
+        assert_eq!(output.status, ReplayRoiReleaseGateStatus::FailClosed);
+        assert!(output
+            .failed_checks
+            .iter()
+            .any(|check| check == "replay_hit_rate_below_threshold"));
+        assert!(output
+            .failed_checks
+            .iter()
+            .any(|check| check == "false_replay_rate_above_threshold"));
+        assert!(output
+            .failed_checks
+            .iter()
+            .any(|check| check == "replay_roi_below_threshold"));
+        assert!(output.summary.contains("release gate fail_closed"));
+    }
+
+    #[test]
+    fn replay_roi_release_gate_summary_evaluator_marks_missing_data_indeterminate() {
+        let input = ReplayRoiReleaseGateInputContract {
+            generated_at: String::new(),
+            window_seconds: 86_400,
+            aggregation_dimensions: REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_string())
+                .collect(),
+            replay_attempts_total: 0,
+            replay_success_total: 0,
+            replay_failure_total: 0,
+            replay_hit_rate: 0.0,
+            false_replay_rate: 0.0,
+            reasoning_avoided_tokens: 0,
+            replay_fallback_cost_total: 0,
+            replay_roi: 0.0,
+            replay_safety: false,
+            replay_safety_signal: ReplayRoiReleaseGateSafetySignal {
+                fail_closed_default: true,
+                rollback_ready: true,
+                audit_trail_complete: true,
+                has_replay_activity: false,
+            },
+            thresholds: ReplayRoiReleaseGateThresholds::default(),
+            fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy::default(),
+        };
+
+        let output = evaluate_replay_roi_release_gate_contract_input(&input);
+        assert_eq!(output.status, ReplayRoiReleaseGateStatus::Indeterminate);
+        assert!(output
+            .failed_checks
+            .iter()
+            .any(|check| check == "missing_generated_at"));
+        assert!(output
+            .failed_checks
+            .iter()
+            .any(|check| check == "missing_replay_attempts"));
+        assert!(output
+            .summary
+            .contains("release gate indeterminate (fail-closed)"));
     }
 
     #[test]
