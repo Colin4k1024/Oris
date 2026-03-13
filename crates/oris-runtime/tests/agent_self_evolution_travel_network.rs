@@ -900,7 +900,7 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         "city beijing".to_string(),
         "city shanghai".to_string(),
     ];
-    let decision = consumer_evo
+    let first_decision = consumer_evo
         .replay_or_fallback_for_run(
             &"travel-consumer-replay".to_string(),
             SelectorInput {
@@ -919,19 +919,55 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         "consumer",
         "phase_transition",
         json!({
-            "stage": "[5] replay",
-            "used_capsule": decision.used_capsule,
-            "fallback": decision.fallback_to_planner
+            "stage": "[5] replay-shadow",
+            "used_capsule": first_decision.used_capsule,
+            "fallback": first_decision.fallback_to_planner
         }),
     );
 
-    assert!(decision.used_capsule);
-    assert!(!decision.fallback_to_planner);
+    assert!(first_decision.used_capsule);
+    assert!(!first_decision.fallback_to_planner);
     append_audit_log(
         &audit_log,
         format!(
-            "[STEP] replay used_capsule={} fallback={} reason={}",
-            decision.used_capsule, decision.fallback_to_planner, decision.reason
+            "[STEP] replay-shadow used_capsule={} fallback={} reason={}",
+            first_decision.used_capsule, first_decision.fallback_to_planner, first_decision.reason
+        ),
+    );
+
+    let second_decision = consumer_evo
+        .replay_or_fallback_for_run(
+            &"travel-consumer-replay-2".to_string(),
+            SelectorInput {
+                signals: merge_signals(&fixed_signals, &capture.gene.signals),
+                env: capture.capsule.env.clone(),
+                spec_id: None,
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap();
+    append_realtime_event(
+        &realtime_log_path,
+        &realtime_jsonl_path,
+        realtime_run_id,
+        "consumer",
+        "phase_transition",
+        json!({
+            "stage": "[6] replay-promote",
+            "used_capsule": second_decision.used_capsule,
+            "fallback": second_decision.fallback_to_planner
+        }),
+    );
+    assert!(second_decision.used_capsule);
+    assert!(!second_decision.fallback_to_planner);
+    append_audit_log(
+        &audit_log,
+        format!(
+            "[STEP] replay-promote used_capsule={} fallback={} reason={}",
+            second_decision.used_capsule,
+            second_decision.fallback_to_planner,
+            second_decision.reason
         ),
     );
 
@@ -970,8 +1006,9 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     let capsule_reused_event_detected =
         detect_capsule_reused_event(&consumer_events, &capture.capsule.id);
     let promotion_reason_codes = collect_promotion_reason_codes(&consumer_events);
-    assert_eq!(capsule_reused_event_detected, decision.used_capsule);
+    assert_eq!(capsule_reused_event_detected, second_decision.used_capsule);
     assert!(promotion_reason_codes.contains("downgrade_remote_requires_local_validation"));
+    assert!(promotion_reason_codes.contains("promotion_shadow_validation_passed"));
     assert!(promotion_reason_codes.contains("promotion_remote_replay_validated"));
     append_audit_log(
         &audit_log,
@@ -981,8 +1018,8 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     let success_reuse_verdict = final_reuse_verdict(
         import.accepted,
         import.imported_asset_ids.len(),
-        decision.used_capsule,
-        decision.fallback_to_planner,
+        second_decision.used_capsule,
+        second_decision.fallback_to_planner,
         capsule_reused_event_detected,
     );
     assert!(success_reuse_verdict);
@@ -991,8 +1028,8 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         repair_success,
         import.accepted,
         import.imported_asset_ids.len(),
-        decision.used_capsule,
-        decision.fallback_to_planner,
+        second_decision.used_capsule,
+        second_decision.fallback_to_planner,
         capsule_reused_event_detected,
     );
     assert!(success_repair_reuse_verdict);
@@ -1021,11 +1058,30 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     let metrics = consumer_evo.metrics_snapshot().unwrap();
     assert!(metrics.replay_attempts_total >= 1);
     assert!(metrics.replay_success_total >= 1);
+    assert!(metrics.reasoning_avoided_tokens_total >= 1);
+    let roi_summary = consumer_evo
+        .replay_roi_release_gate_summary(24 * 60 * 60)
+        .unwrap();
+    assert!(roi_summary.replay_attempts_total >= 2);
+    assert!(roi_summary.replay_success_total >= 1);
+    assert!(roi_summary.reasoning_avoided_tokens_total >= 1);
     append_audit_log(
         &audit_log,
         format!(
-            "[PASS] metrics replay_attempts_total={} replay_success_total={}",
-            metrics.replay_attempts_total, metrics.replay_success_total
+            "[PASS] metrics replay_attempts_total={} replay_success_total={} replay_roi={:.3}",
+            metrics.replay_attempts_total, metrics.replay_success_total, metrics.replay_roi
+        ),
+    );
+    append_audit_log(
+        &audit_log,
+        format!(
+            "[PASS] replay_roi_release_gate_summary attempts={} success={} failure={} avoided_tokens={} fallback_cost={} roi={:.3}",
+            roi_summary.replay_attempts_total,
+            roi_summary.replay_success_total,
+            roi_summary.replay_failure_total,
+            roi_summary.reasoning_avoided_tokens_total,
+            roi_summary.replay_fallback_cost_total,
+            roi_summary.replay_roi
         ),
     );
     assert!(realtime_log_path.exists());
@@ -1046,8 +1102,8 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         &replay_signals,
         &capture.gene.id,
         &capture.capsule.id,
-        decision.used_capsule && !decision.fallback_to_planner,
-        &decision.reason,
+        second_decision.used_capsule && !second_decision.fallback_to_planner,
+        &second_decision.reason,
     );
     let memory_graph_path = unique_path("memory-graph-events").join("memory_graph_events.jsonl");
     std::fs::create_dir_all(memory_graph_path.parent().unwrap()).unwrap();

@@ -1048,6 +1048,7 @@ async fn stale_confidence_forces_revalidation_before_replay() {
             state,
             reason,
             reason_code,
+            ..
         }
             if gene_id == &gene.id
                 && *state == EvoAssetState::Quarantined
@@ -1160,35 +1161,60 @@ async fn remote_learning_requires_local_validation_before_becoming_shareable() {
     assert_eq!(quarantined_capsule.state, EvoAssetState::Quarantined);
     assert!(before_publish.assets.is_empty());
 
-    let decision = consumer
+    let first_decision = consumer
         .replay_or_fallback(replay_input("missing readme", &consumer_workspace))
         .await
         .unwrap();
-    let after = consumer_store.rebuild_projection().unwrap();
-    let after_publish = oris_evokernel::EvolutionNetworkNode::new(consumer_store.clone())
+    let after_first = consumer_store.rebuild_projection().unwrap();
+    let after_first_publish = oris_evokernel::EvolutionNetworkNode::new(consumer_store.clone())
         .publish_local_assets("node-consumer")
         .unwrap();
 
-    assert!(decision.used_capsule);
-    assert_eq!(decision.capsule_id, Some(captured.id.clone()));
-    let promoted_gene = after
+    assert!(first_decision.used_capsule);
+    assert_eq!(first_decision.capsule_id, Some(captured.id.clone()));
+    let shadow_gene = after_first
         .genes
         .iter()
         .find(|gene| gene.id == captured.gene_id)
         .unwrap();
-    let promoted_capsule = after
+    let shadow_capsule = after_first
+        .capsules
+        .iter()
+        .find(|capsule| capsule.id == captured.id)
+        .unwrap();
+    assert_eq!(shadow_gene.state, EvoAssetState::ShadowValidated);
+    assert_eq!(shadow_capsule.state, EvoAssetState::ShadowValidated);
+    assert!(after_first_publish.assets.is_empty());
+
+    let second_decision = consumer
+        .replay_or_fallback(replay_input("missing readme", &consumer_workspace))
+        .await
+        .unwrap();
+    let after_second = consumer_store.rebuild_projection().unwrap();
+    let after_second_publish = oris_evokernel::EvolutionNetworkNode::new(consumer_store.clone())
+        .publish_local_assets("node-consumer")
+        .unwrap();
+
+    assert!(second_decision.used_capsule);
+    assert_eq!(second_decision.capsule_id, Some(captured.id.clone()));
+    let promoted_gene = after_second
+        .genes
+        .iter()
+        .find(|gene| gene.id == captured.gene_id)
+        .unwrap();
+    let promoted_capsule = after_second
         .capsules
         .iter()
         .find(|capsule| capsule.id == captured.id)
         .unwrap();
     assert_eq!(promoted_gene.state, EvoAssetState::Promoted);
     assert_eq!(promoted_capsule.state, EvoAssetState::Promoted);
-    assert!(after_publish.assets.iter().any(|asset| matches!(
+    assert!(after_second_publish.assets.iter().any(|asset| matches!(
         asset,
         oris_evokernel::evolution_network::NetworkAsset::Gene { gene }
             if gene.id == captured.gene_id
     )));
-    assert!(after_publish.assets.iter().any(|asset| matches!(
+    assert!(after_second_publish.assets.iter().any(|asset| matches!(
         asset,
         oris_evokernel::evolution_network::NetworkAsset::Capsule { capsule }
             if capsule.id == captured.id
@@ -1335,9 +1361,12 @@ async fn mixed_task_sequence_only_replays_for_learned_signals() {
 
     assert_eq!(hits, 3);
     assert_eq!(misses, 2);
-    assert_eq!(metrics.replay_attempts_total, hits as u64);
+    assert_eq!(metrics.replay_attempts_total, (hits + misses) as u64);
     assert_eq!(metrics.replay_success_total, hits as u64);
-    assert_eq!(metrics.replay_success_rate, 1.0);
+    assert_eq!(
+        metrics.replay_success_rate,
+        hits as f64 / (hits + misses) as f64
+    );
     assert_eq!(
         events
             .iter()
