@@ -168,6 +168,7 @@ const SHADOW_PROMOTION_MIN_ENV_MATCH: f32 = 0.75;
 const SHADOW_PROMOTION_MIN_DECAYED_CONFIDENCE: f32 = MIN_REPLAY_CONFIDENCE;
 const REPLAY_REASONING_TOKEN_FLOOR: u64 = 192;
 const REPLAY_REASONING_TOKEN_SIGNAL_WEIGHT: u64 = 24;
+const COLD_START_LOOKUP_PENALTY: f32 = 0.05;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepairQualityGateReport {
@@ -431,12 +432,42 @@ impl Validator for CommandValidator {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayDetectEvidence {
+    pub task_class_id: String,
+    pub task_label: String,
+    pub matched_signals: Vec<String>,
+    pub mismatch_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayCandidateEvidence {
+    pub rank: usize,
+    pub gene_id: String,
+    pub capsule_id: Option<String>,
+    pub match_quality: f32,
+    pub confidence: Option<f32>,
+    pub environment_match_factor: Option<f32>,
+    pub cold_start_penalty: f32,
+    pub final_score: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplaySelectEvidence {
+    pub exact_match_lookup: bool,
+    pub selected_gene_id: Option<String>,
+    pub selected_capsule_id: Option<String>,
+    pub candidates: Vec<ReplayCandidateEvidence>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ReplayDecision {
     pub used_capsule: bool,
     pub capsule_id: Option<CapsuleId>,
     pub fallback_to_planner: bool,
     pub reason: String,
+    pub detect_evidence: ReplayDetectEvidence,
+    pub select_evidence: ReplaySelectEvidence,
     pub economics_evidence: ReplayRoiEvidence,
 }
 
@@ -927,6 +958,50 @@ impl StoreReplayExecutor {
         }
     }
 
+    fn build_select_evidence(
+        &self,
+        input: &SelectorInput,
+        candidates: &[GeneCandidate],
+        exact_match: bool,
+    ) -> ReplaySelectEvidence {
+        let cold_start_penalty = if exact_match {
+            COLD_START_LOOKUP_PENALTY
+        } else {
+            0.0
+        };
+        let candidate_rows = candidates
+            .iter()
+            .enumerate()
+            .map(|(idx, candidate)| {
+                let top_capsule = candidate.capsules.first();
+                let environment_match_factor = top_capsule
+                    .map(|capsule| replay_environment_match_factor(&input.env, &capsule.env));
+                let final_score = candidate.score * (1.0 - cold_start_penalty);
+                ReplayCandidateEvidence {
+                    rank: idx + 1,
+                    gene_id: candidate.gene.id.clone(),
+                    capsule_id: top_capsule.map(|capsule| capsule.id.clone()),
+                    match_quality: candidate.score,
+                    confidence: top_capsule.map(|capsule| capsule.confidence),
+                    environment_match_factor,
+                    cold_start_penalty,
+                    final_score,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        ReplaySelectEvidence {
+            exact_match_lookup: exact_match,
+            selected_gene_id: candidate_rows
+                .first()
+                .map(|candidate| candidate.gene_id.clone()),
+            selected_capsule_id: candidate_rows
+                .first()
+                .and_then(|candidate| candidate.capsule_id.clone()),
+            candidates: candidate_rows,
+        }
+    }
+
     fn apply_confidence_revalidation(&self) {
         let Ok(projection) = projection_snapshot(self.store.as_ref()) else {
             return;
@@ -1058,7 +1133,12 @@ impl StoreReplayExecutor {
             candidates,
             exact_match,
         } = self.collect_replay_candidates(input);
+        let mut detect_evidence = replay_detect_evidence_from_input(input);
+        let select_evidence = self.build_select_evidence(input, &candidates, exact_match);
         let Some(best) = candidates.into_iter().next() else {
+            detect_evidence
+                .mismatch_reasons
+                .push("no_candidate_after_select".to_string());
             let economics_evidence = self.build_replay_economics_evidence(
                 input,
                 None,
@@ -1073,10 +1153,21 @@ impl StoreReplayExecutor {
                 capsule_id: None,
                 fallback_to_planner: true,
                 reason: "no matching gene".into(),
+                detect_evidence,
+                select_evidence,
                 economics_evidence,
             });
         };
+        let (detected_task_class_id, detected_task_label) =
+            replay_descriptor_from_candidate_or_input(Some(&best), input);
+        detect_evidence.task_class_id = detected_task_class_id;
+        detect_evidence.task_label = detected_task_label;
+        detect_evidence.matched_signals =
+            matched_replay_signals(&input.signals, &best.gene.signals);
         if !exact_match && best.score < 0.82 {
+            detect_evidence
+                .mismatch_reasons
+                .push("score_below_threshold".to_string());
             let reason = format!("best gene score {:.3} below replay threshold", best.score);
             let economics_evidence = self.build_replay_economics_evidence(
                 input,
@@ -1097,11 +1188,16 @@ impl StoreReplayExecutor {
                 capsule_id: None,
                 fallback_to_planner: true,
                 reason,
+                detect_evidence,
+                select_evidence,
                 economics_evidence,
             });
         }
 
         let Some(capsule) = best.capsules.first().cloned() else {
+            detect_evidence
+                .mismatch_reasons
+                .push("candidate_has_no_capsule".to_string());
             let economics_evidence = self.build_replay_economics_evidence(
                 input,
                 Some(&best),
@@ -1121,6 +1217,8 @@ impl StoreReplayExecutor {
                 capsule_id: None,
                 fallback_to_planner: true,
                 reason: "candidate gene has no capsule".into(),
+                detect_evidence,
+                select_evidence,
                 economics_evidence,
             });
         };
@@ -1129,6 +1227,9 @@ impl StoreReplayExecutor {
         let Some(mutation) = find_declared_mutation(self.store.as_ref(), &capsule.mutation_id)
             .map_err(|err| ReplayError::Store(err.to_string()))?
         else {
+            detect_evidence
+                .mismatch_reasons
+                .push("mutation_payload_missing".to_string());
             let economics_evidence = self.build_replay_economics_evidence(
                 input,
                 Some(&best),
@@ -1148,6 +1249,8 @@ impl StoreReplayExecutor {
                 capsule_id: None,
                 fallback_to_planner: true,
                 reason: "mutation payload missing from store".into(),
+                detect_evidence,
+                select_evidence,
                 economics_evidence,
             });
         };
@@ -1171,11 +1274,16 @@ impl StoreReplayExecutor {
                     Some(&capsule.id),
                     economics_evidence.clone(),
                 )?;
+                detect_evidence
+                    .mismatch_reasons
+                    .push("patch_apply_failed".to_string());
                 return Ok(ReplayDecision {
                     used_capsule: false,
                     capsule_id: Some(capsule.id.clone()),
                     fallback_to_planner: true,
                     reason,
+                    detect_evidence,
+                    select_evidence,
                     economics_evidence,
                 });
             }
@@ -1203,11 +1311,16 @@ impl StoreReplayExecutor {
                 Some(&capsule.id),
                 economics_evidence.clone(),
             )?;
+            detect_evidence
+                .mismatch_reasons
+                .push("validation_failed".to_string());
             return Ok(ReplayDecision {
                 used_capsule: false,
                 capsule_id: Some(capsule.id.clone()),
                 fallback_to_planner: true,
                 reason: "replay validation failed".into(),
+                detect_evidence,
+                select_evidence,
                 economics_evidence,
             });
         }
@@ -1315,6 +1428,8 @@ impl StoreReplayExecutor {
             capsule_id: Some(capsule.id),
             fallback_to_planner: false,
             reason,
+            detect_evidence,
+            select_evidence,
             economics_evidence,
         })
     }
@@ -2905,6 +3020,50 @@ fn replay_task_descriptor(signals: &[String]) -> (String, String) {
     let task_class_id = stable_hash_json(&normalized)
         .unwrap_or_else(|_| compute_artifact_hash(&normalized.join("\n")));
     (task_class_id, task_label)
+}
+
+fn normalized_signal_values(signals: &[String]) -> Vec<String> {
+    signals
+        .iter()
+        .filter_map(|signal| normalize_signal_phrase(signal))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+}
+
+fn matched_replay_signals(input_signals: &[String], candidate_signals: &[String]) -> Vec<String> {
+    let normalized_input = normalized_signal_values(input_signals);
+    if normalized_input.is_empty() {
+        return Vec::new();
+    }
+    let normalized_candidate = normalized_signal_values(candidate_signals);
+    if normalized_candidate.is_empty() {
+        return normalized_input;
+    }
+    let matched = normalized_input
+        .iter()
+        .filter(|signal| {
+            normalized_candidate
+                .iter()
+                .any(|candidate| candidate.contains(signal.as_str()) || signal.contains(candidate))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if matched.is_empty() {
+        normalized_input
+    } else {
+        matched
+    }
+}
+
+fn replay_detect_evidence_from_input(input: &SelectorInput) -> ReplayDetectEvidence {
+    let (task_class_id, task_label) = replay_task_descriptor(&input.signals);
+    ReplayDetectEvidence {
+        task_class_id,
+        task_label,
+        matched_signals: normalized_signal_values(&input.signals),
+        mismatch_reasons: Vec::new(),
+    }
 }
 
 fn replay_descriptor_from_candidate_or_input(
@@ -6225,6 +6384,15 @@ index 0000000..1111111
             .unwrap();
         assert!(decision.used_capsule);
         assert_eq!(decision.capsule_id, Some(capsule.id));
+        assert!(!decision.detect_evidence.task_class_id.is_empty());
+        assert!(!decision.detect_evidence.matched_signals.is_empty());
+        assert!(decision.detect_evidence.mismatch_reasons.is_empty());
+        assert!(!decision.select_evidence.candidates.is_empty());
+        assert!(!decision.select_evidence.exact_match_lookup);
+        assert_eq!(
+            decision.select_evidence.selected_capsule_id.as_deref(),
+            decision.capsule_id.as_deref()
+        );
         assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
             &stored.event,
             EvolutionEvent::CapsuleReused {
@@ -6365,12 +6533,24 @@ index 0000000..1111111
             .await
             .unwrap();
         assert!(!miss.used_capsule);
+        assert!(miss.fallback_to_planner);
+        assert!(miss.select_evidence.candidates.is_empty());
+        assert!(miss
+            .detect_evidence
+            .mismatch_reasons
+            .iter()
+            .any(|reason| reason == "no_candidate_after_select"));
 
         let hit = evo
             .replay_or_fallback(replay_input("roi-signal"))
             .await
             .unwrap();
         assert!(hit.used_capsule);
+        assert!(!hit.select_evidence.candidates.is_empty());
+        assert_eq!(
+            hit.select_evidence.selected_capsule_id.as_deref(),
+            hit.capsule_id.as_deref()
+        );
 
         let summary = evo.replay_roi_release_gate_summary(60 * 60).unwrap();
         assert_eq!(summary.replay_attempts_total, 2);
