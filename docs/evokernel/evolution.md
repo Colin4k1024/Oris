@@ -181,7 +181,49 @@ When the caller needs the reuse event tied to a specific execution, use
 that replay run id in `replay_run_id` while preserving the capsule's original
 `run_id`.
 
-## 8.1 Supervised DEVLOOP (Bounded Scope)
+## 8.1 Self-Evolution Release Gate Contract (Baseline)
+
+The baseline release gate contract is now machine-readable and defined in
+`oris-evokernel` via:
+
+- `ReplayRoiReleaseGateInputContract`
+- `ReplayRoiReleaseGateOutputContract`
+- `ReplayRoiReleaseGateThresholds`
+- `ReplayRoiReleaseGateFailClosedPolicy`
+
+Gate input fixes the core metrics for one replay ROI window:
+
+- `replay_hit_rate` (`replay_success_total / replay_attempts_total`)
+- `false_replay_rate` (`replay_failure_total / replay_attempts_total`)
+- `reasoning_avoided_tokens`
+- `replay_roi`
+- `replay_safety` (derived from fail-closed default + rollback readiness + audit
+  trail completeness + replay activity presence)
+
+Aggregation dimensions are fixed as:
+
+- `task_class`
+- `source_sender_id`
+
+Default threshold policy is conservative and configurable:
+
+- `min_replay_attempts = 3`
+- `min_replay_hit_rate = 0.60`
+- `max_false_replay_rate = 0.25`
+- `min_reasoning_avoided_tokens = 192`
+- `min_replay_roi = 0.05`
+- `require_replay_safety = true`
+
+Fail-closed defaults are explicit in the contract:
+
+- threshold violation -> `block_release`
+- missing metrics -> `block_release`
+- invalid metrics -> `block_release`
+
+Until a dedicated evaluator is wired, the default output contract status is
+`fail_closed` with `failed_checks=["release_gate_evaluator_not_run"]`.
+
+## 8.2 Supervised DEVLOOP (Bounded Scope)
 
 The checked-in runtime now exposes `run_supervised_devloop(...)` for one bounded
 task class: a single Markdown file under `docs/`. The flow stays policy-first:
