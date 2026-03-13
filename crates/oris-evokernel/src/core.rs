@@ -19,8 +19,9 @@ use oris_evolution::{
     compute_artifact_hash, decayed_replay_confidence, next_id, stable_hash_json, AssetState,
     BlastRadius, CandidateSource, Capsule, CapsuleId, EnvFingerprint, EvolutionError,
     EvolutionEvent, EvolutionProjection, EvolutionStore, Gene, GeneCandidate, MutationId,
-    PreparedMutation, Selector, SelectorInput, StoreBackedSelector, StoredEvolutionEvent,
-    TransitionReasonCode, ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
+    PreparedMutation, ReplayRoiEvidence, ReplayRoiReasonCode, Selector, SelectorInput,
+    StoreBackedSelector, StoredEvolutionEvent, TransitionEvidence, TransitionReasonCode,
+    ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset, SyncAudit};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -161,6 +162,12 @@ pub struct BootstrapReport {
 }
 
 const REPORTED_EXPERIENCE_RETENTION_LIMIT: usize = 3;
+const SHADOW_PROMOTION_MIN_REPLAY_ATTEMPTS: u64 = 2;
+const SHADOW_PROMOTION_MIN_SUCCESS_RATE: f32 = 0.70;
+const SHADOW_PROMOTION_MIN_ENV_MATCH: f32 = 0.75;
+const SHADOW_PROMOTION_MIN_DECAYED_CONFIDENCE: f32 = MIN_REPLAY_CONFIDENCE;
+const REPLAY_REASONING_TOKEN_FLOOR: u64 = 192;
+const REPLAY_REASONING_TOKEN_SIGNAL_WEIGHT: u64 = 24;
 
 impl ValidationReport {
     pub fn to_snapshot(&self, profile: &str) -> ValidationSnapshot {
@@ -320,14 +327,43 @@ pub struct ReplayDecision {
     pub capsule_id: Option<CapsuleId>,
     pub fallback_to_planner: bool,
     pub reason: String,
+    pub economics_evidence: ReplayRoiEvidence,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ReplayTaskClassMetrics {
     pub task_class_id: String,
     pub task_label: String,
     pub replay_success_total: u64,
+    pub replay_failure_total: u64,
     pub reasoning_steps_avoided_total: u64,
+    pub reasoning_avoided_tokens_total: u64,
+    pub replay_fallback_cost_total: u64,
+    pub replay_roi: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplaySourceRoiMetrics {
+    pub source_sender_id: String,
+    pub replay_success_total: u64,
+    pub replay_failure_total: u64,
+    pub reasoning_avoided_tokens_total: u64,
+    pub replay_fallback_cost_total: u64,
+    pub replay_roi: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayRoiWindowSummary {
+    pub generated_at: String,
+    pub window_seconds: u64,
+    pub replay_attempts_total: u64,
+    pub replay_success_total: u64,
+    pub replay_failure_total: u64,
+    pub reasoning_avoided_tokens_total: u64,
+    pub replay_fallback_cost_total: u64,
+    pub replay_roi: f64,
+    pub replay_task_classes: Vec<ReplayTaskClassMetrics>,
+    pub replay_sources: Vec<ReplaySourceRoiMetrics>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -790,6 +826,11 @@ impl StoreReplayExecutor {
                 "confidence decayed to {:.3}; revalidation required before replay",
                 target.decayed_confidence
             );
+            let confidence_decay_ratio = if target.peak_confidence > 0.0 {
+                (target.decayed_confidence / target.peak_confidence).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             if self
                 .store
                 .append_event(EvolutionEvent::PromotionEvaluated {
@@ -797,6 +838,18 @@ impl StoreReplayExecutor {
                     state: AssetState::Quarantined,
                     reason: reason.clone(),
                     reason_code: TransitionReasonCode::RevalidationConfidenceDecay,
+                    evidence: Some(TransitionEvidence {
+                        replay_attempts: None,
+                        replay_successes: None,
+                        replay_success_rate: None,
+                        environment_match_factor: None,
+                        decayed_confidence: Some(target.decayed_confidence),
+                        confidence_decay_ratio: Some(confidence_decay_ratio),
+                        summary: Some(format!(
+                            "phase=confidence_revalidation; decayed_confidence={:.3}; confidence_decay_ratio={:.3}",
+                            target.decayed_confidence, confidence_decay_ratio
+                        )),
+                    }),
                 })
                 .is_err()
             {
@@ -814,6 +867,76 @@ impl StoreReplayExecutor {
         }
     }
 
+    fn build_replay_economics_evidence(
+        &self,
+        input: &SelectorInput,
+        candidate: Option<&GeneCandidate>,
+        source_sender_id: Option<&str>,
+        success: bool,
+        reason_code: ReplayRoiReasonCode,
+        reason: &str,
+    ) -> ReplayRoiEvidence {
+        let (task_class_id, task_label) =
+            replay_descriptor_from_candidate_or_input(candidate, input);
+        let signal_source = candidate
+            .map(|best| best.gene.signals.as_slice())
+            .unwrap_or(input.signals.as_slice());
+        let baseline_tokens = estimated_reasoning_tokens(signal_source);
+        let reasoning_avoided_tokens = if success { baseline_tokens } else { 0 };
+        let replay_fallback_cost = if success { 0 } else { baseline_tokens };
+        let asset_origin =
+            candidate.and_then(|best| strategy_metadata_value(&best.gene.strategy, "asset_origin"));
+        let mut context_dimensions = vec![
+            format!(
+                "outcome={}",
+                if success {
+                    "replay_hit"
+                } else {
+                    "planner_fallback"
+                }
+            ),
+            format!("reason={reason}"),
+            format!("task_class_id={task_class_id}"),
+            format!("task_label={task_label}"),
+        ];
+        if let Some(asset_origin) = asset_origin.as_deref() {
+            context_dimensions.push(format!("asset_origin={asset_origin}"));
+        }
+        if let Some(source_sender_id) = source_sender_id {
+            context_dimensions.push(format!("source_sender_id={source_sender_id}"));
+        }
+        ReplayRoiEvidence {
+            success,
+            reason_code,
+            task_class_id,
+            task_label,
+            reasoning_avoided_tokens,
+            replay_fallback_cost,
+            replay_roi: compute_replay_roi(reasoning_avoided_tokens, replay_fallback_cost),
+            asset_origin,
+            source_sender_id: source_sender_id.map(ToOwned::to_owned),
+            context_dimensions,
+        }
+    }
+
+    fn record_replay_economics(
+        &self,
+        replay_run_id: Option<&RunId>,
+        candidate: Option<&GeneCandidate>,
+        capsule_id: Option<&str>,
+        evidence: ReplayRoiEvidence,
+    ) -> Result<(), ReplayError> {
+        self.store
+            .append_event(EvolutionEvent::ReplayEconomicsRecorded {
+                gene_id: candidate.map(|best| best.gene.id.clone()),
+                capsule_id: capsule_id.map(ToOwned::to_owned),
+                replay_run_id: replay_run_id.cloned(),
+                evidence,
+            })
+            .map_err(|err| ReplayError::Store(err.to_string()))?;
+        Ok(())
+    }
+
     async fn try_replay_inner(
         &self,
         replay_run_id: Option<&RunId>,
@@ -826,28 +949,69 @@ impl StoreReplayExecutor {
             exact_match,
         } = self.collect_replay_candidates(input);
         let Some(best) = candidates.into_iter().next() else {
+            let economics_evidence = self.build_replay_economics_evidence(
+                input,
+                None,
+                None,
+                false,
+                ReplayRoiReasonCode::ReplayMissNoMatchingGene,
+                "no matching gene",
+            );
+            self.record_replay_economics(replay_run_id, None, None, economics_evidence.clone())?;
             return Ok(ReplayDecision {
                 used_capsule: false,
                 capsule_id: None,
                 fallback_to_planner: true,
                 reason: "no matching gene".into(),
+                economics_evidence,
             });
         };
         if !exact_match && best.score < 0.82 {
+            let reason = format!("best gene score {:.3} below replay threshold", best.score);
+            let economics_evidence = self.build_replay_economics_evidence(
+                input,
+                Some(&best),
+                None,
+                false,
+                ReplayRoiReasonCode::ReplayMissScoreBelowThreshold,
+                &reason,
+            );
+            self.record_replay_economics(
+                replay_run_id,
+                Some(&best),
+                None,
+                economics_evidence.clone(),
+            )?;
             return Ok(ReplayDecision {
                 used_capsule: false,
                 capsule_id: None,
                 fallback_to_planner: true,
-                reason: format!("best gene score {:.3} below replay threshold", best.score),
+                reason,
+                economics_evidence,
             });
         }
 
         let Some(capsule) = best.capsules.first().cloned() else {
+            let economics_evidence = self.build_replay_economics_evidence(
+                input,
+                Some(&best),
+                None,
+                false,
+                ReplayRoiReasonCode::ReplayMissCandidateHasNoCapsule,
+                "candidate gene has no capsule",
+            );
+            self.record_replay_economics(
+                replay_run_id,
+                Some(&best),
+                None,
+                economics_evidence.clone(),
+            )?;
             return Ok(ReplayDecision {
                 used_capsule: false,
                 capsule_id: None,
                 fallback_to_planner: true,
                 reason: "candidate gene has no capsule".into(),
+                economics_evidence,
             });
         };
         let remote_publisher = self.publisher_for_capsule(&capsule.id);
@@ -855,11 +1019,26 @@ impl StoreReplayExecutor {
         let Some(mutation) = find_declared_mutation(self.store.as_ref(), &capsule.mutation_id)
             .map_err(|err| ReplayError::Store(err.to_string()))?
         else {
+            let economics_evidence = self.build_replay_economics_evidence(
+                input,
+                Some(&best),
+                remote_publisher.as_deref(),
+                false,
+                ReplayRoiReasonCode::ReplayMissMutationPayloadMissing,
+                "mutation payload missing from store",
+            );
+            self.record_replay_economics(
+                replay_run_id,
+                Some(&best),
+                Some(&capsule.id),
+                economics_evidence.clone(),
+            )?;
             return Ok(ReplayDecision {
                 used_capsule: false,
                 capsule_id: None,
                 fallback_to_planner: true,
                 reason: "mutation payload missing from store".into(),
+                economics_evidence,
             });
         };
 
@@ -867,11 +1046,27 @@ impl StoreReplayExecutor {
             Ok(receipt) => receipt,
             Err(err) => {
                 self.record_reuse_settlement(remote_publisher.as_deref(), false);
+                let reason = format!("replay patch apply failed: {err}");
+                let economics_evidence = self.build_replay_economics_evidence(
+                    input,
+                    Some(&best),
+                    remote_publisher.as_deref(),
+                    false,
+                    ReplayRoiReasonCode::ReplayMissPatchApplyFailed,
+                    &reason,
+                );
+                self.record_replay_economics(
+                    replay_run_id,
+                    Some(&best),
+                    Some(&capsule.id),
+                    economics_evidence.clone(),
+                )?;
                 return Ok(ReplayDecision {
                     used_capsule: false,
                     capsule_id: Some(capsule.id.clone()),
                     fallback_to_planner: true,
-                    reason: format!("replay patch apply failed: {err}"),
+                    reason,
+                    economics_evidence,
                 });
             }
         };
@@ -884,15 +1079,35 @@ impl StoreReplayExecutor {
         if !report.success {
             self.record_replay_validation_failure(&best, &capsule, validation, &report)?;
             self.record_reuse_settlement(remote_publisher.as_deref(), false);
+            let economics_evidence = self.build_replay_economics_evidence(
+                input,
+                Some(&best),
+                remote_publisher.as_deref(),
+                false,
+                ReplayRoiReasonCode::ReplayMissValidationFailed,
+                "replay validation failed",
+            );
+            self.record_replay_economics(
+                replay_run_id,
+                Some(&best),
+                Some(&capsule.id),
+                economics_evidence.clone(),
+            )?;
             return Ok(ReplayDecision {
                 used_capsule: false,
                 capsule_id: Some(capsule.id.clone()),
                 fallback_to_planner: true,
                 reason: "replay validation failed".into(),
+                economics_evidence,
             });
         }
 
-        if matches!(capsule.state, AssetState::Quarantined) {
+        let requires_shadow_progression = remote_publisher.is_some()
+            && matches!(
+                capsule.state,
+                AssetState::Quarantined | AssetState::ShadowValidated
+            );
+        if requires_shadow_progression {
             self.store
                 .append_event(EvolutionEvent::ValidationPassed {
                     mutation_id: capsule.mutation_id.clone(),
@@ -900,15 +1115,48 @@ impl StoreReplayExecutor {
                     gene_id: Some(best.gene.id.clone()),
                 })
                 .map_err(|err| ReplayError::Store(err.to_string()))?;
-            if matches!(best.gene.state, AssetState::Quarantined) {
-                self.store
-                    .append_event(EvolutionEvent::PromotionEvaluated {
-                        gene_id: best.gene.id.clone(),
-                        state: AssetState::Promoted,
-                        reason: "remote asset locally validated via replay".into(),
-                        reason_code: TransitionReasonCode::PromotionRemoteReplayValidated,
-                    })
-                    .map_err(|err| ReplayError::Store(err.to_string()))?;
+            let evidence = self.shadow_transition_evidence(&best.gene.id, &capsule, &input.env)?;
+            let (target_state, reason_code, reason, promote_now, phase) =
+                if matches!(best.gene.state, AssetState::Quarantined) {
+                    (
+                        AssetState::ShadowValidated,
+                        TransitionReasonCode::PromotionShadowValidationPassed,
+                        "remote asset passed first local replay and entered shadow validation"
+                            .into(),
+                        false,
+                        "quarantine_to_shadow",
+                    )
+                } else if shadow_promotion_gate_passed(&evidence) {
+                    (
+                        AssetState::Promoted,
+                        TransitionReasonCode::PromotionRemoteReplayValidated,
+                        "shadow validation thresholds satisfied; remote asset promoted".into(),
+                        true,
+                        "shadow_to_promoted",
+                    )
+                } else {
+                    (
+                        AssetState::ShadowValidated,
+                        TransitionReasonCode::ShadowCollectingReplayEvidence,
+                        "shadow validation collecting additional replay evidence".into(),
+                        false,
+                        "shadow_hold",
+                    )
+                };
+            self.store
+                .append_event(EvolutionEvent::PromotionEvaluated {
+                    gene_id: best.gene.id.clone(),
+                    state: target_state.clone(),
+                    reason,
+                    reason_code,
+                    evidence: Some(evidence.to_transition_evidence(shadow_evidence_summary(
+                        &evidence,
+                        promote_now,
+                        phase,
+                    ))),
+                })
+                .map_err(|err| ReplayError::Store(err.to_string()))?;
+            if promote_now {
                 self.store
                     .append_event(EvolutionEvent::GenePromoted {
                         gene_id: best.gene.id.clone(),
@@ -918,7 +1166,7 @@ impl StoreReplayExecutor {
             self.store
                 .append_event(EvolutionEvent::CapsuleReleased {
                     capsule_id: capsule.id.clone(),
-                    state: AssetState::Promoted,
+                    state: target_state,
                 })
                 .map_err(|err| ReplayError::Store(err.to_string()))?;
         }
@@ -932,16 +1180,32 @@ impl StoreReplayExecutor {
             })
             .map_err(|err| ReplayError::Store(err.to_string()))?;
         self.record_reuse_settlement(remote_publisher.as_deref(), true);
+        let reason = if exact_match {
+            "replayed via cold-start lookup".to_string()
+        } else {
+            "replayed via selector".to_string()
+        };
+        let economics_evidence = self.build_replay_economics_evidence(
+            input,
+            Some(&best),
+            remote_publisher.as_deref(),
+            true,
+            ReplayRoiReasonCode::ReplayHit,
+            &reason,
+        );
+        self.record_replay_economics(
+            replay_run_id,
+            Some(&best),
+            Some(&capsule.id),
+            economics_evidence.clone(),
+        )?;
 
         Ok(ReplayDecision {
             used_capsule: true,
             capsule_id: Some(capsule.id),
             fallback_to_planner: false,
-            reason: if exact_match {
-                "replayed via cold-start lookup".into()
-            } else {
-                "replayed via selector".into()
-            },
+            reason,
+            economics_evidence,
         })
     }
 
@@ -1083,6 +1347,22 @@ impl StoreReplayExecutor {
                     state: AssetState::Revoked,
                     reason: governor_decision.reason.clone(),
                     reason_code: governor_decision.reason_code.clone(),
+                    evidence: Some(TransitionEvidence {
+                        replay_attempts: Some(replay_failures),
+                        replay_successes: None,
+                        replay_success_rate: None,
+                        environment_match_factor: None,
+                        decayed_confidence: Some(current_confidence),
+                        confidence_decay_ratio: if historical_peak_confidence > 0.0 {
+                            Some((current_confidence / historical_peak_confidence).clamp(0.0, 1.0))
+                        } else {
+                            None
+                        },
+                        summary: Some(format!(
+                            "phase=replay_failure_revocation; replay_failures={replay_failures}; current_confidence={:.3}; historical_peak_confidence={:.3}",
+                            current_confidence, historical_peak_confidence
+                        )),
+                    }),
                 })
                 .map_err(|err| ReplayError::Store(err.to_string()))?;
             self.store
@@ -1149,12 +1429,109 @@ impl StoreReplayExecutor {
             })
             .count() as u64)
     }
+
+    fn shadow_transition_evidence(
+        &self,
+        gene_id: &str,
+        capsule: &Capsule,
+        input_env: &EnvFingerprint,
+    ) -> Result<ShadowTransitionEvidence, ReplayError> {
+        let events = self
+            .store
+            .scan(1)
+            .map_err(|err| ReplayError::Store(err.to_string()))?;
+        let (replay_attempts, replay_successes) = events.iter().fold(
+            (0_u64, 0_u64),
+            |(attempts, successes), stored| match &stored.event {
+                EvolutionEvent::ValidationPassed {
+                    gene_id: Some(current_gene_id),
+                    ..
+                } if current_gene_id == gene_id => (attempts + 1, successes + 1),
+                EvolutionEvent::ValidationFailed {
+                    gene_id: Some(current_gene_id),
+                    ..
+                } if current_gene_id == gene_id => (attempts + 1, successes),
+                _ => (attempts, successes),
+            },
+        );
+        let replay_success_rate = safe_ratio(replay_successes, replay_attempts) as f32;
+        let environment_match_factor = replay_environment_match_factor(input_env, &capsule.env);
+        let projection = projection_snapshot(self.store.as_ref())
+            .map_err(|err| ReplayError::Store(err.to_string()))?;
+        let age_secs = projection
+            .last_updated_at
+            .get(gene_id)
+            .and_then(|timestamp| Self::seconds_since_timestamp(timestamp, Utc::now()));
+        let decayed_confidence = decayed_replay_confidence(capsule.confidence, age_secs);
+        let confidence_decay_ratio = if capsule.confidence > 0.0 {
+            (decayed_confidence / capsule.confidence).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        Ok(ShadowTransitionEvidence {
+            replay_attempts,
+            replay_successes,
+            replay_success_rate,
+            environment_match_factor,
+            decayed_confidence,
+            confidence_decay_ratio,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ShadowTransitionEvidence {
+    replay_attempts: u64,
+    replay_successes: u64,
+    replay_success_rate: f32,
+    environment_match_factor: f32,
+    decayed_confidence: f32,
+    confidence_decay_ratio: f32,
+}
+
+impl ShadowTransitionEvidence {
+    fn to_transition_evidence(&self, summary: String) -> TransitionEvidence {
+        TransitionEvidence {
+            replay_attempts: Some(self.replay_attempts),
+            replay_successes: Some(self.replay_successes),
+            replay_success_rate: Some(self.replay_success_rate),
+            environment_match_factor: Some(self.environment_match_factor),
+            decayed_confidence: Some(self.decayed_confidence),
+            confidence_decay_ratio: Some(self.confidence_decay_ratio),
+            summary: Some(summary),
+        }
+    }
+}
+
+fn shadow_promotion_gate_passed(evidence: &ShadowTransitionEvidence) -> bool {
+    evidence.replay_attempts >= SHADOW_PROMOTION_MIN_REPLAY_ATTEMPTS
+        && evidence.replay_success_rate >= SHADOW_PROMOTION_MIN_SUCCESS_RATE
+        && evidence.environment_match_factor >= SHADOW_PROMOTION_MIN_ENV_MATCH
+        && evidence.decayed_confidence >= SHADOW_PROMOTION_MIN_DECAYED_CONFIDENCE
+}
+
+fn shadow_evidence_summary(
+    evidence: &ShadowTransitionEvidence,
+    promoted: bool,
+    phase: &str,
+) -> String {
+    format!(
+        "phase={phase}; replay_attempts={}; replay_successes={}; replay_success_rate={:.3}; environment_match_factor={:.3}; decayed_confidence={:.3}; confidence_decay_ratio={:.3}; promote={promoted}",
+        evidence.replay_attempts,
+        evidence.replay_successes,
+        evidence.replay_success_rate,
+        evidence.environment_match_factor,
+        evidence.decayed_confidence,
+        evidence.confidence_decay_ratio,
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct ConfidenceRevalidationTarget {
     gene_id: String,
     capsule_ids: Vec<String>,
+    peak_confidence: f32,
     decayed_confidence: f32,
 }
 
@@ -1188,12 +1565,17 @@ fn stale_replay_revalidation_targets(
             if decayed_confidence >= MIN_REPLAY_CONFIDENCE {
                 return None;
             }
+            let peak_confidence = promoted_capsules
+                .iter()
+                .map(|capsule| capsule.confidence)
+                .fold(0.0_f32, f32::max);
             Some(ConfidenceRevalidationTarget {
                 gene_id: gene.id.clone(),
                 capsule_ids: promoted_capsules
                     .into_iter()
                     .map(|capsule| capsule.id.clone())
                     .collect(),
+                peak_confidence,
                 decayed_confidence,
             })
         })
@@ -1250,7 +1632,11 @@ pub struct EvolutionMetricsSnapshot {
     pub replay_success_rate: f64,
     pub confidence_revalidations_total: u64,
     pub replay_reasoning_avoided_total: u64,
+    pub reasoning_avoided_tokens_total: u64,
+    pub replay_fallback_cost_total: u64,
+    pub replay_roi: f64,
     pub replay_task_classes: Vec<ReplayTaskClassMetrics>,
+    pub replay_sources: Vec<ReplaySourceRoiMetrics>,
     pub mutation_declared_total: u64,
     pub promoted_mutations_total: u64,
     pub promotion_ratio: f64,
@@ -1349,6 +1735,22 @@ impl EvolutionNetworkNode {
 
     pub fn metrics_snapshot(&self) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
         evolution_metrics_snapshot(self.store.as_ref())
+    }
+
+    pub fn replay_roi_release_gate_summary(
+        &self,
+        window_seconds: u64,
+    ) -> Result<ReplayRoiWindowSummary, EvoKernelError> {
+        replay_roi_release_gate_summary(self.store.as_ref(), window_seconds)
+    }
+
+    pub fn render_replay_roi_release_gate_summary_json(
+        &self,
+        window_seconds: u64,
+    ) -> Result<String, EvoKernelError> {
+        let summary = self.replay_roi_release_gate_summary(window_seconds)?;
+        serde_json::to_string_pretty(&summary)
+            .map_err(|err| EvoKernelError::Validation(err.to_string()))
     }
 
     pub fn render_metrics_prometheus(&self) -> Result<String, EvoKernelError> {
@@ -1515,6 +1917,7 @@ impl<S: KernelState> EvoKernel<S> {
                     state: AssetState::Quarantined,
                     reason: "bootstrap seeds require local validation before replay".into(),
                     reason_code: TransitionReasonCode::DowngradeBootstrapRequiresLocalValidation,
+                    evidence: None,
                 })
                 .map_err(store_err)?;
             self.store
@@ -1681,6 +2084,7 @@ impl<S: KernelState> EvoKernel<S> {
                 state: governor_decision.target_state.clone(),
                 reason: governor_decision.reason.clone(),
                 reason_code: governor_decision.reason_code.clone(),
+                evidence: None,
             })
             .map_err(store_err)?;
         if matches!(governor_decision.target_state, AssetState::Promoted) {
@@ -1955,6 +2359,22 @@ impl<S: KernelState> EvoKernel<S> {
 
     pub fn metrics_snapshot(&self) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
         evolution_metrics_snapshot(self.store.as_ref())
+    }
+
+    pub fn replay_roi_release_gate_summary(
+        &self,
+        window_seconds: u64,
+    ) -> Result<ReplayRoiWindowSummary, EvoKernelError> {
+        replay_roi_release_gate_summary(self.store.as_ref(), window_seconds)
+    }
+
+    pub fn render_replay_roi_release_gate_summary_json(
+        &self,
+        window_seconds: u64,
+    ) -> Result<String, EvoKernelError> {
+        let summary = self.replay_roi_release_gate_summary(window_seconds)?;
+        serde_json::to_string_pretty(&summary)
+            .map_err(|err| EvoKernelError::Validation(err.to_string()))
     }
 
     pub fn render_metrics_prometheus(&self) -> Result<String, EvoKernelError> {
@@ -2377,6 +2797,41 @@ fn replay_task_descriptor(signals: &[String]) -> (String, String) {
     (task_class_id, task_label)
 }
 
+fn replay_descriptor_from_candidate_or_input(
+    candidate: Option<&GeneCandidate>,
+    input: &SelectorInput,
+) -> (String, String) {
+    if let Some(candidate) = candidate {
+        let task_class_id = strategy_metadata_value(&candidate.gene.strategy, "task_class");
+        let task_label = strategy_metadata_value(&candidate.gene.strategy, "task_label");
+        if let Some(task_class_id) = task_class_id {
+            return (
+                task_class_id.clone(),
+                task_label.unwrap_or_else(|| task_class_id.clone()),
+            );
+        }
+        return replay_task_descriptor(&candidate.gene.signals);
+    }
+    replay_task_descriptor(&input.signals)
+}
+
+fn estimated_reasoning_tokens(signals: &[String]) -> u64 {
+    let normalized = signals
+        .iter()
+        .filter_map(|signal| normalize_signal_phrase(signal))
+        .collect::<BTreeSet<_>>();
+    let signal_count = normalized.len() as u64;
+    REPLAY_REASONING_TOKEN_FLOOR + REPLAY_REASONING_TOKEN_SIGNAL_WEIGHT * signal_count.max(1)
+}
+
+fn compute_replay_roi(reasoning_avoided_tokens: u64, replay_fallback_cost: u64) -> f64 {
+    let total = reasoning_avoided_tokens + replay_fallback_cost;
+    if total == 0 {
+        return 0.0;
+    }
+    (reasoning_avoided_tokens as f64 - replay_fallback_cost as f64) / total as f64
+}
+
 fn is_rust_error_code(value: &str) -> bool {
     value.len() == 5
         && matches!(value.as_bytes().first(), Some(b'e') | Some(b'E'))
@@ -2551,7 +3006,10 @@ fn quarantined_remote_exact_match_candidates(
         .genes
         .into_iter()
         .filter_map(|gene| {
-            if !matches!(gene.state, AssetState::Promoted | AssetState::Quarantined) {
+            if !matches!(
+                gene.state,
+                AssetState::Promoted | AssetState::Quarantined | AssetState::ShadowValidated
+            ) {
                 return None;
             }
             if let Some(spec_id) = requested_spec_id {
@@ -2588,7 +3046,10 @@ fn quarantined_remote_exact_match_candidates(
                 .iter()
                 .filter(|capsule| {
                     capsule.gene_id == gene.id
-                        && capsule.state == AssetState::Quarantined
+                        && matches!(
+                            capsule.state,
+                            AssetState::Quarantined | AssetState::ShadowValidated
+                        )
                         && remote_asset_ids.contains(&capsule.id)
                 })
                 .cloned()
@@ -2968,6 +3429,15 @@ fn import_remote_envelope_into_store(
                         state: AssetState::Quarantined,
                         reason: "remote asset requires local validation before promotion".into(),
                         reason_code: TransitionReasonCode::DowngradeRemoteRequiresLocalValidation,
+                        evidence: Some(TransitionEvidence {
+                            replay_attempts: None,
+                            replay_successes: None,
+                            replay_success_rate: None,
+                            environment_match_factor: None,
+                            decayed_confidence: None,
+                            confidence_decay_ratio: None,
+                            summary: Some("phase=remote_import; source=remote; action=quarantine_before_shadow_validation".into()),
+                        }),
                     })
                     .map_err(store_err)?;
             }
@@ -3279,6 +3749,7 @@ fn map_evomap_state(value: Option<&Value>) -> AssetState {
         Some("promoted") => AssetState::Promoted,
         Some("candidate") => AssetState::Candidate,
         Some("quarantined") => AssetState::Quarantined,
+        Some("shadow_validated") => AssetState::ShadowValidated,
         Some("revoked") => AssetState::Revoked,
         Some("rejected") => AssetState::Archived,
         Some("archived") => AssetState::Archived,
@@ -3720,7 +4191,7 @@ fn ensure_builtin_experience_assets_in_store(
             .map_err(store_err)?;
         match gene.state {
             AssetState::Revoked | AssetState::Archived => {}
-            AssetState::Quarantined => {
+            AssetState::Quarantined | AssetState::ShadowValidated => {
                 store
                     .append_event(EvolutionEvent::PromotionEvaluated {
                         gene_id: gene.id.clone(),
@@ -3729,6 +4200,7 @@ fn ensure_builtin_experience_assets_in_store(
                             "built-in EvoMap asset requires additional validation before promotion"
                                 .into(),
                         reason_code: TransitionReasonCode::DowngradeBuiltinRequiresValidation,
+                        evidence: None,
                     })
                     .map_err(store_err)?;
             }
@@ -3740,6 +4212,7 @@ fn ensure_builtin_experience_assets_in_store(
                         reason: "built-in experience asset promoted for cold-start compatibility"
                             .into(),
                         reason_code: TransitionReasonCode::PromotionBuiltinColdStartCompatibility,
+                        evidence: None,
                     })
                     .map_err(store_err)?;
                 store
@@ -3783,7 +4256,7 @@ fn ensure_builtin_experience_assets_in_store(
             .map_err(store_err)?;
         match seed.capsule.state {
             AssetState::Revoked | AssetState::Archived => {}
-            AssetState::Quarantined => {
+            AssetState::Quarantined | AssetState::ShadowValidated => {
                 store
                     .append_event(EvolutionEvent::CapsuleQuarantined {
                         capsule_id: seed.capsule.id.clone(),
@@ -4023,6 +4496,7 @@ fn record_reported_experience_in_store(
             state: AssetState::Promoted,
             reason: "trusted local report promoted reusable experience".into(),
             reason_code: TransitionReasonCode::PromotionTrustedLocalReport,
+            evidence: None,
         })
         .map_err(store_err)?;
     store
@@ -4337,44 +4811,147 @@ fn evolution_metrics_snapshot(
     store: &dyn EvolutionStore,
 ) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
     let (events, projection) = scan_projection(store)?;
-    let gene_task_classes = projection
-        .genes
+    let mut replay_task_class_totals = BTreeMap::<(String, String), (u64, u64, u64, u64)>::new();
+    let mut replay_source_totals = BTreeMap::<String, (u64, u64, u64, u64)>::new();
+    let replay_evidences = events
         .iter()
-        .map(|gene| (gene.id.clone(), replay_task_descriptor(&gene.signals)))
-        .collect::<BTreeMap<_, _>>();
-    let replay_success_total = events
-        .iter()
-        .filter(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. }))
-        .count() as u64;
-    let mut replay_task_class_totals = BTreeMap::<(String, String), u64>::new();
-    for stored in &events {
-        if let EvolutionEvent::CapsuleReused { gene_id, .. } = &stored.event {
-            if let Some((task_class_id, task_label)) = gene_task_classes.get(gene_id) {
-                *replay_task_class_totals
-                    .entry((task_class_id.clone(), task_label.clone()))
-                    .or_insert(0) += 1;
+        .filter_map(|stored| match &stored.event {
+            EvolutionEvent::ReplayEconomicsRecorded { evidence, .. } => Some(evidence.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let (
+        replay_success_total,
+        replay_failures_total,
+        replay_reasoning_avoided_total,
+        reasoning_avoided_tokens_total,
+        replay_fallback_cost_total,
+    ) = if replay_evidences.is_empty() {
+        let gene_task_classes = projection
+            .genes
+            .iter()
+            .map(|gene| (gene.id.clone(), replay_task_descriptor(&gene.signals)))
+            .collect::<BTreeMap<_, _>>();
+        let replay_success_total = events
+            .iter()
+            .filter(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. }))
+            .count() as u64;
+        for stored in &events {
+            if let EvolutionEvent::CapsuleReused { gene_id, .. } = &stored.event {
+                if let Some((task_class_id, task_label)) = gene_task_classes.get(gene_id) {
+                    let entry = replay_task_class_totals
+                        .entry((task_class_id.clone(), task_label.clone()))
+                        .or_insert((0, 0, 0, 0));
+                    entry.0 += 1;
+                    entry.2 += REPLAY_REASONING_TOKEN_FLOOR;
+                }
             }
         }
-    }
+        let replay_failures_total = events
+            .iter()
+            .filter(|stored| is_replay_validation_failure(&stored.event))
+            .count() as u64;
+        (
+            replay_success_total,
+            replay_failures_total,
+            replay_success_total,
+            replay_success_total * REPLAY_REASONING_TOKEN_FLOOR,
+            replay_failures_total * REPLAY_REASONING_TOKEN_FLOOR,
+        )
+    } else {
+        let mut replay_success_total = 0_u64;
+        let mut replay_failures_total = 0_u64;
+        let mut reasoning_avoided_tokens_total = 0_u64;
+        let mut replay_fallback_cost_total = 0_u64;
+        for evidence in &replay_evidences {
+            if evidence.success {
+                replay_success_total += 1;
+            } else {
+                replay_failures_total += 1;
+            }
+            reasoning_avoided_tokens_total += evidence.reasoning_avoided_tokens;
+            replay_fallback_cost_total += evidence.replay_fallback_cost;
+            let entry = replay_task_class_totals
+                .entry((evidence.task_class_id.clone(), evidence.task_label.clone()))
+                .or_insert((0, 0, 0, 0));
+            if evidence.success {
+                entry.0 += 1;
+            } else {
+                entry.1 += 1;
+            }
+            entry.2 += evidence.reasoning_avoided_tokens;
+            entry.3 += evidence.replay_fallback_cost;
+            if let Some(source_sender_id) = evidence.source_sender_id.as_deref() {
+                let source_entry = replay_source_totals
+                    .entry(source_sender_id.to_string())
+                    .or_insert((0, 0, 0, 0));
+                if evidence.success {
+                    source_entry.0 += 1;
+                } else {
+                    source_entry.1 += 1;
+                }
+                source_entry.2 += evidence.reasoning_avoided_tokens;
+                source_entry.3 += evidence.replay_fallback_cost;
+            }
+        }
+        (
+            replay_success_total,
+            replay_failures_total,
+            replay_success_total,
+            reasoning_avoided_tokens_total,
+            replay_fallback_cost_total,
+        )
+    };
     let replay_task_classes = replay_task_class_totals
         .into_iter()
         .map(
-            |((task_class_id, task_label), replay_success_total)| ReplayTaskClassMetrics {
+            |(
+                (task_class_id, task_label),
+                (
+                    replay_success_total,
+                    replay_failure_total,
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
+            )| ReplayTaskClassMetrics {
                 task_class_id,
                 task_label,
                 replay_success_total,
+                replay_failure_total,
                 reasoning_steps_avoided_total: replay_success_total,
+                reasoning_avoided_tokens_total,
+                replay_fallback_cost_total,
+                replay_roi: compute_replay_roi(
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
             },
         )
         .collect::<Vec<_>>();
-    let replay_reasoning_avoided_total = replay_task_classes
-        .iter()
-        .map(|entry| entry.reasoning_steps_avoided_total)
-        .sum();
-    let replay_failures_total = events
-        .iter()
-        .filter(|stored| is_replay_validation_failure(&stored.event))
-        .count() as u64;
+    let replay_sources = replay_source_totals
+        .into_iter()
+        .map(
+            |(
+                source_sender_id,
+                (
+                    replay_success_total,
+                    replay_failure_total,
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
+            )| ReplaySourceRoiMetrics {
+                source_sender_id,
+                replay_success_total,
+                replay_failure_total,
+                reasoning_avoided_tokens_total,
+                replay_fallback_cost_total,
+                replay_roi: compute_replay_roi(
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
+            },
+        )
+        .collect::<Vec<_>>();
     let replay_attempts_total = replay_success_total + replay_failures_total;
     let confidence_revalidations_total = events
         .iter()
@@ -4416,7 +4993,11 @@ fn evolution_metrics_snapshot(
         replay_success_rate: safe_ratio(replay_success_total, replay_attempts_total),
         confidence_revalidations_total,
         replay_reasoning_avoided_total,
+        reasoning_avoided_tokens_total,
+        replay_fallback_cost_total,
+        replay_roi: compute_replay_roi(reasoning_avoided_tokens_total, replay_fallback_cost_total),
         replay_task_classes,
+        replay_sources,
         mutation_declared_total,
         promoted_mutations_total,
         promotion_ratio: safe_ratio(promoted_mutations_total, mutation_declared_total),
@@ -4426,6 +5007,136 @@ fn evolution_metrics_snapshot(
         promoted_genes,
         promoted_capsules,
         last_event_seq: events.last().map(|stored| stored.seq).unwrap_or(0),
+    })
+}
+
+fn replay_roi_release_gate_summary(
+    store: &dyn EvolutionStore,
+    window_seconds: u64,
+) -> Result<ReplayRoiWindowSummary, EvoKernelError> {
+    let events = store.scan(1).map_err(store_err)?;
+    let now = Utc::now();
+    let cutoff = if window_seconds == 0 {
+        None
+    } else {
+        let seconds = i64::try_from(window_seconds).unwrap_or(i64::MAX);
+        Some(now - Duration::seconds(seconds))
+    };
+
+    let mut replay_attempts_total = 0_u64;
+    let mut replay_success_total = 0_u64;
+    let mut replay_failure_total = 0_u64;
+    let mut reasoning_avoided_tokens_total = 0_u64;
+    let mut replay_fallback_cost_total = 0_u64;
+    let mut task_totals = BTreeMap::<(String, String), (u64, u64, u64, u64)>::new();
+    let mut source_totals = BTreeMap::<String, (u64, u64, u64, u64)>::new();
+
+    for stored in events {
+        let EvolutionEvent::ReplayEconomicsRecorded { evidence, .. } = stored.event else {
+            continue;
+        };
+        if let Some(cutoff) = cutoff {
+            let Some(timestamp) = parse_event_timestamp(&stored.timestamp) else {
+                continue;
+            };
+            if timestamp < cutoff {
+                continue;
+            }
+        }
+        replay_attempts_total += 1;
+        if evidence.success {
+            replay_success_total += 1;
+        } else {
+            replay_failure_total += 1;
+        }
+        reasoning_avoided_tokens_total += evidence.reasoning_avoided_tokens;
+        replay_fallback_cost_total += evidence.replay_fallback_cost;
+        let task_entry = task_totals
+            .entry((evidence.task_class_id.clone(), evidence.task_label.clone()))
+            .or_insert((0, 0, 0, 0));
+        if evidence.success {
+            task_entry.0 += 1;
+        } else {
+            task_entry.1 += 1;
+        }
+        task_entry.2 += evidence.reasoning_avoided_tokens;
+        task_entry.3 += evidence.replay_fallback_cost;
+        if let Some(source_sender_id) = evidence.source_sender_id.as_deref() {
+            let source_entry = source_totals
+                .entry(source_sender_id.to_string())
+                .or_insert((0, 0, 0, 0));
+            if evidence.success {
+                source_entry.0 += 1;
+            } else {
+                source_entry.1 += 1;
+            }
+            source_entry.2 += evidence.reasoning_avoided_tokens;
+            source_entry.3 += evidence.replay_fallback_cost;
+        }
+    }
+
+    let replay_task_classes = task_totals
+        .into_iter()
+        .map(
+            |(
+                (task_class_id, task_label),
+                (
+                    replay_success_total,
+                    replay_failure_total,
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
+            )| ReplayTaskClassMetrics {
+                task_class_id,
+                task_label,
+                replay_success_total,
+                replay_failure_total,
+                reasoning_steps_avoided_total: replay_success_total,
+                reasoning_avoided_tokens_total,
+                replay_fallback_cost_total,
+                replay_roi: compute_replay_roi(
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
+            },
+        )
+        .collect::<Vec<_>>();
+    let replay_sources = source_totals
+        .into_iter()
+        .map(
+            |(
+                source_sender_id,
+                (
+                    replay_success_total,
+                    replay_failure_total,
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
+            )| ReplaySourceRoiMetrics {
+                source_sender_id,
+                replay_success_total,
+                replay_failure_total,
+                reasoning_avoided_tokens_total,
+                replay_fallback_cost_total,
+                replay_roi: compute_replay_roi(
+                    reasoning_avoided_tokens_total,
+                    replay_fallback_cost_total,
+                ),
+            },
+        )
+        .collect::<Vec<_>>();
+
+    Ok(ReplayRoiWindowSummary {
+        generated_at: now.to_rfc3339(),
+        window_seconds,
+        replay_attempts_total,
+        replay_success_total,
+        replay_failure_total,
+        reasoning_avoided_tokens_total,
+        replay_fallback_cost_total,
+        replay_roi: compute_replay_roi(reasoning_avoided_tokens_total, replay_fallback_cost_total),
+        replay_task_classes,
+        replay_sources,
     })
 }
 
@@ -4463,6 +5174,24 @@ fn render_evolution_metrics_prometheus(
         "oris_evolution_replay_reasoning_avoided_total {}\n",
         snapshot.replay_reasoning_avoided_total
     ));
+    out.push_str("# HELP oris_evolution_reasoning_avoided_tokens_total Estimated reasoning tokens avoided by replay hits.\n");
+    out.push_str("# TYPE oris_evolution_reasoning_avoided_tokens_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_reasoning_avoided_tokens_total {}\n",
+        snapshot.reasoning_avoided_tokens_total
+    ));
+    out.push_str("# HELP oris_evolution_replay_fallback_cost_total Estimated reasoning token cost spent on replay fallbacks.\n");
+    out.push_str("# TYPE oris_evolution_replay_fallback_cost_total counter\n");
+    out.push_str(&format!(
+        "oris_evolution_replay_fallback_cost_total {}\n",
+        snapshot.replay_fallback_cost_total
+    ));
+    out.push_str("# HELP oris_evolution_replay_roi Net replay ROI in token space ((avoided - fallback_cost) / total).\n");
+    out.push_str("# TYPE oris_evolution_replay_roi gauge\n");
+    out.push_str(&format!(
+        "oris_evolution_replay_roi {:.6}\n",
+        snapshot.replay_roi
+    ));
     out.push_str("# HELP oris_evolution_replay_utilization_by_task_class_total Successful replay reuse counts grouped by deterministic task class.\n");
     out.push_str("# TYPE oris_evolution_replay_utilization_by_task_class_total counter\n");
     for task_class in &snapshot.replay_task_classes {
@@ -4481,6 +5210,63 @@ fn render_evolution_metrics_prometheus(
             prometheus_label_value(&task_class.task_class_id),
             prometheus_label_value(&task_class.task_label),
             task_class.reasoning_steps_avoided_total
+        ));
+    }
+    out.push_str("# HELP oris_evolution_reasoning_avoided_tokens_by_task_class_total Estimated reasoning tokens avoided by replay hits grouped by deterministic task class.\n");
+    out.push_str("# TYPE oris_evolution_reasoning_avoided_tokens_by_task_class_total counter\n");
+    for task_class in &snapshot.replay_task_classes {
+        out.push_str(&format!(
+            "oris_evolution_reasoning_avoided_tokens_by_task_class_total{{task_class_id=\"{}\",task_label=\"{}\"}} {}\n",
+            prometheus_label_value(&task_class.task_class_id),
+            prometheus_label_value(&task_class.task_label),
+            task_class.reasoning_avoided_tokens_total
+        ));
+    }
+    out.push_str("# HELP oris_evolution_replay_fallback_cost_by_task_class_total Estimated fallback token cost grouped by deterministic task class.\n");
+    out.push_str("# TYPE oris_evolution_replay_fallback_cost_by_task_class_total counter\n");
+    for task_class in &snapshot.replay_task_classes {
+        out.push_str(&format!(
+            "oris_evolution_replay_fallback_cost_by_task_class_total{{task_class_id=\"{}\",task_label=\"{}\"}} {}\n",
+            prometheus_label_value(&task_class.task_class_id),
+            prometheus_label_value(&task_class.task_label),
+            task_class.replay_fallback_cost_total
+        ));
+    }
+    out.push_str("# HELP oris_evolution_replay_roi_by_task_class Replay ROI in token space grouped by deterministic task class.\n");
+    out.push_str("# TYPE oris_evolution_replay_roi_by_task_class gauge\n");
+    for task_class in &snapshot.replay_task_classes {
+        out.push_str(&format!(
+            "oris_evolution_replay_roi_by_task_class{{task_class_id=\"{}\",task_label=\"{}\"}} {:.6}\n",
+            prometheus_label_value(&task_class.task_class_id),
+            prometheus_label_value(&task_class.task_label),
+            task_class.replay_roi
+        ));
+    }
+    out.push_str("# HELP oris_evolution_replay_roi_by_source Replay ROI in token space grouped by remote sender id for cross-node reconciliation.\n");
+    out.push_str("# TYPE oris_evolution_replay_roi_by_source gauge\n");
+    for source in &snapshot.replay_sources {
+        out.push_str(&format!(
+            "oris_evolution_replay_roi_by_source{{source_sender_id=\"{}\"}} {:.6}\n",
+            prometheus_label_value(&source.source_sender_id),
+            source.replay_roi
+        ));
+    }
+    out.push_str("# HELP oris_evolution_reasoning_avoided_tokens_by_source_total Estimated reasoning tokens avoided grouped by remote sender id.\n");
+    out.push_str("# TYPE oris_evolution_reasoning_avoided_tokens_by_source_total counter\n");
+    for source in &snapshot.replay_sources {
+        out.push_str(&format!(
+            "oris_evolution_reasoning_avoided_tokens_by_source_total{{source_sender_id=\"{}\"}} {}\n",
+            prometheus_label_value(&source.source_sender_id),
+            source.reasoning_avoided_tokens_total
+        ));
+    }
+    out.push_str("# HELP oris_evolution_replay_fallback_cost_by_source_total Estimated replay fallback token cost grouped by remote sender id.\n");
+    out.push_str("# TYPE oris_evolution_replay_fallback_cost_by_source_total counter\n");
+    for source in &snapshot.replay_sources {
+        out.push_str(&format!(
+            "oris_evolution_replay_fallback_cost_by_source_total{{source_sender_id=\"{}\"}} {}\n",
+            prometheus_label_value(&source.source_sender_id),
+            source.replay_fallback_cost_total
         ));
     }
     out.push_str("# HELP oris_evolution_replay_success_rate Successful replay attempts divided by replay attempts that reached validation.\n");
@@ -5376,12 +6162,25 @@ index 0000000..1111111
         assert_eq!(snapshot.replay_success_rate, 1.0);
         assert_eq!(snapshot.confidence_revalidations_total, 0);
         assert_eq!(snapshot.replay_reasoning_avoided_total, 1);
+        assert_eq!(
+            snapshot.reasoning_avoided_tokens_total,
+            decision.economics_evidence.reasoning_avoided_tokens
+        );
+        assert_eq!(snapshot.replay_fallback_cost_total, 0);
+        assert_eq!(snapshot.replay_roi, 1.0);
         assert_eq!(snapshot.replay_task_classes.len(), 1);
         assert_eq!(snapshot.replay_task_classes[0].replay_success_total, 1);
+        assert_eq!(snapshot.replay_task_classes[0].replay_failure_total, 0);
         assert_eq!(
             snapshot.replay_task_classes[0].reasoning_steps_avoided_total,
             1
         );
+        assert_eq!(
+            snapshot.replay_task_classes[0].replay_fallback_cost_total,
+            0
+        );
+        assert_eq!(snapshot.replay_task_classes[0].replay_roi, 1.0);
+        assert!(snapshot.replay_sources.is_empty());
         assert_eq!(snapshot.confidence_revalidations_total, 0);
         assert_eq!(snapshot.mutation_declared_total, 1);
         assert_eq!(snapshot.promoted_mutations_total, 1);
@@ -5394,6 +6193,9 @@ index 0000000..1111111
 
         let rendered = evo.render_metrics_prometheus().unwrap();
         assert!(rendered.contains("oris_evolution_replay_reasoning_avoided_total 1"));
+        assert!(rendered.contains("oris_evolution_reasoning_avoided_tokens_total"));
+        assert!(rendered.contains("oris_evolution_replay_fallback_cost_total"));
+        assert!(rendered.contains("oris_evolution_replay_roi 1.000000"));
         assert!(rendered.contains("oris_evolution_replay_utilization_by_task_class_total"));
         assert!(rendered.contains("oris_evolution_replay_reasoning_avoided_by_task_class_total"));
         assert!(rendered.contains("oris_evolution_replay_success_rate 1.000000"));
@@ -5402,6 +6204,54 @@ index 0000000..1111111
         assert!(rendered.contains("oris_evolution_revoke_frequency_last_hour 1"));
         assert!(rendered.contains("oris_evolution_mutation_velocity_last_hour 1"));
         assert!(rendered.contains("oris_evolution_health 1"));
+    }
+
+    #[tokio::test]
+    async fn replay_roi_release_gate_summary_aggregates_task_class_and_remote_source() {
+        let (evo, _) = build_test_evo("roi-summary", "run-roi-summary", command_validator());
+        let envelope = remote_publish_envelope(
+            "node-roi",
+            "run-remote-roi",
+            "gene-roi",
+            "capsule-roi",
+            "mutation-roi",
+            "roi-signal",
+            "ROI.md",
+            "# roi",
+        );
+        evo.import_remote_envelope(&envelope).unwrap();
+
+        let miss = evo
+            .replay_or_fallback(replay_input("entropy-hash-12345-no-overlap"))
+            .await
+            .unwrap();
+        assert!(!miss.used_capsule);
+
+        let hit = evo
+            .replay_or_fallback(replay_input("roi-signal"))
+            .await
+            .unwrap();
+        assert!(hit.used_capsule);
+
+        let summary = evo.replay_roi_release_gate_summary(60 * 60).unwrap();
+        assert_eq!(summary.replay_attempts_total, 2);
+        assert_eq!(summary.replay_success_total, 1);
+        assert_eq!(summary.replay_failure_total, 1);
+        assert!(summary.reasoning_avoided_tokens_total > 0);
+        assert!(summary.replay_fallback_cost_total > 0);
+        assert!(summary
+            .replay_task_classes
+            .iter()
+            .any(|entry| { entry.replay_success_total == 1 && entry.replay_failure_total == 0 }));
+        assert!(summary.replay_sources.iter().any(|source| {
+            source.source_sender_id == "node-roi" && source.replay_success_total == 1
+        }));
+
+        let rendered = evo
+            .render_replay_roi_release_gate_summary_json(60 * 60)
+            .unwrap();
+        assert!(rendered.contains("\"replay_attempts_total\": 2"));
+        assert!(rendered.contains("\"source_sender_id\": \"node-roi\""));
     }
 
     #[test]
@@ -5604,7 +6454,7 @@ index 0000000..1111111
     }
 
     #[tokio::test]
-    async fn remote_capsule_stays_quarantined_until_first_successful_replay() {
+    async fn remote_capsule_advances_from_quarantine_to_shadow_then_promoted() {
         let (evo, store) = build_test_evo(
             "remote-quarantine",
             "run-remote-quarantine",
@@ -5640,36 +6490,63 @@ index 0000000..1111111
             export_promoted_assets_from_store(store.as_ref(), "node-local").unwrap();
         assert!(exported_before_replay.assets.is_empty());
 
-        let decision = evo
+        let first_decision = evo
             .replay_or_fallback(replay_input("remote-signal"))
             .await
             .unwrap();
 
-        assert!(decision.used_capsule);
-        assert_eq!(decision.capsule_id, Some("capsule-remote".into()));
+        assert!(first_decision.used_capsule);
+        assert_eq!(first_decision.capsule_id, Some("capsule-remote".into()));
 
-        let after_replay = store.rebuild_projection().unwrap();
-        let promoted_gene = after_replay
+        let after_first_replay = store.rebuild_projection().unwrap();
+        let shadow_gene = after_first_replay
             .genes
             .iter()
             .find(|gene| gene.id == "gene-remote")
             .unwrap();
-        let released_capsule = after_replay
+        let shadow_capsule = after_first_replay
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == "capsule-remote")
+            .unwrap();
+        assert_eq!(shadow_gene.state, AssetState::ShadowValidated);
+        assert_eq!(shadow_capsule.state, AssetState::ShadowValidated);
+        let exported_after_first_replay =
+            export_promoted_assets_from_store(store.as_ref(), "node-local").unwrap();
+        assert!(exported_after_first_replay.assets.is_empty());
+
+        let second_decision = evo
+            .replay_or_fallback(replay_input("remote-signal"))
+            .await
+            .unwrap();
+        assert!(second_decision.used_capsule);
+        assert_eq!(second_decision.capsule_id, Some("capsule-remote".into()));
+
+        let after_second_replay = store.rebuild_projection().unwrap();
+        let promoted_gene = after_second_replay
+            .genes
+            .iter()
+            .find(|gene| gene.id == "gene-remote")
+            .unwrap();
+        let promoted_capsule = after_second_replay
             .capsules
             .iter()
             .find(|capsule| capsule.id == "capsule-remote")
             .unwrap();
         assert_eq!(promoted_gene.state, AssetState::Promoted);
-        assert_eq!(released_capsule.state, AssetState::Promoted);
-        let exported_after_replay =
+        assert_eq!(promoted_capsule.state, AssetState::Promoted);
+        let exported_after_second_replay =
             export_promoted_assets_from_store(store.as_ref(), "node-local").unwrap();
-        assert_eq!(exported_after_replay.assets.len(), 3);
-        assert!(exported_after_replay.assets.iter().any(|asset| matches!(
-            asset,
-            NetworkAsset::EvolutionEvent {
-                event: EvolutionEvent::MutationDeclared { .. }
-            }
-        )));
+        assert_eq!(exported_after_second_replay.assets.len(), 3);
+        assert!(exported_after_second_replay
+            .assets
+            .iter()
+            .any(|asset| matches!(
+                asset,
+                NetworkAsset::EvolutionEvent {
+                    event: EvolutionEvent::MutationDeclared { .. }
+                }
+            )));
     }
 
     #[tokio::test]
@@ -6092,13 +6969,13 @@ index 0000000..1111111
             .iter()
             .find(|gene| gene.id == "gene-idempotent")
             .unwrap();
-        assert_eq!(gene_before.state, AssetState::Promoted);
+        assert_eq!(gene_before.state, AssetState::ShadowValidated);
         let capsule_before = projection_before
             .capsules
             .iter()
             .find(|capsule| capsule.id == "capsule-idempotent")
             .unwrap();
-        assert_eq!(capsule_before.state, AssetState::Promoted);
+        assert_eq!(capsule_before.state, AssetState::ShadowValidated);
 
         let second = evo.import_remote_envelope(&envelope).unwrap();
         assert!(second.imported_asset_ids.is_empty());
@@ -6113,13 +6990,34 @@ index 0000000..1111111
             .iter()
             .find(|gene| gene.id == "gene-idempotent")
             .unwrap();
-        assert_eq!(gene_after.state, AssetState::Promoted);
+        assert_eq!(gene_after.state, AssetState::ShadowValidated);
         let capsule_after = projection_after
             .capsules
             .iter()
             .find(|capsule| capsule.id == "capsule-idempotent")
             .unwrap();
-        assert_eq!(capsule_after.state, AssetState::Promoted);
+        assert_eq!(capsule_after.state, AssetState::ShadowValidated);
+
+        let third_decision = evo
+            .replay_or_fallback(replay_input("idempotent-signal"))
+            .await
+            .unwrap();
+        assert!(third_decision.used_capsule);
+        assert_eq!(third_decision.capsule_id, Some("capsule-idempotent".into()));
+
+        let projection_promoted = store.rebuild_projection().unwrap();
+        let promoted_gene = projection_promoted
+            .genes
+            .iter()
+            .find(|gene| gene.id == "gene-idempotent")
+            .unwrap();
+        let promoted_capsule = projection_promoted
+            .capsules
+            .iter()
+            .find(|capsule| capsule.id == "capsule-idempotent")
+            .unwrap();
+        assert_eq!(promoted_gene.state, AssetState::Promoted);
+        assert_eq!(promoted_capsule.state, AssetState::Promoted);
 
         let events = store.scan(1).unwrap();
         assert_eq!(

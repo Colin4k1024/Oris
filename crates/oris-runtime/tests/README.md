@@ -23,7 +23,7 @@ cargo test --features openai,ollama -- --ignored
 ### Integration Test Directory
 
 End-to-end workflow tests are in `tests/` directory:
-- `architecture.rs`: Architecture and type system tests
+- `architecture.rs`: Architecture, type system, and GEP interoperability golden tests (`success/failure/downgrade/idempotent-conflict`, plus manifest/delta paths)
 
 ## Required Environment Variables
 
@@ -44,6 +44,12 @@ End-to-end workflow tests are in `tests/` directory:
 
 ```bash
 cargo test
+```
+
+### GEP Interoperability Golden Gate (CI Target)
+
+```bash
+cargo test -p oris-runtime --all-features --test architecture -- --nocapture
 ```
 
 ### All Tests (Including Integration)
@@ -101,7 +107,7 @@ cargo test --features ollama test_ollama -- --ignored
 | File | Test | Required |
 |------|------|----------|
 | `src/agent/chat/chat_agent.rs` | Chat agent | API key |
-| `tests/architecture.rs` | Architecture tests | None (unit tests) |
+| `tests/architecture.rs` | Architecture + GEP interoperability golden matrix | `--all-features` |
 
 ### Tool Tests
 

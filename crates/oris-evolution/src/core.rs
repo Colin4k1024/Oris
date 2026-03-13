@@ -28,6 +28,7 @@ pub enum AssetState {
     Revoked,
     Archived,
     Quarantined,
+    ShadowValidated,
 }
 
 /// Convert Oris AssetState to EvoMap-compatible state string.
@@ -39,6 +40,8 @@ pub fn asset_state_to_evomap_compat(state: &AssetState) -> &'static str {
         AssetState::Revoked => "revoked",
         AssetState::Archived => "rejected", // Archive maps to rejected in EvoMap terms
         AssetState::Quarantined => "quarantined",
+        // EvoMap does not yet model shadow trust directly, so map it to candidate semantics.
+        AssetState::ShadowValidated => "candidate",
     }
 }
 
@@ -68,6 +71,59 @@ pub enum TransitionReasonCode {
     CandidateCoolingWindow,
     CandidateBlastRadiusExceeded,
     CandidateCollectingEvidence,
+    PromotionShadowValidationPassed,
+    PromotionShadowThresholdPassed,
+    ShadowCollectingReplayEvidence,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRoiReasonCode {
+    #[default]
+    Unspecified,
+    ReplayHit,
+    ReplayMissNoMatchingGene,
+    ReplayMissScoreBelowThreshold,
+    ReplayMissCandidateHasNoCapsule,
+    ReplayMissMutationPayloadMissing,
+    ReplayMissPatchApplyFailed,
+    ReplayMissValidationFailed,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct TransitionEvidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_attempts: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_successes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_success_rate: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_match_factor: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decayed_confidence: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_decay_ratio: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReplayRoiEvidence {
+    pub success: bool,
+    #[serde(default)]
+    pub reason_code: ReplayRoiReasonCode,
+    pub task_class_id: String,
+    pub task_label: String,
+    pub reasoning_avoided_tokens: u64,
+    pub replay_fallback_cost: u64,
+    pub replay_roi: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sender_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_dimensions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -240,6 +296,17 @@ pub enum EvolutionEvent {
         reason: String,
         #[serde(default)]
         reason_code: TransitionReasonCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        evidence: Option<TransitionEvidence>,
+    },
+    ReplayEconomicsRecorded {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gene_id: Option<GeneId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capsule_id: Option<CapsuleId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_run_id: Option<RunId>,
+        evidence: ReplayRoiEvidence,
     },
     RemoteAssetImported {
         source: CandidateSource,
@@ -995,6 +1062,10 @@ mod tests {
         assert_eq!(
             asset_state_to_evomap_compat(&AssetState::Quarantined),
             "quarantined"
+        );
+        assert_eq!(
+            asset_state_to_evomap_compat(&AssetState::ShadowValidated),
+            "candidate"
         );
     }
 

@@ -95,6 +95,7 @@ Main enums/structs:
   - `CapsuleQuarantined`
   - `CapsuleReleased`
   - `CapsuleReused`
+  - `ReplayEconomicsRecorded`
 - Gene lifecycle:
   - `GeneProjected`
   - `GenePromoted`
@@ -110,6 +111,15 @@ Main enums/structs:
 
 - `reason` (human-readable explanation)
 - `reason_code` (`TransitionReasonCode`, machine-readable and stable for regression/audit)
+
+`ReplayEconomicsRecorded` is emitted on every replay decision (hit or fallback) and carries:
+
+- `reason_code` (`ReplayRoiReasonCode`)
+- `reasoning_avoided_tokens`
+- `replay_fallback_cost`
+- `replay_roi`
+- task-class dimensions (`task_class_id`, `task_label`)
+- optional cross-node dimensions (`source_sender_id`, `asset_origin`)
 
 Stored records use:
 
