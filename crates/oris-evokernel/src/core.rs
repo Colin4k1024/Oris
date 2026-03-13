@@ -5817,6 +5817,9 @@ pub fn evaluate_replay_roi_release_gate_contract_input(
         );
     }
 
+    failed_checks.sort();
+    evidence_refs.sort();
+
     let status = if failed_checks.is_empty() {
         ReplayRoiReleaseGateStatus::Pass
     } else if indeterminate {
@@ -7195,6 +7198,201 @@ index 0000000..1111111
         assert!(rendered.contains("\"min_replay_attempts\": 8"));
         assert!(rendered.contains("\"min_replay_hit_rate\": 0.75"));
         assert!(rendered.contains("\"status\": \"indeterminate\""));
+    }
+
+    #[tokio::test]
+    async fn replay_roi_release_gate_summary_window_boundary_filters_old_events() {
+        let (evo, _) = build_test_evo("roi-window", "run-roi-window", command_validator());
+        let envelope = remote_publish_envelope(
+            "node-window",
+            "run-remote-window",
+            "gene-window",
+            "capsule-window",
+            "mutation-window",
+            "window-signal",
+            "WINDOW.md",
+            "# window",
+        );
+        evo.import_remote_envelope(&envelope).unwrap();
+
+        let miss = evo
+            .replay_or_fallback(replay_input("window-no-match-signal"))
+            .await
+            .unwrap();
+        assert!(!miss.used_capsule);
+        assert!(miss.fallback_to_planner);
+
+        let first_hit = evo
+            .replay_or_fallback(replay_input("window-signal"))
+            .await
+            .unwrap();
+        assert!(first_hit.used_capsule);
+
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        let second_hit = evo
+            .replay_or_fallback(replay_input("window-signal"))
+            .await
+            .unwrap();
+        assert!(second_hit.used_capsule);
+
+        let narrow = evo.replay_roi_release_gate_summary(1).unwrap();
+        assert_eq!(narrow.replay_attempts_total, 1);
+        assert_eq!(narrow.replay_success_total, 1);
+        assert_eq!(narrow.replay_failure_total, 0);
+
+        let all = evo.replay_roi_release_gate_summary(0).unwrap();
+        assert_eq!(all.replay_attempts_total, 3);
+        assert_eq!(all.replay_success_total, 2);
+        assert_eq!(all.replay_failure_total, 1);
+    }
+
+    fn fixed_release_gate_pass_fixture() -> ReplayRoiReleaseGateInputContract {
+        ReplayRoiReleaseGateInputContract {
+            generated_at: "2026-03-13T00:00:00Z".to_string(),
+            window_seconds: 86_400,
+            aggregation_dimensions: REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_string())
+                .collect(),
+            replay_attempts_total: 4,
+            replay_success_total: 3,
+            replay_failure_total: 1,
+            replay_hit_rate: 0.75,
+            false_replay_rate: 0.25,
+            reasoning_avoided_tokens: 480,
+            replay_fallback_cost_total: 64,
+            replay_roi: compute_replay_roi(480, 64),
+            replay_safety: true,
+            replay_safety_signal: ReplayRoiReleaseGateSafetySignal {
+                fail_closed_default: true,
+                rollback_ready: true,
+                audit_trail_complete: true,
+                has_replay_activity: true,
+            },
+            thresholds: ReplayRoiReleaseGateThresholds::default(),
+            fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy::default(),
+        }
+    }
+
+    fn fixed_release_gate_fail_fixture() -> ReplayRoiReleaseGateInputContract {
+        ReplayRoiReleaseGateInputContract {
+            generated_at: "2026-03-13T00:00:00Z".to_string(),
+            window_seconds: 86_400,
+            aggregation_dimensions: REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_string())
+                .collect(),
+            replay_attempts_total: 10,
+            replay_success_total: 4,
+            replay_failure_total: 6,
+            replay_hit_rate: 0.4,
+            false_replay_rate: 0.6,
+            reasoning_avoided_tokens: 80,
+            replay_fallback_cost_total: 400,
+            replay_roi: compute_replay_roi(80, 400),
+            replay_safety: false,
+            replay_safety_signal: ReplayRoiReleaseGateSafetySignal {
+                fail_closed_default: true,
+                rollback_ready: true,
+                audit_trail_complete: true,
+                has_replay_activity: true,
+            },
+            thresholds: ReplayRoiReleaseGateThresholds::default(),
+            fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy::default(),
+        }
+    }
+
+    fn fixed_release_gate_borderline_fixture() -> ReplayRoiReleaseGateInputContract {
+        ReplayRoiReleaseGateInputContract {
+            generated_at: "2026-03-13T00:00:00Z".to_string(),
+            window_seconds: 3_600,
+            aggregation_dimensions: REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_string())
+                .collect(),
+            replay_attempts_total: 4,
+            replay_success_total: 3,
+            replay_failure_total: 1,
+            replay_hit_rate: 0.75,
+            false_replay_rate: 0.25,
+            reasoning_avoided_tokens: 192,
+            replay_fallback_cost_total: 173,
+            replay_roi: 0.05,
+            replay_safety: true,
+            replay_safety_signal: ReplayRoiReleaseGateSafetySignal {
+                fail_closed_default: true,
+                rollback_ready: true,
+                audit_trail_complete: true,
+                has_replay_activity: true,
+            },
+            thresholds: ReplayRoiReleaseGateThresholds {
+                min_replay_attempts: 4,
+                min_replay_hit_rate: 0.75,
+                max_false_replay_rate: 0.25,
+                min_reasoning_avoided_tokens: 192,
+                min_replay_roi: 0.05,
+                require_replay_safety: true,
+            },
+            fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy::default(),
+        }
+    }
+
+    #[test]
+    fn replay_roi_release_gate_summary_fixed_fixtures_cover_pass_fail_and_borderline() {
+        let pass =
+            evaluate_replay_roi_release_gate_contract_input(&fixed_release_gate_pass_fixture());
+        let fail =
+            evaluate_replay_roi_release_gate_contract_input(&fixed_release_gate_fail_fixture());
+        let borderline = evaluate_replay_roi_release_gate_contract_input(
+            &fixed_release_gate_borderline_fixture(),
+        );
+
+        assert_eq!(pass.status, ReplayRoiReleaseGateStatus::Pass);
+        assert!(pass.failed_checks.is_empty());
+        assert_eq!(fail.status, ReplayRoiReleaseGateStatus::FailClosed);
+        assert!(!fail.failed_checks.is_empty());
+        assert_eq!(borderline.status, ReplayRoiReleaseGateStatus::Pass);
+        assert!(borderline.failed_checks.is_empty());
+    }
+
+    #[test]
+    fn replay_roi_release_gate_summary_machine_readable_output_is_stable_and_sorted() {
+        let output =
+            evaluate_replay_roi_release_gate_contract_input(&fixed_release_gate_fail_fixture());
+
+        assert_eq!(
+            output.failed_checks,
+            vec![
+                "false_replay_rate_above_threshold".to_string(),
+                "reasoning_avoided_tokens_below_threshold".to_string(),
+                "replay_hit_rate_below_threshold".to_string(),
+                "replay_roi_below_threshold".to_string(),
+                "replay_safety_required".to_string(),
+            ]
+        );
+        assert_eq!(
+            output.evidence_refs,
+            vec![
+                "generated_at:2026-03-13T00:00:00Z".to_string(),
+                "metric:false_replay_rate".to_string(),
+                "metric:reasoning_avoided_tokens".to_string(),
+                "metric:replay_hit_rate".to_string(),
+                "metric:replay_roi".to_string(),
+                "metric:replay_safety".to_string(),
+                "replay_roi_release_gate_summary".to_string(),
+                "threshold:max_false_replay_rate".to_string(),
+                "threshold:min_reasoning_avoided_tokens".to_string(),
+                "threshold:min_replay_hit_rate".to_string(),
+                "threshold:min_replay_roi".to_string(),
+                "threshold:require_replay_safety".to_string(),
+                "window_seconds:86400".to_string(),
+            ]
+        );
+
+        let rendered = serde_json::to_string(&output).unwrap();
+        assert!(rendered.starts_with("{\"status\":\"fail_closed\",\"failed_checks\":"));
+        assert_eq!(rendered, serde_json::to_string(&output).unwrap());
     }
 
     #[test]

@@ -22,9 +22,13 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::coordinate;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::bootstrap_if_empty;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_candidates;
+    let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::replay_roi_release_gate_contract;
+    let _ =
+        oris_runtime::evolution::EvoKernel::<FeatureState>::render_replay_roi_release_gate_contract_json;
     let _ = oris_runtime::governor::DefaultGovernor::default;
     let _ = oris_runtime::economics::EvuLedger::default;
     let _ = oris_runtime::spec_contract::SpecCompiler::compile;
+    let _ = oris_runtime::evolution::evaluate_replay_roi_release_gate_contract_input;
     let envelope = oris_runtime::evolution_network::EvolutionEnvelope::publish(
         "node-a",
         Vec::<oris_runtime::evolution_network::NetworkAsset>::new(),
@@ -73,6 +77,12 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::economics::StakePolicy>();
     assert_type::<oris_runtime::evolution::SignalExtractionInput>();
     assert_type::<oris_runtime::evolution::SignalExtractionOutput>();
+    assert_type::<oris_runtime::evolution::ReplayRoiReleaseGateThresholds>();
+    assert_type::<oris_runtime::evolution::ReplayRoiReleaseGateFailClosedPolicy>();
+    assert_type::<oris_runtime::evolution::ReplayRoiReleaseGateInputContract>();
+    assert_type::<oris_runtime::evolution::ReplayRoiReleaseGateOutputContract>();
+    assert_type::<oris_runtime::evolution::ReplayRoiReleaseGateContract>();
+    assert_type::<oris_runtime::evolution::ReplayRoiReleaseGateStatus>();
     assert_type::<oris_runtime::evolution::ReplayDetectEvidence>();
     assert_type::<oris_runtime::evolution::ReplayCandidateEvidence>();
     assert_type::<oris_runtime::evolution::ReplaySelectEvidence>();
