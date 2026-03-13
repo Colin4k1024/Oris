@@ -10,8 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
-    AgentTask, BoundedTaskClass, HumanApproval, MutationProposal, ReplayPlannerDirective,
-    SupervisedDevloopRequest, SupervisedDevloopStatus,
+    AgentTask, BoundedTaskClass, HumanApproval, MutationProposal, ReplayFallbackNextAction,
+    ReplayFallbackReasonCode, ReplayPlannerDirective, SupervisedDevloopRequest,
+    SupervisedDevloopStatus,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -709,6 +710,16 @@ async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
         cold_feedback.fallback_reason.as_deref(),
         Some("no matching gene")
     );
+    assert_eq!(
+        cold_feedback.reason_code,
+        Some(ReplayFallbackReasonCode::NoCandidateAfterSelect)
+    );
+    assert_eq!(
+        cold_feedback.next_action,
+        Some(ReplayFallbackNextAction::PlanFromScratch)
+    );
+    assert!(cold_feedback.repair_hint.is_some());
+    assert_eq!(cold_feedback.confidence, Some(92));
     assert!(!cold_feedback.task_class_id.is_empty());
     assert_eq!(cold_feedback.task_label, "missing readme");
 
@@ -734,6 +745,10 @@ async fn replay_feedback_surfaces_planner_hints_and_reasoning_savings() {
     assert!(replay_feedback.used_capsule);
     assert_eq!(replay_feedback.capsule_id, Some(captured.id));
     assert_eq!(replay_feedback.fallback_reason, None);
+    assert_eq!(replay_feedback.reason_code, None);
+    assert_eq!(replay_feedback.repair_hint, None);
+    assert_eq!(replay_feedback.next_action, None);
+    assert_eq!(replay_feedback.confidence, None);
     assert_eq!(replay_feedback.task_class_id, cold_feedback.task_class_id);
     assert_eq!(replay_feedback.task_label, "missing readme");
     assert!(events.iter().any(|stored| matches!(

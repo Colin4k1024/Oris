@@ -5,10 +5,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use oris_agent_contract::{
-    A2aCapability, A2aHandshakeRequest, A2aHandshakeResponse, A2aProtocol, A2aTaskLifecycleState,
+    infer_replay_fallback_reason_code, normalize_replay_fallback_contract, A2aCapability,
+    A2aHandshakeRequest, A2aHandshakeResponse, A2aProtocol, A2aTaskLifecycleState,
     A2aTaskSessionAck, A2aTaskSessionCompletionRequest, A2aTaskSessionCompletionResponse,
     A2aTaskSessionResult, A2aTaskSessionStartRequest, AgentCapabilityLevel, AgentRole,
-    ReplayFeedback, ReplayPlannerDirective, A2A_TASK_SESSION_PROTOCOL_VERSION,
+    ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
+    A2A_TASK_SESSION_PROTOCOL_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -65,6 +67,10 @@ pub struct A2aSessionCompletion {
     pub used_capsule: bool,
     pub capsule_id: Option<String>,
     pub fallback_reason: Option<String>,
+    pub reason_code: Option<ReplayFallbackReasonCode>,
+    pub repair_hint: Option<String>,
+    pub next_action: Option<ReplayFallbackNextAction>,
+    pub confidence: Option<u8>,
     pub task_class_id: String,
     pub task_label: String,
 }
@@ -79,6 +85,10 @@ impl A2aSessionCompletion {
             used_capsule,
             capsule_id: None,
             fallback_reason: None,
+            reason_code: None,
+            repair_hint: None,
+            next_action: None,
+            confidence: None,
             task_class_id: "issue-automation".to_string(),
             task_label: "issue-automation".to_string(),
         }
@@ -98,6 +108,10 @@ impl A2aSessionCompletion {
             capsule_id: self.capsule_id,
             reasoning_steps_avoided: if self.used_capsule { 1 } else { 0 },
             fallback_reason: self.fallback_reason,
+            reason_code: self.reason_code,
+            repair_hint: self.repair_hint,
+            next_action: self.next_action,
+            confidence: self.confidence,
             task_class_id: self.task_class_id,
             task_label: self.task_label,
         }
@@ -332,16 +346,46 @@ impl RuntimeA2aClient for InMemoryRuntimeA2aClient {
                 RuntimeClientError::new(format!("session not found: {}", session_id))
             })?;
 
+        let planner_directive = if request.used_capsule {
+            ReplayPlannerDirective::SkipPlanner
+        } else {
+            ReplayPlannerDirective::PlanFallback
+        };
+        let reason_code_hint = request.reason_code.or_else(|| {
+            request
+                .fallback_reason
+                .as_deref()
+                .and_then(infer_replay_fallback_reason_code)
+        });
+        let fallback_contract = normalize_replay_fallback_contract(
+            &planner_directive,
+            request.fallback_reason.as_deref(),
+            reason_code_hint,
+            request.repair_hint.as_deref(),
+            request.next_action,
+            request.confidence,
+        );
+
         let replay_feedback = ReplayFeedback {
             used_capsule: request.used_capsule,
             capsule_id: request.capsule_id,
-            planner_directive: if request.used_capsule {
-                ReplayPlannerDirective::SkipPlanner
-            } else {
-                ReplayPlannerDirective::PlanFallback
-            },
+            planner_directive,
             reasoning_steps_avoided: if request.used_capsule { 1 } else { 0 },
-            fallback_reason: request.fallback_reason,
+            fallback_reason: fallback_contract
+                .as_ref()
+                .map(|contract| contract.fallback_reason.clone()),
+            reason_code: fallback_contract
+                .as_ref()
+                .map(|contract| contract.reason_code),
+            repair_hint: fallback_contract
+                .as_ref()
+                .map(|contract| contract.repair_hint.clone()),
+            next_action: fallback_contract
+                .as_ref()
+                .map(|contract| contract.next_action),
+            confidence: fallback_contract
+                .as_ref()
+                .map(|contract| contract.confidence),
             task_class_id: request.task_class_id,
             task_label: request.task_label,
             summary: request.summary.clone(),

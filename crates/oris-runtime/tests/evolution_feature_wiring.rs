@@ -61,6 +61,9 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::ExecutionFeedback>();
     assert_type::<oris_runtime::agent_contract::ReplayFeedback>();
     assert_type::<oris_runtime::agent_contract::ReplayPlannerDirective>();
+    assert_type::<oris_runtime::agent_contract::ReplayFallbackReasonCode>();
+    assert_type::<oris_runtime::agent_contract::ReplayFallbackNextAction>();
+    assert_type::<oris_runtime::agent_contract::ReplayFallbackContract>();
     assert_type::<oris_runtime::agent_contract::BoundedTaskClass>();
     assert_type::<oris_runtime::agent_contract::HumanApproval>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopRequest>();
@@ -104,6 +107,8 @@ fn full_evolution_experimental_paths_resolve() {
         oris_runtime::agent_contract::A2aCapability::Coordination,
     ]);
     assert!(accepted.accepted);
+    let _ = oris_runtime::agent_contract::infer_replay_fallback_reason_code;
+    let _ = oris_runtime::agent_contract::normalize_replay_fallback_contract;
     let rejected = oris_runtime::agent_contract::A2aHandshakeResponse::reject(
         oris_runtime::agent_contract::A2aErrorCode::UnsupportedCapability,
         "none",

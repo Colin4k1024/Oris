@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
-    AgentRole, BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
+    infer_replay_fallback_reason_code, normalize_replay_fallback_contract, AgentRole,
+    BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
     CoordinationResult, CoordinationTask, ExecutionFeedback,
     MutationProposal as AgentMutationProposal, ReplayFeedback, ReplayPlannerDirective,
     SupervisedDevloopOutcome, SupervisedDevloopRequest, SupervisedDevloopStatus,
@@ -2411,11 +2412,21 @@ impl<S: KernelState> EvoKernel<S> {
             ReplayPlannerDirective::PlanFallback
         };
         let reasoning_steps_avoided = u64::from(decision.used_capsule);
-        let fallback_reason = if decision.fallback_to_planner {
-            Some(decision.reason.clone())
-        } else {
-            None
-        };
+        let reason_code_hint = decision
+            .detect_evidence
+            .mismatch_reasons
+            .first()
+            .and_then(|reason| infer_replay_fallback_reason_code(reason));
+        let fallback_contract = normalize_replay_fallback_contract(
+            &planner_directive,
+            decision
+                .fallback_to_planner
+                .then_some(decision.reason.as_str()),
+            reason_code_hint,
+            None,
+            None,
+            None,
+        );
         let summary = if decision.used_capsule {
             format!("reused prior capsule for task class '{task_label}'; skip planner")
         } else {
@@ -2430,7 +2441,21 @@ impl<S: KernelState> EvoKernel<S> {
             capsule_id: decision.capsule_id.clone(),
             planner_directive,
             reasoning_steps_avoided,
-            fallback_reason,
+            fallback_reason: fallback_contract
+                .as_ref()
+                .map(|contract| contract.fallback_reason.clone()),
+            reason_code: fallback_contract
+                .as_ref()
+                .map(|contract| contract.reason_code),
+            repair_hint: fallback_contract
+                .as_ref()
+                .map(|contract| contract.repair_hint.clone()),
+            next_action: fallback_contract
+                .as_ref()
+                .map(|contract| contract.next_action),
+            confidence: fallback_contract
+                .as_ref()
+                .map(|contract| contract.confidence),
             task_class_id,
             task_label,
             summary,
