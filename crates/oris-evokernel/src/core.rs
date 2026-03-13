@@ -170,6 +170,8 @@ const SHADOW_PROMOTION_MIN_DECAYED_CONFIDENCE: f32 = MIN_REPLAY_CONFIDENCE;
 const REPLAY_REASONING_TOKEN_FLOOR: u64 = 192;
 const REPLAY_REASONING_TOKEN_SIGNAL_WEIGHT: u64 = 24;
 const COLD_START_LOOKUP_PENALTY: f32 = 0.05;
+pub const REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS: [&str; 2] =
+    ["task_class", "source_sender_id"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RepairQualityGateReport {
@@ -506,6 +508,116 @@ pub struct ReplayRoiWindowSummary {
     pub replay_roi: f64,
     pub replay_task_classes: Vec<ReplayTaskClassMetrics>,
     pub replay_sources: Vec<ReplaySourceRoiMetrics>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayRoiReleaseGateThresholds {
+    pub min_replay_attempts: u64,
+    pub min_replay_hit_rate: f64,
+    pub max_false_replay_rate: f64,
+    pub min_reasoning_avoided_tokens: u64,
+    pub min_replay_roi: f64,
+    pub require_replay_safety: bool,
+}
+
+impl Default for ReplayRoiReleaseGateThresholds {
+    fn default() -> Self {
+        Self {
+            min_replay_attempts: 3,
+            min_replay_hit_rate: 0.60,
+            max_false_replay_rate: 0.25,
+            min_reasoning_avoided_tokens: REPLAY_REASONING_TOKEN_FLOOR,
+            min_replay_roi: 0.05,
+            require_replay_safety: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRoiReleaseGateAction {
+    BlockRelease,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayRoiReleaseGateFailClosedPolicy {
+    pub on_threshold_violation: ReplayRoiReleaseGateAction,
+    pub on_missing_metrics: ReplayRoiReleaseGateAction,
+    pub on_invalid_metrics: ReplayRoiReleaseGateAction,
+}
+
+impl Default for ReplayRoiReleaseGateFailClosedPolicy {
+    fn default() -> Self {
+        Self {
+            on_threshold_violation: ReplayRoiReleaseGateAction::BlockRelease,
+            on_missing_metrics: ReplayRoiReleaseGateAction::BlockRelease,
+            on_invalid_metrics: ReplayRoiReleaseGateAction::BlockRelease,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayRoiReleaseGateSafetySignal {
+    pub fail_closed_default: bool,
+    pub rollback_ready: bool,
+    pub audit_trail_complete: bool,
+    pub has_replay_activity: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayRoiReleaseGateInputContract {
+    pub generated_at: String,
+    pub window_seconds: u64,
+    pub aggregation_dimensions: Vec<String>,
+    pub replay_attempts_total: u64,
+    pub replay_success_total: u64,
+    pub replay_failure_total: u64,
+    pub replay_hit_rate: f64,
+    pub false_replay_rate: f64,
+    pub reasoning_avoided_tokens: u64,
+    pub replay_fallback_cost_total: u64,
+    pub replay_roi: f64,
+    pub replay_safety: bool,
+    pub replay_safety_signal: ReplayRoiReleaseGateSafetySignal,
+    pub thresholds: ReplayRoiReleaseGateThresholds,
+    pub fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayRoiReleaseGateStatus {
+    Pass,
+    FailClosed,
+    PendingEvaluator,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayRoiReleaseGateOutputContract {
+    pub status: ReplayRoiReleaseGateStatus,
+    pub failed_checks: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub summary: String,
+}
+
+impl ReplayRoiReleaseGateOutputContract {
+    fn fail_closed_no_evaluator() -> Self {
+        Self {
+            status: ReplayRoiReleaseGateStatus::FailClosed,
+            failed_checks: vec!["release_gate_evaluator_not_run".to_string()],
+            evidence_refs: vec![
+                "replay_roi_release_gate_summary".to_string(),
+                "replay_roi_release_gate_contract".to_string(),
+            ],
+            summary: "release gate evaluator not configured; fail-closed defaults block publish"
+                .to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayRoiReleaseGateContract {
+    pub input: ReplayRoiReleaseGateInputContract,
+    pub output: ReplayRoiReleaseGateOutputContract,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1979,6 +2091,25 @@ impl EvolutionNetworkNode {
             .map_err(|err| EvoKernelError::Validation(err.to_string()))
     }
 
+    pub fn replay_roi_release_gate_contract(
+        &self,
+        window_seconds: u64,
+        thresholds: ReplayRoiReleaseGateThresholds,
+    ) -> Result<ReplayRoiReleaseGateContract, EvoKernelError> {
+        let summary = self.replay_roi_release_gate_summary(window_seconds)?;
+        Ok(replay_roi_release_gate_contract(&summary, thresholds))
+    }
+
+    pub fn render_replay_roi_release_gate_contract_json(
+        &self,
+        window_seconds: u64,
+        thresholds: ReplayRoiReleaseGateThresholds,
+    ) -> Result<String, EvoKernelError> {
+        let contract = self.replay_roi_release_gate_contract(window_seconds, thresholds)?;
+        serde_json::to_string_pretty(&contract)
+            .map_err(|err| EvoKernelError::Validation(err.to_string()))
+    }
+
     pub fn render_metrics_prometheus(&self) -> Result<String, EvoKernelError> {
         self.metrics_snapshot().map(|snapshot| {
             let health = evolution_health_snapshot(&snapshot);
@@ -2624,6 +2755,25 @@ impl<S: KernelState> EvoKernel<S> {
     ) -> Result<String, EvoKernelError> {
         let summary = self.replay_roi_release_gate_summary(window_seconds)?;
         serde_json::to_string_pretty(&summary)
+            .map_err(|err| EvoKernelError::Validation(err.to_string()))
+    }
+
+    pub fn replay_roi_release_gate_contract(
+        &self,
+        window_seconds: u64,
+        thresholds: ReplayRoiReleaseGateThresholds,
+    ) -> Result<ReplayRoiReleaseGateContract, EvoKernelError> {
+        let summary = self.replay_roi_release_gate_summary(window_seconds)?;
+        Ok(replay_roi_release_gate_contract(&summary, thresholds))
+    }
+
+    pub fn render_replay_roi_release_gate_contract_json(
+        &self,
+        window_seconds: u64,
+        thresholds: ReplayRoiReleaseGateThresholds,
+    ) -> Result<String, EvoKernelError> {
+        let contract = self.replay_roi_release_gate_contract(window_seconds, thresholds)?;
+        serde_json::to_string_pretty(&contract)
             .map_err(|err| EvoKernelError::Validation(err.to_string()))
     }
 
@@ -5434,6 +5584,59 @@ fn replay_roi_release_gate_summary(
     })
 }
 
+fn replay_roi_release_gate_contract(
+    summary: &ReplayRoiWindowSummary,
+    thresholds: ReplayRoiReleaseGateThresholds,
+) -> ReplayRoiReleaseGateContract {
+    ReplayRoiReleaseGateContract {
+        input: replay_roi_release_gate_input_contract(summary, thresholds),
+        output: ReplayRoiReleaseGateOutputContract::fail_closed_no_evaluator(),
+    }
+}
+
+fn replay_roi_release_gate_input_contract(
+    summary: &ReplayRoiWindowSummary,
+    thresholds: ReplayRoiReleaseGateThresholds,
+) -> ReplayRoiReleaseGateInputContract {
+    let replay_safety_signal = replay_roi_release_gate_safety_signal(summary);
+    let replay_safety = replay_safety_signal.fail_closed_default
+        && replay_safety_signal.rollback_ready
+        && replay_safety_signal.audit_trail_complete
+        && replay_safety_signal.has_replay_activity;
+    ReplayRoiReleaseGateInputContract {
+        generated_at: summary.generated_at.clone(),
+        window_seconds: summary.window_seconds,
+        aggregation_dimensions: REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+            .iter()
+            .map(|dimension| (*dimension).to_string())
+            .collect(),
+        replay_attempts_total: summary.replay_attempts_total,
+        replay_success_total: summary.replay_success_total,
+        replay_failure_total: summary.replay_failure_total,
+        replay_hit_rate: safe_ratio(summary.replay_success_total, summary.replay_attempts_total),
+        false_replay_rate: safe_ratio(summary.replay_failure_total, summary.replay_attempts_total),
+        reasoning_avoided_tokens: summary.reasoning_avoided_tokens_total,
+        replay_fallback_cost_total: summary.replay_fallback_cost_total,
+        replay_roi: summary.replay_roi,
+        replay_safety,
+        replay_safety_signal,
+        thresholds,
+        fail_closed_policy: ReplayRoiReleaseGateFailClosedPolicy::default(),
+    }
+}
+
+fn replay_roi_release_gate_safety_signal(
+    summary: &ReplayRoiWindowSummary,
+) -> ReplayRoiReleaseGateSafetySignal {
+    ReplayRoiReleaseGateSafetySignal {
+        fail_closed_default: true,
+        rollback_ready: summary.replay_failure_total == 0 || summary.replay_fallback_cost_total > 0,
+        audit_trail_complete: summary.replay_attempts_total
+            == summary.replay_success_total + summary.replay_failure_total,
+        has_replay_activity: summary.replay_attempts_total > 0,
+    }
+}
+
 fn evolution_health_snapshot(snapshot: &EvolutionMetricsSnapshot) -> EvolutionHealthSnapshot {
     EvolutionHealthSnapshot {
         status: "ok".into(),
@@ -6596,6 +6799,123 @@ index 0000000..1111111
             .unwrap();
         assert!(rendered.contains("\"replay_attempts_total\": 2"));
         assert!(rendered.contains("\"source_sender_id\": \"node-roi\""));
+    }
+
+    #[tokio::test]
+    async fn replay_roi_release_gate_summary_contract_exposes_core_metrics_and_fail_closed_defaults(
+    ) {
+        let (evo, _) = build_test_evo("roi-contract", "run-roi-contract", command_validator());
+        let envelope = remote_publish_envelope(
+            "node-contract",
+            "run-remote-contract",
+            "gene-contract",
+            "capsule-contract",
+            "mutation-contract",
+            "contract-signal",
+            "CONTRACT.md",
+            "# contract",
+        );
+        evo.import_remote_envelope(&envelope).unwrap();
+
+        let miss = evo
+            .replay_or_fallback(replay_input("entropy-hash-contract-no-overlap"))
+            .await
+            .unwrap();
+        assert!(!miss.used_capsule);
+        assert!(miss.fallback_to_planner);
+
+        let hit = evo
+            .replay_or_fallback(replay_input("contract-signal"))
+            .await
+            .unwrap();
+        assert!(hit.used_capsule);
+
+        let summary = evo.replay_roi_release_gate_summary(60 * 60).unwrap();
+        let contract = evo
+            .replay_roi_release_gate_contract(60 * 60, ReplayRoiReleaseGateThresholds::default())
+            .unwrap();
+
+        assert_eq!(contract.input.replay_attempts_total, 2);
+        assert_eq!(contract.input.replay_success_total, 1);
+        assert_eq!(contract.input.replay_failure_total, 1);
+        assert_eq!(
+            contract.input.reasoning_avoided_tokens,
+            summary.reasoning_avoided_tokens_total
+        );
+        assert_eq!(
+            contract.input.replay_fallback_cost_total,
+            summary.replay_fallback_cost_total
+        );
+        assert!((contract.input.replay_hit_rate - 0.5).abs() < f64::EPSILON);
+        assert!((contract.input.false_replay_rate - 0.5).abs() < f64::EPSILON);
+        assert!((contract.input.replay_roi - summary.replay_roi).abs() < f64::EPSILON);
+        assert!(contract.input.replay_safety);
+        assert_eq!(
+            contract.input.aggregation_dimensions,
+            REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS
+                .iter()
+                .map(|dimension| (*dimension).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            contract.input.thresholds,
+            ReplayRoiReleaseGateThresholds::default()
+        );
+        assert_eq!(
+            contract.input.fail_closed_policy,
+            ReplayRoiReleaseGateFailClosedPolicy::default()
+        );
+        assert_eq!(
+            contract.output.status,
+            ReplayRoiReleaseGateStatus::FailClosed
+        );
+        assert!(contract
+            .output
+            .failed_checks
+            .iter()
+            .any(|check| check == "release_gate_evaluator_not_run"));
+        assert!(contract
+            .output
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence == "replay_roi_release_gate_summary"));
+    }
+
+    #[tokio::test]
+    async fn replay_roi_release_gate_summary_contract_accepts_custom_thresholds_and_json() {
+        let (evo, _) = build_test_evo(
+            "roi-contract-thresholds",
+            "run-roi-contract-thresholds",
+            command_validator(),
+        );
+        let thresholds = ReplayRoiReleaseGateThresholds {
+            min_replay_attempts: 8,
+            min_replay_hit_rate: 0.75,
+            max_false_replay_rate: 0.10,
+            min_reasoning_avoided_tokens: 600,
+            min_replay_roi: 0.30,
+            require_replay_safety: true,
+        };
+        let contract = evo
+            .replay_roi_release_gate_contract(60 * 60, thresholds.clone())
+            .unwrap();
+        assert_eq!(contract.input.thresholds, thresholds.clone());
+        assert_eq!(contract.input.replay_attempts_total, 0);
+        assert_eq!(contract.input.replay_hit_rate, 0.0);
+        assert_eq!(contract.input.false_replay_rate, 0.0);
+        assert!(!contract.input.replay_safety_signal.has_replay_activity);
+        assert!(!contract.input.replay_safety);
+        assert_eq!(
+            contract.output.status,
+            ReplayRoiReleaseGateStatus::FailClosed
+        );
+
+        let rendered = evo
+            .render_replay_roi_release_gate_contract_json(60 * 60, thresholds)
+            .unwrap();
+        assert!(rendered.contains("\"min_replay_attempts\": 8"));
+        assert!(rendered.contains("\"min_replay_hit_rate\": 0.75"));
+        assert!(rendered.contains("\"status\": \"fail_closed\""));
     }
 
     #[test]
