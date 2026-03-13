@@ -173,6 +173,10 @@ pub struct A2aTaskSessionCompletionRequest {
     pub capsule_id: Option<String>,
     pub reasoning_steps_avoided: u64,
     pub fallback_reason: Option<String>,
+    pub reason_code: Option<ReplayFallbackReasonCode>,
+    pub repair_hint: Option<String>,
+    pub next_action: Option<ReplayFallbackNextAction>,
+    pub confidence: Option<u8>,
     pub task_class_id: String,
     pub task_label: String,
 }
@@ -335,6 +339,115 @@ pub enum ReplayPlannerDirective {
     PlanFallback,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayFallbackReasonCode {
+    NoCandidateAfterSelect,
+    ScoreBelowThreshold,
+    CandidateHasNoCapsule,
+    MutationPayloadMissing,
+    PatchApplyFailed,
+    ValidationFailed,
+    UnmappedFallbackReason,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayFallbackNextAction {
+    PlanFromScratch,
+    ValidateSignalsThenPlan,
+    RebuildCapsule,
+    RegenerateMutationPayload,
+    RebasePatchAndRetry,
+    RepairAndRevalidate,
+    EscalateFailClosed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplayFallbackContract {
+    pub reason_code: ReplayFallbackReasonCode,
+    pub fallback_reason: String,
+    pub repair_hint: String,
+    pub next_action: ReplayFallbackNextAction,
+    /// Confidence score in [0, 100].
+    pub confidence: u8,
+}
+
+pub fn infer_replay_fallback_reason_code(reason: &str) -> Option<ReplayFallbackReasonCode> {
+    let normalized = reason.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized == "no_candidate_after_select" || normalized.contains("no matching gene") {
+        return Some(ReplayFallbackReasonCode::NoCandidateAfterSelect);
+    }
+    if normalized == "score_below_threshold" || normalized.contains("below replay threshold") {
+        return Some(ReplayFallbackReasonCode::ScoreBelowThreshold);
+    }
+    if normalized == "candidate_has_no_capsule" || normalized.contains("has no capsule") {
+        return Some(ReplayFallbackReasonCode::CandidateHasNoCapsule);
+    }
+    if normalized == "mutation_payload_missing" || normalized.contains("payload missing") {
+        return Some(ReplayFallbackReasonCode::MutationPayloadMissing);
+    }
+    if normalized == "patch_apply_failed" || normalized.contains("patch apply failed") {
+        return Some(ReplayFallbackReasonCode::PatchApplyFailed);
+    }
+    if normalized == "validation_failed" || normalized.contains("validation failed") {
+        return Some(ReplayFallbackReasonCode::ValidationFailed);
+    }
+    None
+}
+
+pub fn normalize_replay_fallback_contract(
+    planner_directive: &ReplayPlannerDirective,
+    fallback_reason: Option<&str>,
+    reason_code: Option<ReplayFallbackReasonCode>,
+    repair_hint: Option<&str>,
+    next_action: Option<ReplayFallbackNextAction>,
+    confidence: Option<u8>,
+) -> Option<ReplayFallbackContract> {
+    if !matches!(planner_directive, ReplayPlannerDirective::PlanFallback) {
+        return None;
+    }
+
+    let normalized_reason = normalize_optional_text(fallback_reason);
+    let normalized_repair_hint = normalize_optional_text(repair_hint);
+    let mut resolved_reason_code = reason_code
+        .or_else(|| {
+            normalized_reason
+                .as_deref()
+                .and_then(infer_replay_fallback_reason_code)
+        })
+        .unwrap_or(ReplayFallbackReasonCode::UnmappedFallbackReason);
+    let mut defaults = replay_fallback_defaults(&resolved_reason_code);
+
+    let mut force_fail_closed = false;
+    if let Some(provided_action) = next_action {
+        if provided_action != defaults.next_action {
+            resolved_reason_code = ReplayFallbackReasonCode::UnmappedFallbackReason;
+            defaults = replay_fallback_defaults(&resolved_reason_code);
+            force_fail_closed = true;
+        }
+    }
+
+    Some(ReplayFallbackContract {
+        reason_code: resolved_reason_code,
+        fallback_reason: normalized_reason.unwrap_or_else(|| defaults.fallback_reason.to_string()),
+        repair_hint: normalized_repair_hint.unwrap_or_else(|| defaults.repair_hint.to_string()),
+        next_action: if force_fail_closed {
+            defaults.next_action
+        } else {
+            next_action.unwrap_or(defaults.next_action)
+        },
+        confidence: if force_fail_closed {
+            defaults.confidence
+        } else {
+            confidence.unwrap_or(defaults.confidence).min(100)
+        },
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplayFeedback {
     pub used_capsule: bool,
@@ -342,9 +455,81 @@ pub struct ReplayFeedback {
     pub planner_directive: ReplayPlannerDirective,
     pub reasoning_steps_avoided: u64,
     pub fallback_reason: Option<String>,
+    pub reason_code: Option<ReplayFallbackReasonCode>,
+    pub repair_hint: Option<String>,
+    pub next_action: Option<ReplayFallbackNextAction>,
+    pub confidence: Option<u8>,
     pub task_class_id: String,
     pub task_label: String,
     pub summary: String,
+}
+
+fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReplayFallbackDefaults {
+    fallback_reason: &'static str,
+    repair_hint: &'static str,
+    next_action: ReplayFallbackNextAction,
+    confidence: u8,
+}
+
+fn replay_fallback_defaults(reason_code: &ReplayFallbackReasonCode) -> ReplayFallbackDefaults {
+    match reason_code {
+        ReplayFallbackReasonCode::NoCandidateAfterSelect => ReplayFallbackDefaults {
+            fallback_reason: "no matching gene",
+            repair_hint:
+                "No reusable capsule matched deterministic signals; run planner for a minimal patch.",
+            next_action: ReplayFallbackNextAction::PlanFromScratch,
+            confidence: 92,
+        },
+        ReplayFallbackReasonCode::ScoreBelowThreshold => ReplayFallbackDefaults {
+            fallback_reason: "candidate score below replay threshold",
+            repair_hint:
+                "Best replay candidate is below threshold; validate task signals and re-plan.",
+            next_action: ReplayFallbackNextAction::ValidateSignalsThenPlan,
+            confidence: 86,
+        },
+        ReplayFallbackReasonCode::CandidateHasNoCapsule => ReplayFallbackDefaults {
+            fallback_reason: "candidate gene has no capsule",
+            repair_hint: "Matched gene has no executable capsule; rebuild capsule from planner output.",
+            next_action: ReplayFallbackNextAction::RebuildCapsule,
+            confidence: 80,
+        },
+        ReplayFallbackReasonCode::MutationPayloadMissing => ReplayFallbackDefaults {
+            fallback_reason: "mutation payload missing from store",
+            repair_hint:
+                "Mutation payload is missing; regenerate and persist a minimal mutation payload.",
+            next_action: ReplayFallbackNextAction::RegenerateMutationPayload,
+            confidence: 76,
+        },
+        ReplayFallbackReasonCode::PatchApplyFailed => ReplayFallbackDefaults {
+            fallback_reason: "replay patch apply failed",
+            repair_hint: "Replay patch cannot be applied cleanly; rebase patch and retry planning.",
+            next_action: ReplayFallbackNextAction::RebasePatchAndRetry,
+            confidence: 68,
+        },
+        ReplayFallbackReasonCode::ValidationFailed => ReplayFallbackDefaults {
+            fallback_reason: "replay validation failed",
+            repair_hint: "Replay validation failed; produce a repair mutation and re-run validation.",
+            next_action: ReplayFallbackNextAction::RepairAndRevalidate,
+            confidence: 64,
+        },
+        ReplayFallbackReasonCode::UnmappedFallbackReason => ReplayFallbackDefaults {
+            fallback_reason: "unmapped replay fallback reason",
+            repair_hint:
+                "Fallback reason is unmapped; fail closed and require explicit planner intervention.",
+            next_action: ReplayFallbackNextAction::EscalateFailClosed,
+            confidence: 0,
+        },
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -425,6 +610,75 @@ mod tests {
     fn negotiate_supported_protocol_returns_none_without_overlap() {
         let req = handshake_request_with_versions(&["0.0.1"]);
         assert!(req.negotiate_supported_protocol().is_none());
+    }
+
+    #[test]
+    fn normalize_replay_fallback_contract_maps_known_reason() {
+        let contract = normalize_replay_fallback_contract(
+            &ReplayPlannerDirective::PlanFallback,
+            Some("no matching gene"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("contract should exist");
+
+        assert_eq!(
+            contract.reason_code,
+            ReplayFallbackReasonCode::NoCandidateAfterSelect
+        );
+        assert_eq!(
+            contract.next_action,
+            ReplayFallbackNextAction::PlanFromScratch
+        );
+        assert_eq!(contract.confidence, 92);
+    }
+
+    #[test]
+    fn normalize_replay_fallback_contract_fails_closed_for_unknown_reason() {
+        let contract = normalize_replay_fallback_contract(
+            &ReplayPlannerDirective::PlanFallback,
+            Some("something unexpected"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("contract should exist");
+
+        assert_eq!(
+            contract.reason_code,
+            ReplayFallbackReasonCode::UnmappedFallbackReason
+        );
+        assert_eq!(
+            contract.next_action,
+            ReplayFallbackNextAction::EscalateFailClosed
+        );
+        assert_eq!(contract.confidence, 0);
+    }
+
+    #[test]
+    fn normalize_replay_fallback_contract_rejects_conflicting_next_action() {
+        let contract = normalize_replay_fallback_contract(
+            &ReplayPlannerDirective::PlanFallback,
+            Some("replay validation failed"),
+            Some(ReplayFallbackReasonCode::ValidationFailed),
+            None,
+            Some(ReplayFallbackNextAction::PlanFromScratch),
+            Some(88),
+        )
+        .expect("contract should exist");
+
+        assert_eq!(
+            contract.reason_code,
+            ReplayFallbackReasonCode::UnmappedFallbackReason
+        );
+        assert_eq!(
+            contract.next_action,
+            ReplayFallbackNextAction::EscalateFailClosed
+        );
+        assert_eq!(contract.confidence, 0);
     }
 }
 

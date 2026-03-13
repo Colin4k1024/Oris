@@ -163,8 +163,18 @@ If replay succeeds, LLM reasoning is skipped.
 Agent-facing callers can now convert a replay result into structured
 `ReplayFeedback` via `replay_feedback_for_agent(...)`. That boundary exposes a
 deterministic task-class id, a human-readable task label, a planner directive
-(`SkipPlanner` vs `PlanFallback`), and explicit fallback reasons so proposal
-pipelines can decide whether to continue planning or accept reuse immediately.
+(`SkipPlanner` vs `PlanFallback`), and explicit fallback contract fields:
+
+- `reason_code` (machine-readable, stable fallback reason)
+- `fallback_reason` (human-readable fallback explanation)
+- `repair_hint` (deterministic minimum repair guidance)
+- `next_action` (executable next step)
+- `confidence` (`0..100`, contract confidence)
+
+For unknown fallback inputs, the contract is fail-closed by default
+(`reason_code=unmapped_fallback_reason`, `next_action=escalate_fail_closed`).
+This avoids silently accepting unmapped semantics across API, events, and
+callers.
 
 When the caller needs the reuse event tied to a specific execution, use
 `replay_or_fallback_for_run(...)` so the resulting `CapsuleReused` event carries

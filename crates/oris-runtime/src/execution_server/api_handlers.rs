@@ -31,8 +31,9 @@ use tokio::sync::RwLock;
     feature = "evolution-network-experimental"
 ))]
 use crate::agent_contract::{
-    A2aCapability, A2aErrorCode, A2aErrorEnvelope, A2aHandshakeRequest, A2aHandshakeResponse,
-    A2aProtocol, A2aTaskLifecycleEvent, A2aTaskLifecycleState, A2aTaskSessionAck,
+    infer_replay_fallback_reason_code, normalize_replay_fallback_contract, A2aCapability,
+    A2aErrorCode, A2aErrorEnvelope, A2aHandshakeRequest, A2aHandshakeResponse, A2aProtocol,
+    A2aTaskLifecycleEvent, A2aTaskLifecycleState, A2aTaskSessionAck,
     A2aTaskSessionCompletionRequest, A2aTaskSessionCompletionResponse,
     A2aTaskSessionDispatchRequest, A2aTaskSessionProgressItem, A2aTaskSessionProgressRequest,
     A2aTaskSessionResult, A2aTaskSessionSnapshot, A2aTaskSessionStartRequest, A2aTaskSessionState,
@@ -1618,6 +1619,10 @@ pub struct A2aCompatReportRequest {
     capsule_id: Option<String>,
     reasoning_steps_avoided: Option<u64>,
     fallback_reason: Option<String>,
+    reason_code: Option<crate::agent_contract::ReplayFallbackReasonCode>,
+    repair_hint: Option<String>,
+    next_action: Option<crate::agent_contract::ReplayFallbackNextAction>,
+    confidence: Option<u8>,
     task_class_id: Option<String>,
     task_label: Option<String>,
 }
@@ -1668,6 +1673,14 @@ pub struct A2aCompatTaskCompleteRequest {
     reasoning_steps_avoided: Option<u64>,
     #[serde(default)]
     fallback_reason: Option<String>,
+    #[serde(default)]
+    reason_code: Option<crate::agent_contract::ReplayFallbackReasonCode>,
+    #[serde(default)]
+    repair_hint: Option<String>,
+    #[serde(default)]
+    next_action: Option<crate::agent_contract::ReplayFallbackNextAction>,
+    #[serde(default)]
+    confidence: Option<u8>,
     #[serde(default)]
     task_class_id: Option<String>,
     #[serde(default)]
@@ -1756,6 +1769,14 @@ pub struct A2aCompatWorkCompleteRequest {
     reasoning_steps_avoided: Option<u64>,
     #[serde(default)]
     fallback_reason: Option<String>,
+    #[serde(default)]
+    reason_code: Option<crate::agent_contract::ReplayFallbackReasonCode>,
+    #[serde(default)]
+    repair_hint: Option<String>,
+    #[serde(default)]
+    next_action: Option<crate::agent_contract::ReplayFallbackNextAction>,
+    #[serde(default)]
+    confidence: Option<u8>,
     #[serde(default)]
     task_class_id: Option<String>,
     #[serde(default)]
@@ -4873,16 +4894,44 @@ fn ensure_task_session_protocol_version(version: &str, rid: &str) -> Result<(), 
     feature = "evolution-network-experimental"
 ))]
 fn derive_replay_feedback(req: &A2aTaskSessionCompletionRequest) -> ReplayFeedback {
+    let planner_directive = if req.used_capsule {
+        ReplayPlannerDirective::SkipPlanner
+    } else {
+        ReplayPlannerDirective::PlanFallback
+    };
+    let reason_code_hint = req.reason_code.or_else(|| {
+        req.fallback_reason
+            .as_deref()
+            .and_then(infer_replay_fallback_reason_code)
+    });
+    let fallback_contract = normalize_replay_fallback_contract(
+        &planner_directive,
+        req.fallback_reason.as_deref(),
+        reason_code_hint,
+        req.repair_hint.as_deref(),
+        req.next_action,
+        req.confidence,
+    );
     ReplayFeedback {
         used_capsule: req.used_capsule,
         capsule_id: req.capsule_id.clone(),
-        planner_directive: if req.used_capsule {
-            ReplayPlannerDirective::SkipPlanner
-        } else {
-            ReplayPlannerDirective::PlanFallback
-        },
+        planner_directive,
         reasoning_steps_avoided: req.reasoning_steps_avoided,
-        fallback_reason: req.fallback_reason.clone(),
+        fallback_reason: fallback_contract
+            .as_ref()
+            .map(|contract| contract.fallback_reason.clone()),
+        reason_code: fallback_contract
+            .as_ref()
+            .map(|contract| contract.reason_code),
+        repair_hint: fallback_contract
+            .as_ref()
+            .map(|contract| contract.repair_hint.clone()),
+        next_action: fallback_contract
+            .as_ref()
+            .map(|contract| contract.next_action),
+        confidence: fallback_contract
+            .as_ref()
+            .map(|contract| contract.confidence),
         task_class_id: req.task_class_id.clone(),
         task_label: req.task_label.clone(),
         summary: req.summary.clone(),
@@ -6487,6 +6536,10 @@ pub async fn evolution_a2a_task_complete(
             capsule_id: req.capsule_id,
             reasoning_steps_avoided: req.reasoning_steps_avoided,
             fallback_reason: req.fallback_reason,
+            reason_code: req.reason_code,
+            repair_hint: req.repair_hint,
+            next_action: req.next_action,
+            confidence: req.confidence,
             task_class_id: req.task_class_id,
             task_label: req.task_label,
         }),
@@ -6869,6 +6922,10 @@ pub async fn evolution_a2a_work_complete(
             capsule_id: req.capsule_id,
             reasoning_steps_avoided: req.reasoning_steps_avoided,
             fallback_reason: req.fallback_reason,
+            reason_code: req.reason_code,
+            repair_hint: req.repair_hint,
+            next_action: req.next_action,
+            confidence: req.confidence,
             task_class_id: req.task_class_id,
             task_label: req.task_label,
         }),
@@ -7392,6 +7449,10 @@ pub async fn evolution_a2a_tasks_report(
                     capsule_id: req.capsule_id,
                     reasoning_steps_avoided: req.reasoning_steps_avoided.unwrap_or(0),
                     fallback_reason: req.fallback_reason,
+                    reason_code: req.reason_code,
+                    repair_hint: req.repair_hint,
+                    next_action: req.next_action,
+                    confidence: req.confidence,
                     task_class_id: req.task_class_id.unwrap_or_else(|| "unknown".into()),
                     task_label: req.task_label.unwrap_or_else(|| task_id.clone()),
                 }),
@@ -15099,6 +15160,10 @@ mod tests {
             complete_json["data"]["result"]["replay_feedback"]["reasoning_steps_avoided"],
             7
         );
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["reason_code"],
+            serde_json::Value::Null
+        );
 
         let snapshot_req = Request::builder()
             .method(Method::GET)
@@ -15207,6 +15272,18 @@ mod tests {
         assert_eq!(
             complete_json["data"]["result"]["replay_feedback"]["planner_directive"],
             "PlanFallback"
+        );
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["reason_code"],
+            "unmapped_fallback_reason"
+        );
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["next_action"],
+            "escalate_fail_closed"
+        );
+        assert_eq!(
+            complete_json["data"]["result"]["replay_feedback"]["confidence"],
+            0
         );
     }
 
