@@ -1689,6 +1689,195 @@ async fn distributed_learning_survives_restart_and_replays_again() {
 }
 
 #[tokio::test]
+async fn remote_revoke_notice_revokes_owned_imported_assets() {
+    let _audit = TestAuditGuard::new("remote_revoke_notice_revokes_owned_imported_assets");
+    let (_producer_workspace, producer_store, producer) = test_evo("remote-revoke-owner-producer");
+    let captured = producer
+        .capture_successful_mutation(
+            &"run-remote-revoke-owner-producer".to_string(),
+            sample_mutation_with_id("mutation-remote-revoke-owner-producer"),
+        )
+        .await
+        .unwrap();
+    let publish = oris_evokernel::EvolutionNetworkNode::new(producer_store.clone())
+        .publish_local_assets("node-producer")
+        .unwrap();
+
+    let consumer_store = Arc::new(JsonlEvolutionStore::new(unique_path(
+        "remote-revoke-owner-consumer-store",
+    )));
+    let (_consumer_workspace, consumer) =
+        test_evo_with_store("remote-revoke-owner-consumer", consumer_store.clone());
+    consumer.import_remote_envelope(&publish).unwrap();
+
+    let outcome = consumer
+        .revoke_assets(&oris_evokernel::evolution_network::RevokeNotice {
+            sender_id: "node-producer".into(),
+            asset_ids: vec![captured.id.clone()],
+            reason: "producer requested remote revoke".into(),
+        })
+        .unwrap();
+
+    assert_eq!(outcome.sender_id, "node-producer");
+    assert!(outcome.asset_ids.contains(&captured.gene_id));
+    assert!(outcome.asset_ids.contains(&captured.id));
+
+    let projection = consumer_store.rebuild_projection().unwrap();
+    let revoked_gene = projection
+        .genes
+        .iter()
+        .find(|gene| gene.id == captured.gene_id)
+        .unwrap();
+    let quarantined_capsule = projection
+        .capsules
+        .iter()
+        .find(|capsule| capsule.id == captured.id)
+        .unwrap();
+
+    assert_eq!(revoked_gene.state, EvoAssetState::Revoked);
+    assert_eq!(quarantined_capsule.state, EvoAssetState::Quarantined);
+}
+
+#[tokio::test]
+async fn remote_revoke_notice_fails_closed_on_mixed_sender_assets() {
+    let _audit = TestAuditGuard::new("remote_revoke_notice_fails_closed_on_mixed_sender_assets");
+    let (_producer_a_workspace, producer_a_store, producer_a) = test_evo("remote-revoke-mixed-a");
+    let captured_a = producer_a
+        .capture_successful_mutation(
+            &"run-remote-revoke-mixed-a".to_string(),
+            sample_mutation_with_id("mutation-remote-revoke-mixed-a"),
+        )
+        .await
+        .unwrap();
+    let publish_a = oris_evokernel::EvolutionNetworkNode::new(producer_a_store.clone())
+        .publish_local_assets("node-a")
+        .unwrap();
+
+    let (_producer_b_workspace, producer_b_store, producer_b) = test_evo("remote-revoke-mixed-b");
+    let captured_b = producer_b
+        .capture_successful_mutation(
+            &"run-remote-revoke-mixed-b".to_string(),
+            sample_mutation_with_id("mutation-remote-revoke-mixed-b"),
+        )
+        .await
+        .unwrap();
+    let publish_b = oris_evokernel::EvolutionNetworkNode::new(producer_b_store.clone())
+        .publish_local_assets("node-b")
+        .unwrap();
+
+    let consumer_store = Arc::new(JsonlEvolutionStore::new(unique_path(
+        "remote-revoke-mixed-consumer-store",
+    )));
+    let (_consumer_workspace, consumer) =
+        test_evo_with_store("remote-revoke-mixed-consumer", consumer_store.clone());
+    consumer.import_remote_envelope(&publish_a).unwrap();
+    consumer.import_remote_envelope(&publish_b).unwrap();
+
+    let before_events = consumer_store.scan(1).unwrap();
+    let before_revokes = before_events
+        .iter()
+        .filter(|stored| matches!(&stored.event, EvolutionEvent::GeneRevoked { .. }))
+        .count();
+    let before_quarantines = before_events
+        .iter()
+        .filter(|stored| matches!(&stored.event, EvolutionEvent::CapsuleQuarantined { .. }))
+        .count();
+
+    let error = consumer
+        .revoke_assets(&oris_evokernel::evolution_network::RevokeNotice {
+            sender_id: "node-a".into(),
+            asset_ids: vec![captured_a.id.clone(), captured_b.id.clone()],
+            reason: "mixed ownership revoke request".into(),
+        })
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("owned"),
+        "expected ownership validation error, got {error}"
+    );
+
+    let after_events = consumer_store.scan(1).unwrap();
+    let after_revokes = after_events
+        .iter()
+        .filter(|stored| matches!(&stored.event, EvolutionEvent::GeneRevoked { .. }))
+        .count();
+    let after_quarantines = after_events
+        .iter()
+        .filter(|stored| matches!(&stored.event, EvolutionEvent::CapsuleQuarantined { .. }))
+        .count();
+
+    assert_eq!(after_revokes, before_revokes);
+    assert_eq!(after_quarantines, before_quarantines);
+
+    let projection = consumer_store.rebuild_projection().unwrap();
+    assert!(projection
+        .genes
+        .iter()
+        .filter(|gene| gene.id == captured_a.gene_id || gene.id == captured_b.gene_id)
+        .all(|gene| gene.state == EvoAssetState::Quarantined));
+}
+
+#[tokio::test]
+async fn remote_replay_failure_revocation_evidence_names_source_sender() {
+    let _audit =
+        TestAuditGuard::new("remote_replay_failure_revocation_evidence_names_source_sender");
+    let (_producer_workspace, producer_store, producer) =
+        test_evo("remote-replay-revocation-source-producer");
+    let captured = producer
+        .capture_successful_mutation(
+            &"run-remote-replay-revocation-source-producer".to_string(),
+            sample_mutation_with_id("mutation-remote-replay-revocation-source-producer"),
+        )
+        .await
+        .unwrap();
+    let publish = oris_evokernel::EvolutionNetworkNode::new(producer_store.clone())
+        .publish_local_assets("node-remote")
+        .unwrap();
+
+    let (consumer_workspace, consumer_store, consumer) = test_evo_with_policy_and_plan(
+        "remote-replay-revocation-source-consumer",
+        sandbox_policy(),
+        failing_plan(),
+    );
+    consumer.import_remote_envelope(&publish).unwrap();
+
+    let first = consumer
+        .replay_or_fallback(replay_input("missing readme", &consumer_workspace))
+        .await
+        .unwrap();
+    let second = consumer
+        .replay_or_fallback(replay_input("missing readme", &consumer_workspace))
+        .await
+        .unwrap();
+
+    assert!(first.fallback_to_planner);
+    assert!(second.fallback_to_planner);
+
+    let events = consumer_store.scan(1).unwrap();
+    let summary = events
+        .iter()
+        .find_map(|stored| match &stored.event {
+            EvolutionEvent::PromotionEvaluated {
+                gene_id,
+                state: EvoAssetState::Revoked,
+                evidence: Some(evidence),
+                ..
+            } if gene_id == &captured.gene_id => evidence.summary.clone(),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    assert!(
+        summary.contains("phase=replay_failure_revocation"),
+        "expected replay failure phase summary, got {summary}"
+    );
+    assert!(
+        summary.contains("source_sender_id=node-remote"),
+        "expected remote source sender summary, got {summary}"
+    );
+}
+
+#[tokio::test]
 async fn unrelated_tasks_do_not_false_positive_after_learning() {
     let _audit = TestAuditGuard::new("unrelated_tasks_do_not_false_positive_after_learning");
     let (workspace, _store, evo) = test_evo("self-evolve-no-false-positive");

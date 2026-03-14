@@ -1652,8 +1652,9 @@ impl StoreReplayExecutor {
             .map_err(|err| ReplayError::Store(err.to_string()))?;
 
         let replay_failures = self.replay_failure_count(&best.gene.id)?;
+        let source_sender_id = self.publisher_for_capsule(&capsule.id);
         let governor_decision = self.governor.evaluate(GovernorInput {
-            candidate_source: if self.publisher_for_capsule(&capsule.id).is_some() {
+            candidate_source: if source_sender_id.is_some() {
                 CandidateSource::Remote
             } else {
                 CandidateSource::Local
@@ -1688,9 +1689,11 @@ impl StoreReplayExecutor {
                         } else {
                             None
                         },
-                        summary: Some(format!(
-                            "phase=replay_failure_revocation; replay_failures={replay_failures}; current_confidence={:.3}; historical_peak_confidence={:.3}",
-                            current_confidence, historical_peak_confidence
+                        summary: Some(replay_failure_revocation_summary(
+                            replay_failures,
+                            current_confidence,
+                            historical_peak_confidence,
+                            source_sender_id.as_deref(),
                         )),
                     }),
                 })
@@ -5262,6 +5265,63 @@ fn normalized_sender_id(sender_id: &str) -> Option<String> {
     }
 }
 
+fn normalized_asset_ids(asset_ids: &[String]) -> BTreeSet<String> {
+    asset_ids
+        .iter()
+        .map(|asset_id| asset_id.trim().to_string())
+        .filter(|asset_id| !asset_id.is_empty())
+        .collect()
+}
+
+fn validate_remote_revoke_notice_assets(
+    store: &dyn EvolutionStore,
+    notice: &RevokeNotice,
+) -> Result<(String, BTreeSet<String>), EvoKernelError> {
+    let sender_id = normalized_sender_id(&notice.sender_id).ok_or_else(|| {
+        EvoKernelError::Validation("revoke notice sender_id must not be empty".into())
+    })?;
+    let requested = normalized_asset_ids(&notice.asset_ids);
+    if requested.is_empty() {
+        return Ok((sender_id, requested));
+    }
+
+    let remote_publishers = remote_publishers_by_asset_from_store(store);
+    let has_remote_assets = requested
+        .iter()
+        .any(|asset_id| remote_publishers.contains_key(asset_id));
+    if !has_remote_assets {
+        return Ok((sender_id, requested));
+    }
+
+    let unauthorized = requested
+        .iter()
+        .filter(|asset_id| {
+            remote_publishers.get(*asset_id).map(String::as_str) != Some(sender_id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unauthorized.is_empty() {
+        return Err(EvoKernelError::Validation(format!(
+            "remote revoke notice contains assets not owned by sender {sender_id}: {}",
+            unauthorized.join(", ")
+        )));
+    }
+
+    Ok((sender_id, requested))
+}
+
+fn replay_failure_revocation_summary(
+    replay_failures: u64,
+    current_confidence: f32,
+    historical_peak_confidence: f32,
+    source_sender_id: Option<&str>,
+) -> String {
+    let source_sender_id = source_sender_id.unwrap_or("unavailable");
+    format!(
+        "phase=replay_failure_revocation; source_sender_id={source_sender_id}; replay_failures={replay_failures}; current_confidence={current_confidence:.3}; historical_peak_confidence={historical_peak_confidence:.3}"
+    )
+}
+
 fn record_manifest_validation(
     store: &dyn EvolutionStore,
     envelope: &EvolutionEnvelope,
@@ -5472,12 +5532,7 @@ fn revoke_assets_in_store(
     notice: &RevokeNotice,
 ) -> Result<RevokeNotice, EvoKernelError> {
     let projection = projection_snapshot(store)?;
-    let requested: BTreeSet<String> = notice
-        .asset_ids
-        .iter()
-        .map(|asset_id| asset_id.trim().to_string())
-        .filter(|asset_id| !asset_id.is_empty())
-        .collect();
+    let (sender_id, requested) = validate_remote_revoke_notice_assets(store, notice)?;
     let mut revoked_gene_ids = BTreeSet::new();
     let mut quarantined_capsule_ids = BTreeSet::new();
 
@@ -5520,7 +5575,7 @@ fn revoke_assets_in_store(
     affected_ids.dedup();
 
     Ok(RevokeNotice {
-        sender_id: notice.sender_id.clone(),
+        sender_id,
         asset_ids: affected_ids,
         reason: notice.reason.clone(),
     })
