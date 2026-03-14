@@ -16,12 +16,13 @@ use oris_agent_contract::{
     CoordinationResult, CoordinationTask, ExecutionFeedback, MutationNeededFailureContract,
     MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
     MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
-    MutationProposalValidationBudget, ReplayFeedback, ReplayPlannerDirective,
-    SelfEvolutionCandidateIntakeRequest, SelfEvolutionMutationProposalContract,
-    SelfEvolutionSelectionDecision, SelfEvolutionSelectionReasonCode,
-    SupervisedDeliveryApprovalState, SupervisedDeliveryContract, SupervisedDeliveryReasonCode,
-    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
-    SupervisedDevloopStatus,
+    MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
+    ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest,
+    SelfEvolutionMutationProposalContract, SelfEvolutionSelectionDecision,
+    SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState, SupervisedDeliveryContract,
+    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
+    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
+    SupervisedExecutionReasonCode, SupervisedValidationOutcome,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -2726,6 +2727,7 @@ impl<S: KernelState> EvoKernel<S> {
         task_class: Option<BoundedTaskClass>,
         status: SupervisedDevloopStatus,
         contract: MutationNeededFailureContract,
+        replay_outcome: Option<ReplayFeedback>,
         mutation_id_for_audit: Option<String>,
     ) -> Result<SupervisedDevloopOutcome, EvoKernelError> {
         if let Some(mutation_id) = mutation_id_for_audit {
@@ -2748,10 +2750,31 @@ impl<S: KernelState> EvoKernel<S> {
             SupervisedDevloopStatus::Executed => "executed",
         };
         let reason_code_key = mutation_needed_reason_code_key(contract.reason_code);
+        let execution_decision = supervised_execution_decision_from_status(status);
+        let validation_outcome = supervised_validation_outcome_from_status(status);
+        let fallback_reason = replay_outcome
+            .as_ref()
+            .and_then(|feedback| feedback.fallback_reason.clone());
+        let evidence_summary = supervised_execution_evidence_summary(
+            execution_decision,
+            task_class.as_ref(),
+            validation_outcome,
+            fallback_reason.as_deref(),
+            Some(reason_code_key),
+        );
         Ok(SupervisedDevloopOutcome {
             task_id: request.task.id.clone(),
             task_class,
             status,
+            execution_decision,
+            replay_outcome,
+            fallback_reason: fallback_reason.clone(),
+            validation_outcome,
+            evidence_summary,
+            reason_code: Some(supervised_reason_code_from_mutation_needed(
+                contract.reason_code,
+            )),
+            recovery_hint: Some(contract.recovery_hint.clone()),
             execution_feedback: None,
             failure_contract: Some(contract.clone()),
             summary: format!(
@@ -2782,6 +2805,7 @@ impl<S: KernelState> EvoKernel<S> {
                 task_class,
                 status,
                 contract,
+                None,
                 Some(audit_mutation_id),
             );
         }
@@ -2803,6 +2827,7 @@ impl<S: KernelState> EvoKernel<S> {
                 None,
                 SupervisedDevloopStatus::RejectedByPolicy,
                 contract,
+                None,
                 Some(audit_mutation_id),
             );
         };
@@ -2810,8 +2835,24 @@ impl<S: KernelState> EvoKernel<S> {
         if !request.approval.approved {
             return Ok(SupervisedDevloopOutcome {
                 task_id: request.task.id.clone(),
-                task_class: Some(task_class),
+                task_class: Some(task_class.clone()),
                 status: SupervisedDevloopStatus::AwaitingApproval,
+                execution_decision: SupervisedExecutionDecision::AwaitingApproval,
+                replay_outcome: None,
+                fallback_reason: None,
+                validation_outcome: SupervisedValidationOutcome::NotRun,
+                evidence_summary: supervised_execution_evidence_summary(
+                    SupervisedExecutionDecision::AwaitingApproval,
+                    Some(&task_class),
+                    SupervisedValidationOutcome::NotRun,
+                    None,
+                    Some("awaiting_human_approval"),
+                ),
+                reason_code: Some(SupervisedExecutionReasonCode::AwaitingHumanApproval),
+                recovery_hint: Some(
+                    "Grant explicit human approval before supervised execution can proceed."
+                        .to_string(),
+                ),
                 execution_feedback: None,
                 failure_contract: None,
                 summary: format!(
@@ -2819,6 +2860,56 @@ impl<S: KernelState> EvoKernel<S> {
                     request.task.id
                 ),
             });
+        }
+
+        let replay_outcome = self
+            .supervised_devloop_replay_outcome(run_id, request, &diff_payload)
+            .await?;
+        if let Some(replay_feedback) = replay_outcome.as_ref() {
+            if replay_feedback.used_capsule {
+                return Ok(SupervisedDevloopOutcome {
+                    task_id: request.task.id.clone(),
+                    task_class: Some(task_class.clone()),
+                    status: SupervisedDevloopStatus::Executed,
+                    execution_decision: SupervisedExecutionDecision::ReplayHit,
+                    replay_outcome: Some(replay_feedback.clone()),
+                    fallback_reason: None,
+                    validation_outcome: SupervisedValidationOutcome::Passed,
+                    evidence_summary: supervised_execution_evidence_summary(
+                        SupervisedExecutionDecision::ReplayHit,
+                        Some(&task_class),
+                        SupervisedValidationOutcome::Passed,
+                        None,
+                        Some("replay_hit"),
+                    ),
+                    reason_code: Some(SupervisedExecutionReasonCode::ReplayHit),
+                    recovery_hint: None,
+                    execution_feedback: Some(ExecutionFeedback {
+                        accepted: true,
+                        asset_state: Some("replayed".to_string()),
+                        summary: replay_feedback.summary.clone(),
+                    }),
+                    failure_contract: None,
+                    summary: format!(
+                        "supervised devloop reused replay capsule for task '{}' after explicit approval",
+                        request.task.id
+                    ),
+                });
+            }
+
+            if let Some(contract) =
+                supervised_devloop_fail_closed_contract_from_replay(replay_feedback)
+            {
+                let status = mutation_needed_status_from_reason_code(contract.reason_code);
+                return self.mutation_needed_failure_outcome(
+                    request,
+                    Some(task_class),
+                    status,
+                    contract,
+                    Some(replay_feedback.clone()),
+                    None,
+                );
+            }
         }
 
         if diff_payload.len() > MUTATION_NEEDED_MAX_DIFF_BYTES {
@@ -2835,6 +2926,7 @@ impl<S: KernelState> EvoKernel<S> {
                 Some(task_class),
                 SupervisedDevloopStatus::RejectedByPolicy,
                 contract,
+                replay_outcome.clone(),
                 Some(audit_mutation_id),
             );
         }
@@ -2854,6 +2946,7 @@ impl<S: KernelState> EvoKernel<S> {
                 Some(task_class),
                 SupervisedDevloopStatus::FailedClosed,
                 contract,
+                replay_outcome.clone(),
                 Some(audit_mutation_id),
             );
         }
@@ -2872,6 +2965,7 @@ impl<S: KernelState> EvoKernel<S> {
                 Some(task_class),
                 SupervisedDevloopStatus::RejectedByPolicy,
                 contract,
+                replay_outcome.clone(),
                 Some(audit_mutation_id),
             );
         }
@@ -2891,6 +2985,7 @@ impl<S: KernelState> EvoKernel<S> {
                 Some(task_class),
                 SupervisedDevloopStatus::RejectedByPolicy,
                 contract,
+                replay_outcome.clone(),
                 Some(audit_mutation_id),
             );
         }
@@ -2908,6 +3003,7 @@ impl<S: KernelState> EvoKernel<S> {
                     Some(task_class),
                     status,
                     contract,
+                    replay_outcome.clone(),
                     None,
                 );
             }
@@ -2922,6 +3018,7 @@ impl<S: KernelState> EvoKernel<S> {
                     Some(task_class),
                     status,
                     contract,
+                    replay_outcome.clone(),
                     None,
                 );
             }
@@ -2933,6 +3030,7 @@ impl<S: KernelState> EvoKernel<S> {
                     Some(task_class),
                     status,
                     contract,
+                    replay_outcome.clone(),
                     None,
                 );
             }
@@ -2946,8 +3044,27 @@ impl<S: KernelState> EvoKernel<S> {
 
         Ok(SupervisedDevloopOutcome {
             task_id: request.task.id.clone(),
-            task_class: Some(task_class),
+            task_class: Some(task_class.clone()),
             status: SupervisedDevloopStatus::Executed,
+            execution_decision: SupervisedExecutionDecision::PlannerFallback,
+            replay_outcome: replay_outcome.clone(),
+            fallback_reason: replay_outcome
+                .as_ref()
+                .and_then(|feedback| feedback.fallback_reason.clone()),
+            validation_outcome: SupervisedValidationOutcome::Passed,
+            evidence_summary: supervised_execution_evidence_summary(
+                SupervisedExecutionDecision::PlannerFallback,
+                Some(&task_class),
+                SupervisedValidationOutcome::Passed,
+                replay_outcome
+                    .as_ref()
+                    .and_then(|feedback| feedback.fallback_reason.as_deref()),
+                Some("replay_fallback"),
+            ),
+            reason_code: Some(SupervisedExecutionReasonCode::ReplayFallback),
+            recovery_hint: replay_outcome
+                .as_ref()
+                .and_then(|feedback| feedback.repair_hint.clone()),
             execution_feedback: Some(Self::feedback_for_agent(&capture)),
             failure_contract: None,
             summary: format!(
@@ -3086,6 +3203,22 @@ impl<S: KernelState> EvoKernel<S> {
             .map_err(store_err)?;
 
         Ok(contract)
+    }
+
+    async fn supervised_devloop_replay_outcome(
+        &self,
+        run_id: &RunId,
+        request: &SupervisedDevloopRequest,
+        diff_payload: &str,
+    ) -> Result<Option<ReplayFeedback>, EvoKernelError> {
+        let selector_input = supervised_devloop_selector_input(request, diff_payload);
+        let decision = self
+            .replay_or_fallback_for_run(run_id, selector_input)
+            .await?;
+        Ok(Some(Self::replay_feedback_for_agent(
+            &decision.detect_evidence.matched_signals,
+            &decision,
+        )))
     }
 
     pub fn select_self_evolution_candidate(
@@ -4057,6 +4190,141 @@ fn is_rust_error_code(value: &str) -> bool {
     value.len() == 5
         && matches!(value.as_bytes().first(), Some(b'e') | Some(b'E'))
         && value[1..].chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn supervised_execution_decision_from_status(
+    status: SupervisedDevloopStatus,
+) -> SupervisedExecutionDecision {
+    match status {
+        SupervisedDevloopStatus::AwaitingApproval => SupervisedExecutionDecision::AwaitingApproval,
+        SupervisedDevloopStatus::RejectedByPolicy => SupervisedExecutionDecision::RejectedByPolicy,
+        SupervisedDevloopStatus::FailedClosed => SupervisedExecutionDecision::FailedClosed,
+        SupervisedDevloopStatus::Executed => SupervisedExecutionDecision::PlannerFallback,
+    }
+}
+
+fn supervised_validation_outcome_from_status(
+    status: SupervisedDevloopStatus,
+) -> SupervisedValidationOutcome {
+    match status {
+        SupervisedDevloopStatus::AwaitingApproval | SupervisedDevloopStatus::RejectedByPolicy => {
+            SupervisedValidationOutcome::NotRun
+        }
+        SupervisedDevloopStatus::FailedClosed => SupervisedValidationOutcome::FailedClosed,
+        SupervisedDevloopStatus::Executed => SupervisedValidationOutcome::Passed,
+    }
+}
+
+fn supervised_reason_code_from_mutation_needed(
+    reason_code: MutationNeededFailureReasonCode,
+) -> SupervisedExecutionReasonCode {
+    match reason_code {
+        MutationNeededFailureReasonCode::PolicyDenied => {
+            SupervisedExecutionReasonCode::PolicyDenied
+        }
+        MutationNeededFailureReasonCode::ValidationFailed => {
+            SupervisedExecutionReasonCode::ValidationFailed
+        }
+        MutationNeededFailureReasonCode::UnsafePatch => SupervisedExecutionReasonCode::UnsafePatch,
+        MutationNeededFailureReasonCode::Timeout => SupervisedExecutionReasonCode::Timeout,
+        MutationNeededFailureReasonCode::MutationPayloadMissing => {
+            SupervisedExecutionReasonCode::MutationPayloadMissing
+        }
+        MutationNeededFailureReasonCode::UnknownFailClosed => {
+            SupervisedExecutionReasonCode::UnknownFailClosed
+        }
+    }
+}
+
+fn supervised_execution_evidence_summary(
+    decision: SupervisedExecutionDecision,
+    task_class: Option<&BoundedTaskClass>,
+    validation_outcome: SupervisedValidationOutcome,
+    fallback_reason: Option<&str>,
+    reason_code: Option<&str>,
+) -> String {
+    let mut parts = vec![
+        format!("decision={decision:?}"),
+        format!("validation={validation_outcome:?}"),
+        format!(
+            "task_class={}",
+            task_class
+                .map(|value| format!("{value:?}"))
+                .unwrap_or_else(|| "none".to_string())
+        ),
+    ];
+    if let Some(reason_code) = reason_code {
+        parts.push(format!("reason_code={reason_code}"));
+    }
+    if let Some(fallback_reason) = fallback_reason {
+        parts.push(format!("fallback_reason={fallback_reason}"));
+    }
+    parts.join("; ")
+}
+
+fn supervised_devloop_selector_input(
+    request: &SupervisedDevloopRequest,
+    diff_payload: &str,
+) -> SelectorInput {
+    let extracted = extract_deterministic_signals(&SignalExtractionInput {
+        patch_diff: diff_payload.to_string(),
+        intent: request.proposal.intent.clone(),
+        expected_effect: request.proposal.expected_effect.clone(),
+        declared_signals: vec![
+            request.proposal.intent.clone(),
+            request.proposal.expected_effect.clone(),
+        ],
+        changed_files: request.proposal.files.clone(),
+        validation_success: true,
+        validation_logs: String::new(),
+        stage_outputs: Vec::new(),
+    });
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    SelectorInput {
+        signals: extracted.values,
+        env: current_env_fingerprint(&cwd),
+        spec_id: None,
+        limit: 1,
+    }
+}
+
+fn supervised_devloop_fail_closed_contract_from_replay(
+    replay_feedback: &ReplayFeedback,
+) -> Option<MutationNeededFailureContract> {
+    let reason_code = replay_feedback.reason_code?;
+    let failure_reason = replay_feedback
+        .fallback_reason
+        .as_deref()
+        .unwrap_or("replay-assisted supervised execution failed closed");
+    match reason_code {
+        ReplayFallbackReasonCode::NoCandidateAfterSelect
+        | ReplayFallbackReasonCode::ScoreBelowThreshold
+        | ReplayFallbackReasonCode::CandidateHasNoCapsule => None,
+        ReplayFallbackReasonCode::MutationPayloadMissing => {
+            Some(normalize_mutation_needed_failure_contract(
+                Some(failure_reason),
+                Some(MutationNeededFailureReasonCode::MutationPayloadMissing),
+            ))
+        }
+        ReplayFallbackReasonCode::PatchApplyFailed => {
+            Some(normalize_mutation_needed_failure_contract(
+                Some(failure_reason),
+                Some(MutationNeededFailureReasonCode::UnsafePatch),
+            ))
+        }
+        ReplayFallbackReasonCode::ValidationFailed => {
+            Some(normalize_mutation_needed_failure_contract(
+                Some(failure_reason),
+                Some(MutationNeededFailureReasonCode::ValidationFailed),
+            ))
+        }
+        ReplayFallbackReasonCode::UnmappedFallbackReason => {
+            Some(normalize_mutation_needed_failure_contract(
+                Some(failure_reason),
+                Some(MutationNeededFailureReasonCode::UnknownFailClosed),
+            ))
+        }
+    }
 }
 
 fn validation_plan_timeout_budget_ms(plan: &ValidationPlan) -> u64 {

@@ -9,7 +9,8 @@ use std::sync::Arc;
 use oris_runtime::agent_contract::{
     AgentTask, HumanApproval, MutationProposal, SupervisedDeliveryReasonCode,
     SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
-    SupervisedDevloopStatus,
+    SupervisedDevloopStatus, SupervisedExecutionDecision, SupervisedExecutionReasonCode,
+    SupervisedValidationOutcome,
 };
 use oris_runtime::evolution::{
     CommandValidator, EvoAssetState, EvoEvolutionStore as EvolutionStore, EvoKernel,
@@ -1456,6 +1457,13 @@ async fn travel_network_delivery_denied_negative_control_is_fail_closed() {
         task_id: request.task.id.clone(),
         task_class: None,
         status: SupervisedDevloopStatus::Executed,
+        execution_decision: SupervisedExecutionDecision::PlannerFallback,
+        replay_outcome: None,
+        fallback_reason: Some("replay_miss".into()),
+        validation_outcome: SupervisedValidationOutcome::Passed,
+        evidence_summary: "missing delivery evidence".to_string(),
+        reason_code: Some(SupervisedExecutionReasonCode::ReplayFallback),
+        recovery_hint: Some("collect delivery-safe execution evidence".into()),
         execution_feedback: None,
         failure_contract: None,
         summary: "missing delivery evidence".to_string(),

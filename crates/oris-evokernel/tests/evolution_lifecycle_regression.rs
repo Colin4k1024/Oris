@@ -15,7 +15,8 @@ use oris_agent_contract::{
     ReplayFallbackReasonCode, ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest,
     SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState,
     SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
-    SupervisedDevloopRequest, SupervisedDevloopStatus,
+    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
+    SupervisedExecutionReasonCode, SupervisedValidationOutcome,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -400,9 +401,18 @@ fn test_evo_with_store(
     label: &str,
     store: Arc<JsonlEvolutionStore>,
 ) -> (PathBuf, EvoKernel<TestState>) {
+    test_evo_with_store_and_plan(label, store, sandbox_policy(), lightweight_plan())
+}
+
+fn test_evo_with_store_and_plan(
+    label: &str,
+    store: Arc<JsonlEvolutionStore>,
+    policy: EvoSandboxPolicy,
+    plan: ValidationPlan,
+) -> (PathBuf, EvoKernel<TestState>) {
     let workspace = temp_workspace();
     let sandbox_root = unique_path(&format!("{label}-sandbox"));
-    let validator = Arc::new(CommandValidator::new(sandbox_policy()));
+    let validator = Arc::new(CommandValidator::new(policy.clone()));
     let sandbox = Arc::new(LocalProcessSandbox::new(
         format!("run-{label}"),
         &workspace,
@@ -413,8 +423,8 @@ fn test_evo_with_store(
             promote_after_successes: 1,
             ..Default::default()
         })))
-        .with_sandbox_policy(sandbox_policy())
-        .with_validation_plan(lightweight_plan());
+        .with_sandbox_policy(policy)
+        .with_validation_plan(plan);
     (workspace, evo)
 }
 
@@ -875,9 +885,21 @@ async fn supervised_devloop_executes_bounded_docs_task_after_approval() {
         .unwrap();
 
     assert_eq!(outcome.status, SupervisedDevloopStatus::Executed);
+    assert_eq!(
+        outcome.execution_decision,
+        SupervisedExecutionDecision::PlannerFallback
+    );
     assert_eq!(outcome.task_class, Some(BoundedTaskClass::DocsSingleFile));
     assert!(outcome.execution_feedback.is_some());
     assert_eq!(outcome.failure_contract, None);
+    assert_eq!(
+        outcome.validation_outcome,
+        SupervisedValidationOutcome::Passed
+    );
+    assert_eq!(
+        outcome.reason_code,
+        Some(SupervisedExecutionReasonCode::ReplayFallback)
+    );
     assert!(outcome.summary.contains("executed"));
     assert!(store
         .scan(1)
@@ -938,9 +960,17 @@ async fn supervised_devloop_stops_before_execution_without_human_approval() {
         .unwrap();
 
     assert_eq!(outcome.status, SupervisedDevloopStatus::AwaitingApproval);
+    assert_eq!(
+        outcome.execution_decision,
+        SupervisedExecutionDecision::AwaitingApproval
+    );
     assert_eq!(outcome.task_class, Some(BoundedTaskClass::DocsSingleFile));
     assert_eq!(outcome.execution_feedback, None);
     assert_eq!(outcome.failure_contract, None);
+    assert_eq!(
+        outcome.validation_outcome,
+        SupervisedValidationOutcome::NotRun
+    );
     assert!(outcome.summary.contains("approval"));
     assert!(store.scan(1).unwrap().is_empty());
 }
@@ -968,6 +998,10 @@ async fn supervised_devloop_rejects_multifile_docs_request_with_out_of_scope_pat
         .unwrap();
 
     assert_eq!(outcome.status, SupervisedDevloopStatus::RejectedByPolicy);
+    assert_eq!(
+        outcome.execution_decision,
+        SupervisedExecutionDecision::RejectedByPolicy
+    );
     assert_eq!(outcome.task_class, None);
     assert_eq!(outcome.execution_feedback, None);
     assert_eq!(
@@ -1097,6 +1131,10 @@ async fn supervised_devloop_fails_closed_for_unsafe_patch_and_records_reason_cod
 
     assert_eq!(outcome.status, SupervisedDevloopStatus::FailedClosed);
     assert_eq!(
+        outcome.execution_decision,
+        SupervisedExecutionDecision::FailedClosed
+    );
+    assert_eq!(
         outcome
             .failure_contract
             .as_ref()
@@ -1112,6 +1150,143 @@ async fn supervised_devloop_fails_closed_for_unsafe_patch_and_records_reason_cod
             ..
         } if reason_code == "unsafe_patch" && *fail_closed
     )));
+}
+
+#[tokio::test]
+async fn replay_supervised_execution_reuses_matching_capsule_after_learning() {
+    let _audit =
+        TestAuditGuard::new("replay_supervised_execution_reuses_matching_capsule_after_learning");
+    let (_workspace, store, evo) = test_evo("replay-supervised-execution-hit");
+    let request = devloop_request("task-docs-replay-hit", "docs/replay-hit.md", true);
+    let diff = proposal_diff_for("docs/replay-hit.md", "Replay Hit");
+
+    let first = evo
+        .run_supervised_devloop(
+            &"run-supervised-devloop-replay-first".to_string(),
+            &request,
+            diff.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let second = evo
+        .run_supervised_devloop(
+            &"run-supervised-devloop-replay-second".to_string(),
+            &request,
+            diff,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        first.execution_decision,
+        SupervisedExecutionDecision::PlannerFallback
+    );
+    assert_eq!(second.status, SupervisedDevloopStatus::Executed);
+    assert_eq!(
+        second.execution_decision,
+        SupervisedExecutionDecision::ReplayHit
+    );
+    assert_eq!(
+        second.validation_outcome,
+        SupervisedValidationOutcome::Passed
+    );
+    assert_eq!(
+        second.reason_code,
+        Some(SupervisedExecutionReasonCode::ReplayHit)
+    );
+    assert!(second
+        .replay_outcome
+        .as_ref()
+        .is_some_and(|feedback| feedback.used_capsule));
+    assert_eq!(second.fallback_reason, None);
+    assert!(second.evidence_summary.contains("ReplayHit"));
+
+    let events = store.scan(1).unwrap();
+    assert!(events
+        .iter()
+        .any(|stored| matches!(&stored.event, EvolutionEvent::CapsuleReused { .. })));
+}
+
+#[tokio::test]
+async fn replay_supervised_execution_fails_closed_when_replay_validation_fails() {
+    let _audit = TestAuditGuard::new(
+        "replay_supervised_execution_fails_closed_when_replay_validation_fails",
+    );
+    let store = Arc::new(JsonlEvolutionStore::new(unique_path(
+        "replay-supervised-execution-validation-store",
+    )));
+    let (_learning_workspace, learning_evo) = test_evo_with_store(
+        "replay-supervised-execution-validation-learn",
+        store.clone(),
+    );
+    let (_failing_workspace, failing_evo) = test_evo_with_store_and_plan(
+        "replay-supervised-execution-validation-fail",
+        store.clone(),
+        sandbox_policy(),
+        failing_plan(),
+    );
+    let request = devloop_request(
+        "task-docs-replay-validation-fail",
+        "docs/replay-validation-fail.md",
+        true,
+    );
+    let diff = proposal_diff_for("docs/replay-validation-fail.md", "Replay Validation Fail");
+
+    let learned = learning_evo
+        .run_supervised_devloop(
+            &"run-replay-supervised-validation-first".to_string(),
+            &request,
+            diff.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        learned.execution_decision,
+        SupervisedExecutionDecision::PlannerFallback
+    );
+
+    let failed = failing_evo
+        .run_supervised_devloop(
+            &"run-replay-supervised-validation-second".to_string(),
+            &request,
+            diff,
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(failed.status, SupervisedDevloopStatus::FailedClosed);
+    assert_eq!(
+        failed.execution_decision,
+        SupervisedExecutionDecision::FailedClosed
+    );
+    assert_eq!(
+        failed.validation_outcome,
+        SupervisedValidationOutcome::FailedClosed
+    );
+    assert_eq!(
+        failed.reason_code,
+        Some(SupervisedExecutionReasonCode::ValidationFailed)
+    );
+    assert!(failed
+        .replay_outcome
+        .as_ref()
+        .and_then(|feedback| feedback.reason_code)
+        .is_some_and(|code| code == ReplayFallbackReasonCode::ValidationFailed));
+    assert!(failed
+        .fallback_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("validation failed")));
+    assert_eq!(
+        failed
+            .failure_contract
+            .as_ref()
+            .map(|contract| contract.reason_code),
+        Some(MutationNeededFailureReasonCode::ValidationFailed)
+    );
 }
 
 #[tokio::test]
@@ -1310,6 +1485,13 @@ async fn delivery_summary_denies_when_execution_evidence_is_missing() {
         task_id: request.task.id.clone(),
         task_class: Some(BoundedTaskClass::DocsSingleFile),
         status: SupervisedDevloopStatus::Executed,
+        execution_decision: SupervisedExecutionDecision::PlannerFallback,
+        replay_outcome: None,
+        fallback_reason: Some("replay_miss".into()),
+        validation_outcome: SupervisedValidationOutcome::Passed,
+        evidence_summary: "executed without retained feedback".into(),
+        reason_code: Some(SupervisedExecutionReasonCode::ReplayFallback),
+        recovery_hint: Some("retain execution feedback before delivery preparation".into()),
         execution_feedback: None,
         failure_contract: None,
         summary: "simulated executed outcome with missing feedback".into(),
