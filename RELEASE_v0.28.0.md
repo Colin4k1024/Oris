@@ -9,11 +9,17 @@
 
 ## Validation
 
-- cargo fmt --all
+- cargo fmt --all -- --check
 - cargo test -p oris-evokernel --test evolution_lifecycle_regression remote_revoke_ -- --nocapture
 - cargo test -p oris-evokernel --test evolution_lifecycle_regression remote_replay_failure_ -- --nocapture
 - cargo test -p oris-evokernel --lib
 - cargo test -p oris-runtime --test agent_self_evolution_travel_network --features full-evolution-experimental -- --nocapture
+- cargo test --workspace
+- cargo build --verbose --all --release --all-features
+- cargo test --release --all-features
+- cargo publish -p oris-evokernel --dry-run --registry crates-io
+- cargo publish -p oris-runtime --all-features --dry-run --registry crates-io
+- cargo publish -p oris-runtime --all-features --registry crates-io
 
 ## Links
 
