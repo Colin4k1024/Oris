@@ -1084,6 +1084,30 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         !release_gate_contract.output.failed_checks.is_empty(),
         "release gate should expose failed checks in demo flow"
     );
+    assert_eq!(
+        release_gate_contract.input.replay_attempts_total,
+        roi_summary.replay_attempts_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_success_total,
+        roi_summary.replay_success_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_failure_total,
+        roi_summary.replay_failure_total
+    );
+    assert_eq!(
+        release_gate_contract.input.reasoning_avoided_tokens,
+        roi_summary.reasoning_avoided_tokens_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_fallback_cost_total,
+        roi_summary.replay_fallback_cost_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_roi,
+        roi_summary.replay_roi
+    );
     append_audit_log(
         &audit_log,
         format!(

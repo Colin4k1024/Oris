@@ -5510,148 +5510,8 @@ fn evolution_metrics_snapshot(
     store: &dyn EvolutionStore,
 ) -> Result<EvolutionMetricsSnapshot, EvoKernelError> {
     let (events, projection) = scan_projection(store)?;
-    let mut replay_task_class_totals = BTreeMap::<(String, String), (u64, u64, u64, u64)>::new();
-    let mut replay_source_totals = BTreeMap::<String, (u64, u64, u64, u64)>::new();
-    let replay_evidences = events
-        .iter()
-        .filter_map(|stored| match &stored.event {
-            EvolutionEvent::ReplayEconomicsRecorded { evidence, .. } => Some(evidence.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let (
-        replay_success_total,
-        replay_failures_total,
-        replay_reasoning_avoided_total,
-        reasoning_avoided_tokens_total,
-        replay_fallback_cost_total,
-    ) = if replay_evidences.is_empty() {
-        let gene_task_classes = projection
-            .genes
-            .iter()
-            .map(|gene| (gene.id.clone(), replay_task_descriptor(&gene.signals)))
-            .collect::<BTreeMap<_, _>>();
-        let replay_success_total = events
-            .iter()
-            .filter(|stored| matches!(stored.event, EvolutionEvent::CapsuleReused { .. }))
-            .count() as u64;
-        for stored in &events {
-            if let EvolutionEvent::CapsuleReused { gene_id, .. } = &stored.event {
-                if let Some((task_class_id, task_label)) = gene_task_classes.get(gene_id) {
-                    let entry = replay_task_class_totals
-                        .entry((task_class_id.clone(), task_label.clone()))
-                        .or_insert((0, 0, 0, 0));
-                    entry.0 += 1;
-                    entry.2 += REPLAY_REASONING_TOKEN_FLOOR;
-                }
-            }
-        }
-        let replay_failures_total = events
-            .iter()
-            .filter(|stored| is_replay_validation_failure(&stored.event))
-            .count() as u64;
-        (
-            replay_success_total,
-            replay_failures_total,
-            replay_success_total,
-            replay_success_total * REPLAY_REASONING_TOKEN_FLOOR,
-            replay_failures_total * REPLAY_REASONING_TOKEN_FLOOR,
-        )
-    } else {
-        let mut replay_success_total = 0_u64;
-        let mut replay_failures_total = 0_u64;
-        let mut reasoning_avoided_tokens_total = 0_u64;
-        let mut replay_fallback_cost_total = 0_u64;
-        for evidence in &replay_evidences {
-            if evidence.success {
-                replay_success_total += 1;
-            } else {
-                replay_failures_total += 1;
-            }
-            reasoning_avoided_tokens_total += evidence.reasoning_avoided_tokens;
-            replay_fallback_cost_total += evidence.replay_fallback_cost;
-            let entry = replay_task_class_totals
-                .entry((evidence.task_class_id.clone(), evidence.task_label.clone()))
-                .or_insert((0, 0, 0, 0));
-            if evidence.success {
-                entry.0 += 1;
-            } else {
-                entry.1 += 1;
-            }
-            entry.2 += evidence.reasoning_avoided_tokens;
-            entry.3 += evidence.replay_fallback_cost;
-            if let Some(source_sender_id) = evidence.source_sender_id.as_deref() {
-                let source_entry = replay_source_totals
-                    .entry(source_sender_id.to_string())
-                    .or_insert((0, 0, 0, 0));
-                if evidence.success {
-                    source_entry.0 += 1;
-                } else {
-                    source_entry.1 += 1;
-                }
-                source_entry.2 += evidence.reasoning_avoided_tokens;
-                source_entry.3 += evidence.replay_fallback_cost;
-            }
-        }
-        (
-            replay_success_total,
-            replay_failures_total,
-            replay_success_total,
-            reasoning_avoided_tokens_total,
-            replay_fallback_cost_total,
-        )
-    };
-    let replay_task_classes = replay_task_class_totals
-        .into_iter()
-        .map(
-            |(
-                (task_class_id, task_label),
-                (
-                    replay_success_total,
-                    replay_failure_total,
-                    reasoning_avoided_tokens_total,
-                    replay_fallback_cost_total,
-                ),
-            )| ReplayTaskClassMetrics {
-                task_class_id,
-                task_label,
-                replay_success_total,
-                replay_failure_total,
-                reasoning_steps_avoided_total: replay_success_total,
-                reasoning_avoided_tokens_total,
-                replay_fallback_cost_total,
-                replay_roi: compute_replay_roi(
-                    reasoning_avoided_tokens_total,
-                    replay_fallback_cost_total,
-                ),
-            },
-        )
-        .collect::<Vec<_>>();
-    let replay_sources = replay_source_totals
-        .into_iter()
-        .map(
-            |(
-                source_sender_id,
-                (
-                    replay_success_total,
-                    replay_failure_total,
-                    reasoning_avoided_tokens_total,
-                    replay_fallback_cost_total,
-                ),
-            )| ReplaySourceRoiMetrics {
-                source_sender_id,
-                replay_success_total,
-                replay_failure_total,
-                reasoning_avoided_tokens_total,
-                replay_fallback_cost_total,
-                replay_roi: compute_replay_roi(
-                    reasoning_avoided_tokens_total,
-                    replay_fallback_cost_total,
-                ),
-            },
-        )
-        .collect::<Vec<_>>();
-    let replay_attempts_total = replay_success_total + replay_failures_total;
+    let replay = collect_replay_roi_aggregate(&events, &projection, None);
+    let replay_reasoning_avoided_total = replay.replay_success_total;
     let confidence_revalidations_total = events
         .iter()
         .filter(|stored| is_confidence_revalidation_event(&stored.event))
@@ -5687,16 +5547,19 @@ fn evolution_metrics_snapshot(
         .count() as u64;
 
     Ok(EvolutionMetricsSnapshot {
-        replay_attempts_total,
-        replay_success_total,
-        replay_success_rate: safe_ratio(replay_success_total, replay_attempts_total),
+        replay_attempts_total: replay.replay_attempts_total,
+        replay_success_total: replay.replay_success_total,
+        replay_success_rate: safe_ratio(replay.replay_success_total, replay.replay_attempts_total),
         confidence_revalidations_total,
         replay_reasoning_avoided_total,
-        reasoning_avoided_tokens_total,
-        replay_fallback_cost_total,
-        replay_roi: compute_replay_roi(reasoning_avoided_tokens_total, replay_fallback_cost_total),
-        replay_task_classes,
-        replay_sources,
+        reasoning_avoided_tokens_total: replay.reasoning_avoided_tokens_total,
+        replay_fallback_cost_total: replay.replay_fallback_cost_total,
+        replay_roi: compute_replay_roi(
+            replay.reasoning_avoided_tokens_total,
+            replay.replay_fallback_cost_total,
+        ),
+        replay_task_classes: replay.replay_task_classes,
+        replay_sources: replay.replay_sources,
         mutation_declared_total,
         promoted_mutations_total,
         promotion_ratio: safe_ratio(promoted_mutations_total, mutation_declared_total),
@@ -5709,70 +5572,122 @@ fn evolution_metrics_snapshot(
     })
 }
 
-fn replay_roi_release_gate_summary(
-    store: &dyn EvolutionStore,
-    window_seconds: u64,
-) -> Result<ReplayRoiWindowSummary, EvoKernelError> {
-    let events = store.scan(1).map_err(store_err)?;
-    let now = Utc::now();
-    let cutoff = if window_seconds == 0 {
-        None
-    } else {
-        let seconds = i64::try_from(window_seconds).unwrap_or(i64::MAX);
-        Some(now - Duration::seconds(seconds))
-    };
+struct ReplayRoiAggregate {
+    replay_attempts_total: u64,
+    replay_success_total: u64,
+    replay_failure_total: u64,
+    reasoning_avoided_tokens_total: u64,
+    replay_fallback_cost_total: u64,
+    replay_task_classes: Vec<ReplayTaskClassMetrics>,
+    replay_sources: Vec<ReplaySourceRoiMetrics>,
+}
 
-    let mut replay_attempts_total = 0_u64;
-    let mut replay_success_total = 0_u64;
-    let mut replay_failure_total = 0_u64;
-    let mut reasoning_avoided_tokens_total = 0_u64;
-    let mut replay_fallback_cost_total = 0_u64;
+fn collect_replay_roi_aggregate(
+    events: &[StoredEvolutionEvent],
+    projection: &EvolutionProjection,
+    cutoff: Option<DateTime<Utc>>,
+) -> ReplayRoiAggregate {
+    let replay_evidences = events
+        .iter()
+        .filter(|stored| replay_event_in_scope(stored, cutoff))
+        .filter_map(|stored| match &stored.event {
+            EvolutionEvent::ReplayEconomicsRecorded { evidence, .. } => Some(evidence.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
     let mut task_totals = BTreeMap::<(String, String), (u64, u64, u64, u64)>::new();
     let mut source_totals = BTreeMap::<String, (u64, u64, u64, u64)>::new();
 
-    for stored in events {
-        let EvolutionEvent::ReplayEconomicsRecorded { evidence, .. } = stored.event else {
-            continue;
-        };
-        if let Some(cutoff) = cutoff {
-            let Some(timestamp) = parse_event_timestamp(&stored.timestamp) else {
-                continue;
-            };
-            if timestamp < cutoff {
-                continue;
+    let (
+        replay_success_total,
+        replay_failure_total,
+        reasoning_avoided_tokens_total,
+        replay_fallback_cost_total,
+    ) = if replay_evidences.is_empty() {
+        let gene_task_classes = projection
+            .genes
+            .iter()
+            .map(|gene| (gene.id.clone(), replay_task_descriptor(&gene.signals)))
+            .collect::<BTreeMap<_, _>>();
+        let mut replay_success_total = 0_u64;
+        let mut replay_failure_total = 0_u64;
+
+        for stored in events
+            .iter()
+            .filter(|stored| replay_event_in_scope(stored, cutoff))
+        {
+            match &stored.event {
+                EvolutionEvent::CapsuleReused { gene_id, .. } => {
+                    replay_success_total += 1;
+                    if let Some((task_class_id, task_label)) = gene_task_classes.get(gene_id) {
+                        let entry = task_totals
+                            .entry((task_class_id.clone(), task_label.clone()))
+                            .or_insert((0, 0, 0, 0));
+                        entry.0 += 1;
+                        entry.2 += REPLAY_REASONING_TOKEN_FLOOR;
+                    }
+                }
+                event if is_replay_validation_failure(event) => {
+                    replay_failure_total += 1;
+                }
+                _ => {}
             }
         }
-        replay_attempts_total += 1;
-        if evidence.success {
-            replay_success_total += 1;
-        } else {
-            replay_failure_total += 1;
-        }
-        reasoning_avoided_tokens_total += evidence.reasoning_avoided_tokens;
-        replay_fallback_cost_total += evidence.replay_fallback_cost;
-        let task_entry = task_totals
-            .entry((evidence.task_class_id.clone(), evidence.task_label.clone()))
-            .or_insert((0, 0, 0, 0));
-        if evidence.success {
-            task_entry.0 += 1;
-        } else {
-            task_entry.1 += 1;
-        }
-        task_entry.2 += evidence.reasoning_avoided_tokens;
-        task_entry.3 += evidence.replay_fallback_cost;
-        if let Some(source_sender_id) = evidence.source_sender_id.as_deref() {
-            let source_entry = source_totals
-                .entry(source_sender_id.to_string())
+
+        (
+            replay_success_total,
+            replay_failure_total,
+            replay_success_total * REPLAY_REASONING_TOKEN_FLOOR,
+            replay_failure_total * REPLAY_REASONING_TOKEN_FLOOR,
+        )
+    } else {
+        let mut replay_success_total = 0_u64;
+        let mut replay_failure_total = 0_u64;
+        let mut reasoning_avoided_tokens_total = 0_u64;
+        let mut replay_fallback_cost_total = 0_u64;
+
+        for evidence in &replay_evidences {
+            if evidence.success {
+                replay_success_total += 1;
+            } else {
+                replay_failure_total += 1;
+            }
+            reasoning_avoided_tokens_total += evidence.reasoning_avoided_tokens;
+            replay_fallback_cost_total += evidence.replay_fallback_cost;
+
+            let entry = task_totals
+                .entry((evidence.task_class_id.clone(), evidence.task_label.clone()))
                 .or_insert((0, 0, 0, 0));
             if evidence.success {
-                source_entry.0 += 1;
+                entry.0 += 1;
             } else {
-                source_entry.1 += 1;
+                entry.1 += 1;
             }
-            source_entry.2 += evidence.reasoning_avoided_tokens;
-            source_entry.3 += evidence.replay_fallback_cost;
+            entry.2 += evidence.reasoning_avoided_tokens;
+            entry.3 += evidence.replay_fallback_cost;
+
+            if let Some(source_sender_id) = evidence.source_sender_id.as_deref() {
+                let source_entry = source_totals
+                    .entry(source_sender_id.to_string())
+                    .or_insert((0, 0, 0, 0));
+                if evidence.success {
+                    source_entry.0 += 1;
+                } else {
+                    source_entry.1 += 1;
+                }
+                source_entry.2 += evidence.reasoning_avoided_tokens;
+                source_entry.3 += evidence.replay_fallback_cost;
+            }
         }
-    }
+
+        (
+            replay_success_total,
+            replay_failure_total,
+            reasoning_avoided_tokens_total,
+            replay_fallback_cost_total,
+        )
+    };
 
     let replay_task_classes = task_totals
         .into_iter()
@@ -5825,17 +5740,54 @@ fn replay_roi_release_gate_summary(
         )
         .collect::<Vec<_>>();
 
-    Ok(ReplayRoiWindowSummary {
-        generated_at: now.to_rfc3339(),
-        window_seconds,
-        replay_attempts_total,
+    ReplayRoiAggregate {
+        replay_attempts_total: replay_success_total + replay_failure_total,
         replay_success_total,
         replay_failure_total,
         reasoning_avoided_tokens_total,
         replay_fallback_cost_total,
-        replay_roi: compute_replay_roi(reasoning_avoided_tokens_total, replay_fallback_cost_total),
         replay_task_classes,
         replay_sources,
+    }
+}
+
+fn replay_event_in_scope(stored: &StoredEvolutionEvent, cutoff: Option<DateTime<Utc>>) -> bool {
+    match cutoff {
+        Some(cutoff) => parse_event_timestamp(&stored.timestamp)
+            .map(|timestamp| timestamp >= cutoff)
+            .unwrap_or(false),
+        None => true,
+    }
+}
+
+fn replay_roi_release_gate_summary(
+    store: &dyn EvolutionStore,
+    window_seconds: u64,
+) -> Result<ReplayRoiWindowSummary, EvoKernelError> {
+    let (events, projection) = scan_projection(store)?;
+    let now = Utc::now();
+    let cutoff = if window_seconds == 0 {
+        None
+    } else {
+        let seconds = i64::try_from(window_seconds).unwrap_or(i64::MAX);
+        Some(now - Duration::seconds(seconds))
+    };
+    let replay = collect_replay_roi_aggregate(&events, &projection, cutoff);
+
+    Ok(ReplayRoiWindowSummary {
+        generated_at: now.to_rfc3339(),
+        window_seconds,
+        replay_attempts_total: replay.replay_attempts_total,
+        replay_success_total: replay.replay_success_total,
+        replay_failure_total: replay.replay_failure_total,
+        reasoning_avoided_tokens_total: replay.reasoning_avoided_tokens_total,
+        replay_fallback_cost_total: replay.replay_fallback_cost_total,
+        replay_roi: compute_replay_roi(
+            replay.reasoning_avoided_tokens_total,
+            replay.replay_fallback_cost_total,
+        ),
+        replay_task_classes: replay.replay_task_classes,
+        replay_sources: replay.replay_sources,
     })
 }
 
@@ -7271,6 +7223,79 @@ index 0000000..1111111
         assert!(rendered.contains("oris_evolution_revoke_frequency_last_hour 1"));
         assert!(rendered.contains("oris_evolution_mutation_velocity_last_hour 1"));
         assert!(rendered.contains("oris_evolution_health 1"));
+    }
+
+    #[tokio::test]
+    async fn replay_roi_release_gate_summary_matches_metrics_snapshot_for_legacy_replay_history() {
+        let (evo, _) = build_test_evo("roi-legacy", "run-roi-legacy", command_validator());
+        let capsule = evo
+            .capture_successful_mutation(&"run-roi-legacy".into(), sample_mutation())
+            .await
+            .unwrap();
+
+        evo.store
+            .append_event(EvolutionEvent::CapsuleReused {
+                capsule_id: capsule.id.clone(),
+                gene_id: capsule.gene_id.clone(),
+                run_id: capsule.run_id.clone(),
+                replay_run_id: Some("run-roi-legacy-replay".into()),
+            })
+            .unwrap();
+        evo.store
+            .append_event(EvolutionEvent::ValidationFailed {
+                mutation_id: "legacy-replay-failure".into(),
+                report: ValidationSnapshot {
+                    success: false,
+                    profile: "test".into(),
+                    duration_ms: 1,
+                    summary: "legacy replay validation failed".into(),
+                },
+                gene_id: Some(capsule.gene_id.clone()),
+            })
+            .unwrap();
+
+        let metrics = evo.metrics_snapshot().unwrap();
+        let summary = evo.replay_roi_release_gate_summary(0).unwrap();
+        let task_class = &metrics.replay_task_classes[0];
+
+        assert_eq!(metrics.replay_attempts_total, 2);
+        assert_eq!(metrics.replay_success_total, 1);
+        assert_eq!(summary.replay_attempts_total, metrics.replay_attempts_total);
+        assert_eq!(summary.replay_success_total, metrics.replay_success_total);
+        assert_eq!(
+            summary.replay_failure_total,
+            metrics.replay_attempts_total - metrics.replay_success_total
+        );
+        assert_eq!(
+            summary.reasoning_avoided_tokens_total,
+            metrics.reasoning_avoided_tokens_total
+        );
+        assert_eq!(
+            summary.replay_fallback_cost_total,
+            metrics.replay_fallback_cost_total
+        );
+        assert_eq!(summary.replay_roi, metrics.replay_roi);
+        assert_eq!(summary.replay_task_classes.len(), 1);
+        assert_eq!(
+            summary.replay_task_classes[0].task_class_id,
+            task_class.task_class_id
+        );
+        assert_eq!(
+            summary.replay_task_classes[0].replay_success_total,
+            task_class.replay_success_total
+        );
+        assert_eq!(
+            summary.replay_task_classes[0].replay_failure_total,
+            task_class.replay_failure_total
+        );
+        assert_eq!(
+            summary.replay_task_classes[0].reasoning_avoided_tokens_total,
+            task_class.reasoning_avoided_tokens_total
+        );
+        assert_eq!(
+            summary.replay_task_classes[0].replay_fallback_cost_total,
+            task_class.replay_fallback_cost_total
+        );
     }
 
     #[tokio::test]
