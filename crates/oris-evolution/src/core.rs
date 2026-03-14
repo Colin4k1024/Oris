@@ -915,14 +915,28 @@ fn canonical_signal_phrases(signals: &[String]) -> Vec<CanonicalSignal> {
 fn canonical_signal_phrase(input: &str) -> Option<CanonicalSignal> {
     let tokens = input
         .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .map(|token| token.trim().to_ascii_lowercase())
-        .filter(|token| token.len() >= 3)
+        .filter_map(canonical_signal_token)
         .collect::<BTreeSet<_>>();
     if tokens.is_empty() {
         return None;
     }
     let phrase = tokens.iter().cloned().collect::<Vec<_>>().join(" ");
     Some(CanonicalSignal { phrase, tokens })
+}
+
+fn canonical_signal_token(token: &str) -> Option<String> {
+    let normalized = token.trim().to_ascii_lowercase();
+    if normalized.len() < 3 {
+        return None;
+    }
+    if normalized.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    match normalized.as_str() {
+        "absent" | "unavailable" | "vanished" => Some("missing".into()),
+        "file" | "files" | "error" | "errors" => None,
+        _ => Some(normalized),
+    }
 }
 
 fn best_signal_match(gene_signals: &[CanonicalSignal], input: &CanonicalSignal) -> f64 {
@@ -2062,5 +2076,26 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn normalized_signal_overlap_accepts_semantic_multisignal_variants() {
+        let overlap = normalized_signal_overlap(
+            &["missing readme".into(), "route beijing shanghai".into()],
+            &[
+                "README file absent".into(),
+                "travel route beijing shanghai".into(),
+            ],
+        );
+
+        assert!(overlap >= 0.99, "expected strong overlap, got {overlap}");
+    }
+
+    #[test]
+    fn normalized_signal_overlap_rejects_single_shared_token_false_positives() {
+        let overlap =
+            normalized_signal_overlap(&["missing readme".into()], &["missing cargo".into()]);
+
+        assert_eq!(overlap, 0.0);
     }
 }
