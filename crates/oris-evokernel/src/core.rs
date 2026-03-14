@@ -9,12 +9,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
-    infer_mutation_needed_failure_reason_code, infer_replay_fallback_reason_code,
-    normalize_mutation_needed_failure_contract, normalize_replay_fallback_contract, AgentRole,
+    accept_self_evolution_selection_decision, infer_mutation_needed_failure_reason_code,
+    infer_replay_fallback_reason_code, normalize_mutation_needed_failure_contract,
+    normalize_replay_fallback_contract, reject_self_evolution_selection_decision, AgentRole,
     BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
     CoordinationResult, CoordinationTask, ExecutionFeedback, MutationNeededFailureContract,
     MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal, ReplayFeedback,
-    ReplayPlannerDirective, SupervisedDevloopOutcome, SupervisedDevloopRequest,
+    ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest, SelfEvolutionSelectionDecision,
+    SelfEvolutionSelectionReasonCode, SupervisedDevloopOutcome, SupervisedDevloopRequest,
     SupervisedDevloopStatus,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
@@ -2840,6 +2842,81 @@ impl<S: KernelState> EvoKernel<S> {
             ),
         })
     }
+
+    pub fn select_self_evolution_candidate(
+        &self,
+        request: &SelfEvolutionCandidateIntakeRequest,
+    ) -> Result<SelfEvolutionSelectionDecision, EvoKernelError> {
+        let normalized_state = request.state.trim().to_ascii_lowercase();
+        if normalized_state != "open" {
+            let reason_code = if normalized_state == "closed" {
+                SelfEvolutionSelectionReasonCode::IssueClosed
+            } else {
+                SelfEvolutionSelectionReasonCode::UnknownFailClosed
+            };
+            return Ok(reject_self_evolution_selection_decision(
+                request.issue_number,
+                reason_code,
+                None,
+                None,
+            ));
+        }
+
+        let normalized_labels = normalized_selection_labels(&request.labels);
+        if normalized_labels.contains("duplicate")
+            || normalized_labels.contains("invalid")
+            || normalized_labels.contains("wontfix")
+        {
+            return Ok(reject_self_evolution_selection_decision(
+                request.issue_number,
+                SelfEvolutionSelectionReasonCode::ExcludedByLabel,
+                Some(&format!(
+                    "self-evolution candidate rejected because issue #{} carries an excluded label",
+                    request.issue_number
+                )),
+                None,
+            ));
+        }
+
+        if !normalized_labels.contains("area/evolution") {
+            return Ok(reject_self_evolution_selection_decision(
+                request.issue_number,
+                SelfEvolutionSelectionReasonCode::MissingEvolutionLabel,
+                None,
+                None,
+            ));
+        }
+
+        if !normalized_labels.contains("type/feature") {
+            return Ok(reject_self_evolution_selection_decision(
+                request.issue_number,
+                SelfEvolutionSelectionReasonCode::MissingFeatureLabel,
+                None,
+                None,
+            ));
+        }
+
+        let Some(task_class) = classify_self_evolution_candidate_request(request) else {
+            return Ok(reject_self_evolution_selection_decision(
+                request.issue_number,
+                SelfEvolutionSelectionReasonCode::UnsupportedCandidateScope,
+                Some(&format!(
+                    "self-evolution candidate rejected because issue #{} declares unsupported candidate scope",
+                    request.issue_number
+                )),
+                None,
+            ));
+        };
+
+        Ok(accept_self_evolution_selection_decision(
+            request.issue_number,
+            task_class,
+            Some(&format!(
+                "selected GitHub issue #{} for bounded self-evolution intake",
+                request.issue_number
+            )),
+        ))
+    }
     pub fn coordinate(&self, plan: CoordinationPlan) -> CoordinationResult {
         MultiAgentCoordinator::new().coordinate(plan)
     }
@@ -3573,6 +3650,25 @@ fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<Stri
     }
 
     Some(normalized_files)
+}
+
+fn classify_self_evolution_candidate_request(
+    request: &SelfEvolutionCandidateIntakeRequest,
+) -> Option<BoundedTaskClass> {
+    let file_count = normalized_supervised_devloop_docs_files(&request.candidate_hint_paths)?.len();
+    match file_count {
+        1 => Some(BoundedTaskClass::DocsSingleFile),
+        2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => Some(BoundedTaskClass::DocsMultiFile),
+        _ => None,
+    }
+}
+
+fn normalized_selection_labels(labels: &[String]) -> BTreeSet<String> {
+    labels
+        .iter()
+        .map(|label| label.trim().to_ascii_lowercase())
+        .filter(|label| !label.is_empty())
+        .collect()
 }
 
 fn find_declared_mutation(
