@@ -1,6 +1,6 @@
 [package]
 name = "oris-evokernel"
-version = "0.7.1"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.80"
 publish = ["crates-io"]
@@ -10,7 +10,7 @@ description = "Self-evolving kernel orchestration for Oris."
 [dependencies]
 async-trait = "0.1.80"
 chrono = { version = "0.4", default-features = true }
-oris-agent-contract = { version = "0.2.1", path = "../oris-agent-contract" }
+oris-agent-contract = { version = "0.3.0", path = "../oris-agent-contract" }
 oris-economics = { version = "0.1.1", path = "../oris-economics" }
 oris-evolution = { version = "0.3.0", path = "../oris-evolution" }
 oris-evolution-network = { version = "0.3.1", path = "../oris-evolution-network" }

@@ -66,7 +66,7 @@ cargo run -p evo_oris_repo --bin supervised_devloop
 Shows three outcomes in one run:
 
 - `AwaitingApproval` when human approval is false
-- `RejectedByPolicy` for out-of-scope path (not single `docs/*.md`)
+- `RejectedByPolicy` for any path set outside the bounded docs Markdown scope
 - `Executed` for approved in-scope docs task
 
 Use this for approval-flow and bounded-task-policy validation.

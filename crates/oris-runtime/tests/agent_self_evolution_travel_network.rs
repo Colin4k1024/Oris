@@ -1014,10 +1014,36 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     let capsule_reused_event_detected =
         detect_capsule_reused_event(&consumer_events, &capture.capsule.id);
     let promotion_reason_codes = collect_promotion_reason_codes(&consumer_events);
+    let imported_sender_ids = consumer_events
+        .iter()
+        .filter(|record| event_kind(record) == Some("remote_asset_imported"))
+        .filter_map(|record| {
+            record
+                .get("event")
+                .and_then(|event| event.get("sender_id"))
+                .and_then(Value::as_str)
+                .map(|value| value.to_string())
+        })
+        .collect::<BTreeSet<_>>();
     assert_eq!(capsule_reused_event_detected, second_decision.used_capsule);
     assert!(promotion_reason_codes.contains("downgrade_remote_requires_local_validation"));
     assert!(promotion_reason_codes.contains("promotion_shadow_validation_passed"));
     assert!(promotion_reason_codes.contains("promotion_remote_replay_validated"));
+    assert!(imported_sender_ids.contains(&envelope.sender_id));
+    assert_eq!(
+        first_decision
+            .economics_evidence
+            .source_sender_id
+            .as_deref(),
+        Some(envelope.sender_id.as_str())
+    );
+    assert_eq!(
+        second_decision
+            .economics_evidence
+            .source_sender_id
+            .as_deref(),
+        Some(envelope.sender_id.as_str())
+    );
     append_audit_log(
         &audit_log,
         format!("[STEP] promotion reason_codes={:?}", promotion_reason_codes),
@@ -1084,6 +1110,30 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
         !release_gate_contract.output.failed_checks.is_empty(),
         "release gate should expose failed checks in demo flow"
     );
+    assert_eq!(
+        release_gate_contract.input.replay_attempts_total,
+        roi_summary.replay_attempts_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_success_total,
+        roi_summary.replay_success_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_failure_total,
+        roi_summary.replay_failure_total
+    );
+    assert_eq!(
+        release_gate_contract.input.reasoning_avoided_tokens,
+        roi_summary.reasoning_avoided_tokens_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_fallback_cost_total,
+        roi_summary.replay_fallback_cost_total
+    );
+    assert_eq!(
+        release_gate_contract.input.replay_roi,
+        roi_summary.replay_roi
+    );
     append_audit_log(
         &audit_log,
         format!(
@@ -1142,6 +1192,69 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
             ),
         );
     }
+
+    let spoofed_revoke =
+        consumer_evo.revoke_assets(&oris_runtime::evolution::evolution_network::RevokeNotice {
+            sender_id: "agent-spoof".to_string(),
+            asset_ids: vec![capture.capsule.id.clone()],
+            reason: "spoofed remote revoke".to_string(),
+        });
+    assert!(spoofed_revoke.is_err());
+    let spoofed_revoke_error = spoofed_revoke.unwrap_err().to_string();
+    assert!(
+        spoofed_revoke_error.contains("owned"),
+        "expected fail-closed revoke ownership error, got {spoofed_revoke_error}"
+    );
+    append_audit_log(
+        &audit_log,
+        format!("[STEP] spoofed revoke rejected sender=agent-spoof error={spoofed_revoke_error}"),
+    );
+
+    let revoke = consumer_evo
+        .revoke_assets(&oris_runtime::evolution::evolution_network::RevokeNotice {
+            sender_id: envelope.sender_id.clone(),
+            asset_ids: vec![capture.capsule.id.clone()],
+            reason: "producer revoked remote travel asset".to_string(),
+        })
+        .unwrap();
+    assert_eq!(revoke.sender_id, envelope.sender_id);
+    assert!(revoke.asset_ids.contains(&capture.gene.id));
+    assert!(revoke.asset_ids.contains(&capture.capsule.id));
+
+    let consumer_projection_after_revoke = consumer_store.rebuild_projection().unwrap();
+    assert!(consumer_projection_after_revoke
+        .genes
+        .iter()
+        .any(|gene| gene.id == capture.gene.id && gene.state == EvoAssetState::Revoked));
+    assert!(consumer_projection_after_revoke
+        .capsules
+        .iter()
+        .any(|capsule| capsule.id == capture.capsule.id
+            && capsule.state == EvoAssetState::Quarantined));
+
+    let consumer_events_after_revoke =
+        load_jsonl_values(&consumer_store.root_dir().join("events.jsonl"));
+    assert!(consumer_events_after_revoke.iter().any(|record| {
+        event_kind(record) == Some("gene_revoked")
+            && record
+                .get("event")
+                .and_then(|event| event.get("gene_id"))
+                .and_then(Value::as_str)
+                == Some(capture.gene.id.as_str())
+            && record
+                .get("event")
+                .and_then(|event| event.get("reason"))
+                .and_then(Value::as_str)
+                == Some("producer revoked remote travel asset")
+    }));
+    append_audit_log(
+        &audit_log,
+        format!(
+            "[PASS] remote revoke sender={} affected_ids={:?}",
+            revoke.sender_id, revoke.asset_ids
+        ),
+    );
+
     assert!(realtime_log_path.exists());
     assert!(realtime_jsonl_path.exists());
     assert_stub_realtime_logs(&realtime_jsonl_path);
