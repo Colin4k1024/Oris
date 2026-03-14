@@ -14,10 +14,12 @@ use oris_agent_contract::{
     normalize_replay_fallback_contract, reject_self_evolution_selection_decision, AgentRole,
     BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
     CoordinationResult, CoordinationTask, ExecutionFeedback, MutationNeededFailureContract,
-    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal, ReplayFeedback,
-    ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest, SelfEvolutionSelectionDecision,
-    SelfEvolutionSelectionReasonCode, SupervisedDevloopOutcome, SupervisedDevloopRequest,
-    SupervisedDevloopStatus,
+    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
+    MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
+    MutationProposalValidationBudget, ReplayFeedback, ReplayPlannerDirective,
+    SelfEvolutionCandidateIntakeRequest, SelfEvolutionMutationProposalContract,
+    SelfEvolutionSelectionDecision, SelfEvolutionSelectionReasonCode, SupervisedDevloopOutcome,
+    SupervisedDevloopRequest, SupervisedDevloopStatus,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -2675,7 +2677,27 @@ impl<S: KernelState> EvoKernel<S> {
         base_revision: Option<String>,
     ) -> Result<SupervisedDevloopOutcome, EvoKernelError> {
         let audit_mutation_id = mutation_needed_audit_mutation_id(request);
-        let task_class = classify_supervised_devloop_request(request);
+        let proposal_contract = self.supervised_devloop_mutation_proposal_contract(request);
+        if proposal_contract.fail_closed {
+            let task_class = proposal_contract
+                .proposal_scope
+                .as_ref()
+                .map(|scope| scope.task_class.clone());
+            let contract = mutation_needed_contract_from_proposal_contract(&proposal_contract);
+            let status = mutation_needed_status_from_reason_code(contract.reason_code);
+            return self.mutation_needed_failure_outcome(
+                request,
+                task_class,
+                status,
+                contract,
+                Some(audit_mutation_id),
+            );
+        }
+
+        let task_class = proposal_contract
+            .proposal_scope
+            .as_ref()
+            .map(|scope| scope.task_class.clone());
         let Some(task_class) = task_class else {
             let contract = normalize_mutation_needed_failure_contract(
                 Some(&format!(
@@ -2917,6 +2939,224 @@ impl<S: KernelState> EvoKernel<S> {
             )),
         ))
     }
+
+    pub fn prepare_self_evolution_mutation_proposal(
+        &self,
+        request: &SelfEvolutionCandidateIntakeRequest,
+    ) -> Result<SelfEvolutionMutationProposalContract, EvoKernelError> {
+        let selection = self.select_self_evolution_candidate(request)?;
+        let expected_evidence = default_mutation_proposal_expected_evidence();
+        let validation_budget = mutation_proposal_validation_budget(&self.validation_plan);
+        let proposal = AgentMutationProposal {
+            intent: format!(
+                "Resolve GitHub issue #{}: {}",
+                request.issue_number,
+                request.title.trim()
+            ),
+            files: request.candidate_hint_paths.clone(),
+            expected_effect: format!(
+                "Address bounded self-evolution candidate issue #{} within the approved docs scope",
+                request.issue_number
+            ),
+        };
+
+        if !selection.selected {
+            return Ok(SelfEvolutionMutationProposalContract {
+                mutation_proposal: proposal,
+                proposal_scope: None,
+                validation_budget,
+                approval_required: true,
+                expected_evidence,
+                summary: format!(
+                    "self-evolution mutation proposal rejected for GitHub issue #{}",
+                    request.issue_number
+                ),
+                failure_reason: selection.failure_reason.clone(),
+                recovery_hint: selection.recovery_hint.clone(),
+                reason_code: proposal_reason_code_from_selection(&selection),
+                fail_closed: true,
+            });
+        }
+
+        if expected_evidence.is_empty() {
+            return Ok(SelfEvolutionMutationProposalContract {
+                mutation_proposal: proposal,
+                proposal_scope: None,
+                validation_budget,
+                approval_required: true,
+                expected_evidence,
+                summary: format!(
+                    "self-evolution mutation proposal rejected for GitHub issue #{} because expected evidence is missing",
+                    request.issue_number
+                ),
+                failure_reason: Some(
+                    "self-evolution mutation proposal rejected because expected evidence was not declared"
+                        .to_string(),
+                ),
+                recovery_hint: Some(
+                    "Declare the expected approval, validation, and audit evidence before retrying proposal preparation."
+                        .to_string(),
+                ),
+                reason_code: MutationProposalContractReasonCode::ExpectedEvidenceMissing,
+                fail_closed: true,
+            });
+        }
+
+        match validate_bounded_docs_files(&request.candidate_hint_paths) {
+            Ok(target_files) => Ok(SelfEvolutionMutationProposalContract {
+                mutation_proposal: proposal,
+                proposal_scope: selection.candidate_class.clone().map(|task_class| {
+                    MutationProposalScope {
+                        task_class,
+                        target_files,
+                    }
+                }),
+                validation_budget,
+                approval_required: true,
+                expected_evidence,
+                summary: format!(
+                    "self-evolution mutation proposal prepared for GitHub issue #{}",
+                    request.issue_number
+                ),
+                failure_reason: None,
+                recovery_hint: None,
+                reason_code: MutationProposalContractReasonCode::Accepted,
+                fail_closed: false,
+            }),
+            Err(reason_code) => Ok(SelfEvolutionMutationProposalContract {
+                mutation_proposal: proposal,
+                proposal_scope: None,
+                validation_budget,
+                approval_required: true,
+                expected_evidence,
+                summary: format!(
+                    "self-evolution mutation proposal rejected for GitHub issue #{} due to invalid proposal scope",
+                    request.issue_number
+                ),
+                failure_reason: Some(format!(
+                    "self-evolution mutation proposal rejected because issue #{} declares an invalid bounded docs scope",
+                    request.issue_number
+                )),
+                recovery_hint: Some(
+                    "Restrict target files to one to three unique docs/*.md paths before retrying proposal preparation."
+                        .to_string(),
+                ),
+                reason_code,
+                fail_closed: true,
+            }),
+        }
+    }
+
+    fn supervised_devloop_mutation_proposal_contract(
+        &self,
+        request: &SupervisedDevloopRequest,
+    ) -> SelfEvolutionMutationProposalContract {
+        let validation_budget = mutation_proposal_validation_budget(&self.validation_plan);
+        let expected_evidence = default_mutation_proposal_expected_evidence();
+
+        if expected_evidence.is_empty() {
+            return SelfEvolutionMutationProposalContract {
+                mutation_proposal: request.proposal.clone(),
+                proposal_scope: None,
+                validation_budget,
+                approval_required: true,
+                expected_evidence,
+                summary: format!(
+                    "supervised devloop rejected task '{}' because expected evidence was not declared",
+                    request.task.id
+                ),
+                failure_reason: Some(
+                    "supervised devloop mutation proposal rejected because expected evidence was not declared"
+                        .to_string(),
+                ),
+                recovery_hint: Some(
+                    "Declare human approval, bounded scope, validation, and audit evidence before execution."
+                        .to_string(),
+                ),
+                reason_code: MutationProposalContractReasonCode::ExpectedEvidenceMissing,
+                fail_closed: true,
+            };
+        }
+
+        if validation_budget.validation_timeout_ms > MUTATION_NEEDED_MAX_VALIDATION_BUDGET_MS {
+            return SelfEvolutionMutationProposalContract {
+                mutation_proposal: request.proposal.clone(),
+                proposal_scope: supervised_devloop_mutation_proposal_scope(request).ok(),
+                validation_budget: validation_budget.clone(),
+                approval_required: true,
+                expected_evidence,
+                summary: format!(
+                    "supervised devloop rejected task '{}' because the declared validation budget exceeds bounded policy",
+                    request.task.id
+                ),
+                failure_reason: Some(format!(
+                    "supervised devloop mutation proposal rejected because validation budget exceeds bounded policy (configured={}ms, max={}ms)",
+                    validation_budget.validation_timeout_ms,
+                    MUTATION_NEEDED_MAX_VALIDATION_BUDGET_MS
+                )),
+                recovery_hint: Some(
+                    "Reduce the validation timeout budget to the bounded policy before execution."
+                        .to_string(),
+                ),
+                reason_code: MutationProposalContractReasonCode::ValidationBudgetExceeded,
+                fail_closed: true,
+            };
+        }
+
+        match supervised_devloop_mutation_proposal_scope(request) {
+            Ok(proposal_scope) => SelfEvolutionMutationProposalContract {
+                mutation_proposal: request.proposal.clone(),
+                proposal_scope: Some(proposal_scope),
+                validation_budget,
+                approval_required: true,
+                expected_evidence,
+                summary: format!(
+                    "supervised devloop mutation proposal prepared for task '{}'",
+                    request.task.id
+                ),
+                failure_reason: None,
+                recovery_hint: None,
+                reason_code: MutationProposalContractReasonCode::Accepted,
+                fail_closed: false,
+            },
+            Err(reason_code) => {
+                let failure_reason = match reason_code {
+                    MutationProposalContractReasonCode::MissingTargetFiles => format!(
+                        "supervised devloop rejected task '{}' because the mutation proposal does not declare any target files",
+                        request.task.id
+                    ),
+                    MutationProposalContractReasonCode::UnsupportedTaskClass
+                    | MutationProposalContractReasonCode::OutOfBoundsPath => format!(
+                        "supervised devloop rejected task '{}' because it is an unsupported task outside the bounded scope",
+                        request.task.id
+                    ),
+                    _ => format!(
+                        "supervised devloop mutation proposal rejected before execution for task '{}'",
+                        request.task.id
+                    ),
+                };
+                SelfEvolutionMutationProposalContract {
+                    mutation_proposal: request.proposal.clone(),
+                    proposal_scope: None,
+                    validation_budget,
+                    approval_required: true,
+                    expected_evidence,
+                    summary: format!(
+                        "supervised devloop rejected task '{}' before execution because the mutation proposal is malformed or out of bounds",
+                        request.task.id
+                    ),
+                    failure_reason: Some(failure_reason),
+                    recovery_hint: Some(
+                        "Restrict proposal files to one to three unique docs/*.md paths before execution."
+                            .to_string(),
+                    ),
+                    reason_code,
+                    fail_closed: true,
+                }
+            }
+        }
+    }
+
     pub fn coordinate(&self, plan: CoordinationPlan) -> CoordinationResult {
         MultiAgentCoordinator::new().coordinate(plan)
     }
@@ -3618,20 +3858,98 @@ fn mutation_needed_audit_mutation_id(request: &SupervisedDevloopRequest) -> Stri
     .unwrap_or_else(|_| format!("mutation-needed-{}", request.task.id))
 }
 
-fn classify_supervised_devloop_request(
-    request: &SupervisedDevloopRequest,
-) -> Option<BoundedTaskClass> {
-    let file_count = normalized_supervised_devloop_docs_files(&request.proposal.files)?.len();
-    match file_count {
-        1 => Some(BoundedTaskClass::DocsSingleFile),
-        2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => Some(BoundedTaskClass::DocsMultiFile),
-        _ => None,
+fn default_mutation_proposal_expected_evidence() -> Vec<MutationProposalEvidence> {
+    vec![
+        MutationProposalEvidence::HumanApproval,
+        MutationProposalEvidence::BoundedScope,
+        MutationProposalEvidence::ValidationPass,
+        MutationProposalEvidence::ExecutionAudit,
+    ]
+}
+
+fn mutation_proposal_validation_budget(
+    validation_plan: &ValidationPlan,
+) -> MutationProposalValidationBudget {
+    MutationProposalValidationBudget {
+        max_diff_bytes: MUTATION_NEEDED_MAX_DIFF_BYTES,
+        max_changed_lines: MUTATION_NEEDED_MAX_CHANGED_LINES,
+        validation_timeout_ms: validation_plan_timeout_budget_ms(validation_plan),
     }
 }
 
-fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<String>> {
-    if files.is_empty() || files.len() > SUPERVISED_DEVLOOP_MAX_DOC_FILES {
-        return None;
+fn proposal_reason_code_from_selection(
+    selection: &SelfEvolutionSelectionDecision,
+) -> MutationProposalContractReasonCode {
+    match selection.reason_code {
+        Some(SelfEvolutionSelectionReasonCode::Accepted) => {
+            MutationProposalContractReasonCode::Accepted
+        }
+        Some(SelfEvolutionSelectionReasonCode::UnsupportedCandidateScope) => {
+            MutationProposalContractReasonCode::OutOfBoundsPath
+        }
+        Some(SelfEvolutionSelectionReasonCode::UnknownFailClosed) | None => {
+            MutationProposalContractReasonCode::UnknownFailClosed
+        }
+        Some(
+            SelfEvolutionSelectionReasonCode::IssueClosed
+            | SelfEvolutionSelectionReasonCode::MissingEvolutionLabel
+            | SelfEvolutionSelectionReasonCode::MissingFeatureLabel
+            | SelfEvolutionSelectionReasonCode::ExcludedByLabel,
+        ) => MutationProposalContractReasonCode::CandidateRejected,
+    }
+}
+
+fn mutation_needed_contract_from_proposal_contract(
+    proposal_contract: &SelfEvolutionMutationProposalContract,
+) -> MutationNeededFailureContract {
+    let reason_code = match proposal_contract.reason_code {
+        MutationProposalContractReasonCode::UnknownFailClosed => {
+            MutationNeededFailureReasonCode::UnknownFailClosed
+        }
+        MutationProposalContractReasonCode::Accepted
+        | MutationProposalContractReasonCode::CandidateRejected
+        | MutationProposalContractReasonCode::MissingTargetFiles
+        | MutationProposalContractReasonCode::OutOfBoundsPath
+        | MutationProposalContractReasonCode::UnsupportedTaskClass
+        | MutationProposalContractReasonCode::ValidationBudgetExceeded
+        | MutationProposalContractReasonCode::ExpectedEvidenceMissing => {
+            MutationNeededFailureReasonCode::PolicyDenied
+        }
+    };
+
+    normalize_mutation_needed_failure_contract(
+        proposal_contract
+            .failure_reason
+            .as_deref()
+            .or(Some(proposal_contract.summary.as_str())),
+        Some(reason_code),
+    )
+}
+
+fn supervised_devloop_mutation_proposal_scope(
+    request: &SupervisedDevloopRequest,
+) -> Result<MutationProposalScope, MutationProposalContractReasonCode> {
+    let target_files = validate_bounded_docs_files(&request.proposal.files)?;
+    let task_class = match target_files.len() {
+        1 => BoundedTaskClass::DocsSingleFile,
+        2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => BoundedTaskClass::DocsMultiFile,
+        _ => return Err(MutationProposalContractReasonCode::UnsupportedTaskClass),
+    };
+
+    Ok(MutationProposalScope {
+        task_class,
+        target_files,
+    })
+}
+
+fn validate_bounded_docs_files(
+    files: &[String],
+) -> Result<Vec<String>, MutationProposalContractReasonCode> {
+    if files.is_empty() {
+        return Err(MutationProposalContractReasonCode::MissingTargetFiles);
+    }
+    if files.len() > SUPERVISED_DEVLOOP_MAX_DOC_FILES {
+        return Err(MutationProposalContractReasonCode::UnsupportedTaskClass);
     }
 
     let mut normalized_files = Vec::with_capacity(files.len());
@@ -3644,12 +3962,16 @@ fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<Stri
             || !normalized.ends_with(".md")
             || !seen.insert(normalized.clone())
         {
-            return None;
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
         }
         normalized_files.push(normalized);
     }
 
-    Some(normalized_files)
+    Ok(normalized_files)
+}
+
+fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<String>> {
+    validate_bounded_docs_files(files).ok()
 }
 
 fn classify_self_evolution_candidate_request(

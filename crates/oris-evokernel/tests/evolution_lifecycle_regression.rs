@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
     AgentTask, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
-    ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayPlannerDirective,
-    SelfEvolutionCandidateIntakeRequest, SelfEvolutionSelectionReasonCode,
-    SupervisedDevloopRequest, SupervisedDevloopStatus,
+    MutationProposalContractReasonCode, MutationProposalEvidence, ReplayFallbackNextAction,
+    ReplayFallbackReasonCode, ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest,
+    SelfEvolutionSelectionReasonCode, SupervisedDevloopRequest, SupervisedDevloopStatus,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -1273,6 +1273,90 @@ fn candidate_intake_accepts_open_evolution_feature_docs_issue() {
 }
 
 #[test]
+fn mutation_proposal_accepts_selected_candidate_and_declares_contract_shape() {
+    let _audit = TestAuditGuard::new(
+        "mutation_proposal_accepts_selected_candidate_and_declares_contract_shape",
+    );
+    let (_workspace, _store, evo) = test_evo("mutation-proposal-accept");
+    let request = github_issue_candidate_request(
+        235,
+        "OPEN",
+        vec!["area/evolution", "type/feature"],
+        vec!["docs/w8-mutation-proposal.md"],
+    );
+
+    let contract = evo
+        .prepare_self_evolution_mutation_proposal(&request)
+        .unwrap();
+
+    assert_eq!(
+        contract.reason_code,
+        MutationProposalContractReasonCode::Accepted
+    );
+    assert!(!contract.fail_closed);
+    assert!(contract.approval_required);
+    assert_eq!(
+        contract
+            .proposal_scope
+            .as_ref()
+            .map(|scope| scope.task_class.clone()),
+        Some(BoundedTaskClass::DocsSingleFile)
+    );
+    assert_eq!(
+        contract
+            .proposal_scope
+            .as_ref()
+            .map(|scope| scope.target_files.clone()),
+        Some(vec!["docs/w8-mutation-proposal.md".to_string()])
+    );
+    assert_eq!(
+        contract.mutation_proposal.files,
+        vec!["docs/w8-mutation-proposal.md".to_string()]
+    );
+    assert_eq!(
+        contract.expected_evidence,
+        vec![
+            MutationProposalEvidence::HumanApproval,
+            MutationProposalEvidence::BoundedScope,
+            MutationProposalEvidence::ValidationPass,
+            MutationProposalEvidence::ExecutionAudit,
+        ]
+    );
+    assert_eq!(contract.validation_budget.max_diff_bytes, 128 * 1024);
+    assert_eq!(contract.validation_budget.max_changed_lines, 600);
+    assert!(contract.summary.contains("prepared"));
+}
+
+#[test]
+fn mutation_proposal_rejects_out_of_bounds_candidate_scope_fail_closed() {
+    let _audit =
+        TestAuditGuard::new("mutation_proposal_rejects_out_of_bounds_candidate_scope_fail_closed");
+    let (_workspace, _store, evo) = test_evo("mutation-proposal-out-of-bounds");
+    let request = github_issue_candidate_request(
+        236,
+        "OPEN",
+        vec!["area/evolution", "type/feature"],
+        vec!["src/lib.rs"],
+    );
+
+    let contract = evo
+        .prepare_self_evolution_mutation_proposal(&request)
+        .unwrap();
+
+    assert_eq!(
+        contract.reason_code,
+        MutationProposalContractReasonCode::OutOfBoundsPath
+    );
+    assert!(contract.fail_closed);
+    assert!(contract.proposal_scope.is_none());
+    assert!(contract
+        .failure_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("unsupported candidate scope")));
+    assert!(contract.recovery_hint.is_some());
+}
+
+#[test]
 fn candidate_intake_rejects_closed_issue_fail_closed() {
     let _audit = TestAuditGuard::new("candidate_intake_rejects_closed_issue_fail_closed");
     let (_workspace, _store, evo) = test_evo("candidate-intake-closed");
@@ -1392,6 +1476,60 @@ fn candidate_intake_rejects_unsupported_scope() {
         .failure_reason
         .as_deref()
         .is_some_and(|reason| reason.contains("scope")));
+}
+
+#[tokio::test]
+async fn mutation_proposal_rejects_missing_target_files_before_execution() {
+    let _audit =
+        TestAuditGuard::new("mutation_proposal_rejects_missing_target_files_before_execution");
+    let (_workspace, store, evo) = test_evo("mutation-proposal-missing-target-files");
+    let request = SupervisedDevloopRequest {
+        task: AgentTask {
+            id: "task-missing-target-files".into(),
+            description: "Attempt to run with an empty proposal target list".into(),
+        },
+        proposal: MutationProposal {
+            intent: "Update docs without declared target files".into(),
+            files: Vec::new(),
+            expected_effect: "Should be rejected before execution".into(),
+        },
+        approval: HumanApproval {
+            approved: true,
+            approver: Some("maintainer".into()),
+            note: Some("regression test".into()),
+        },
+    };
+
+    let outcome = evo
+        .run_supervised_devloop(
+            &"run-mutation-proposal-missing-target-files".to_string(),
+            &request,
+            proposal_diff_for("docs/unused.md", "Should Not Execute"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.status, SupervisedDevloopStatus::RejectedByPolicy);
+    assert_eq!(
+        outcome
+            .failure_contract
+            .as_ref()
+            .map(|contract| contract.reason_code),
+        Some(MutationNeededFailureReasonCode::PolicyDenied)
+    );
+    let events = store.scan(1).unwrap();
+    assert!(events.iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::MutationRejected {
+            reason_code: Some(reason_code),
+            fail_closed,
+            ..
+        } if reason_code == "policy_denied" && *fail_closed
+    )));
+    assert!(!events
+        .iter()
+        .any(|stored| matches!(&stored.event, EvolutionEvent::MutationDeclared { .. })));
 }
 
 #[tokio::test]
