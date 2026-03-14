@@ -892,7 +892,7 @@ pub struct SupervisedDevloopRequest {
     pub approval: HumanApproval,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SupervisedDevloopStatus {
     AwaitingApproval,
     RejectedByPolicy,
@@ -900,11 +900,54 @@ pub enum SupervisedDevloopStatus {
     Executed,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedExecutionDecision {
+    AwaitingApproval,
+    ReplayHit,
+    PlannerFallback,
+    RejectedByPolicy,
+    FailedClosed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedValidationOutcome {
+    NotRun,
+    Passed,
+    FailedClosed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedExecutionReasonCode {
+    AwaitingHumanApproval,
+    ReplayHit,
+    ReplayFallback,
+    PolicyDenied,
+    ValidationFailed,
+    UnsafePatch,
+    Timeout,
+    MutationPayloadMissing,
+    UnknownFailClosed,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SupervisedDevloopOutcome {
     pub task_id: String,
     pub task_class: Option<BoundedTaskClass>,
     pub status: SupervisedDevloopStatus,
+    pub execution_decision: SupervisedExecutionDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_outcome: Option<ReplayFeedback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    pub validation_outcome: SupervisedValidationOutcome,
+    pub evidence_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<SupervisedExecutionReasonCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
     pub execution_feedback: Option<ExecutionFeedback>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_contract: Option<MutationNeededFailureContract>,

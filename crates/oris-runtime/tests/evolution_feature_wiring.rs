@@ -83,6 +83,9 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::HumanApproval>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopRequest>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopStatus>();
+    assert_type::<oris_runtime::agent_contract::SupervisedExecutionDecision>();
+    assert_type::<oris_runtime::agent_contract::SupervisedValidationOutcome>();
+    assert_type::<oris_runtime::agent_contract::SupervisedExecutionReasonCode>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopOutcome>();
     assert_type::<oris_runtime::economics::EconomicsSignal>();
     assert_type::<oris_runtime::economics::StakePolicy>();
