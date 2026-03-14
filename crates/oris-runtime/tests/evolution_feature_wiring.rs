@@ -20,6 +20,8 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::replay_feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::run_supervised_devloop;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_self_evolution_candidate;
+    let _ =
+        oris_runtime::evolution::EvoKernel::<FeatureState>::prepare_self_evolution_mutation_proposal;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::coordinate;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::bootstrap_if_empty;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_candidates;
@@ -62,6 +64,11 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::CoordinationPlan>();
     assert_type::<oris_runtime::agent_contract::CoordinationResult>();
     assert_type::<oris_runtime::agent_contract::MutationProposal>();
+    assert_type::<oris_runtime::agent_contract::MutationProposalContractReasonCode>();
+    assert_type::<oris_runtime::agent_contract::MutationProposalEvidence>();
+    assert_type::<oris_runtime::agent_contract::MutationProposalValidationBudget>();
+    assert_type::<oris_runtime::agent_contract::MutationProposalScope>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionMutationProposalContract>();
     assert_type::<oris_runtime::agent_contract::ProposalTarget>();
     assert_type::<oris_runtime::agent_contract::ExecutionFeedback>();
     assert_type::<oris_runtime::agent_contract::ReplayFeedback>();

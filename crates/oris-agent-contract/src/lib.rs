@@ -319,11 +319,40 @@ pub struct CoordinationResult {
     pub summary: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationProposal {
     pub intent: String,
     pub files: Vec<String>,
     pub expected_effect: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationProposalContractReasonCode {
+    Accepted,
+    CandidateRejected,
+    MissingTargetFiles,
+    OutOfBoundsPath,
+    UnsupportedTaskClass,
+    ValidationBudgetExceeded,
+    ExpectedEvidenceMissing,
+    UnknownFailClosed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationProposalEvidence {
+    HumanApproval,
+    BoundedScope,
+    ValidationPass,
+    ExecutionAudit,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationProposalValidationBudget {
+    pub max_diff_bytes: usize,
+    pub max_changed_lines: usize,
+    pub validation_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -672,6 +701,29 @@ fn mutation_needed_failure_defaults(
 pub enum BoundedTaskClass {
     DocsSingleFile,
     DocsMultiFile,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MutationProposalScope {
+    pub task_class: BoundedTaskClass,
+    pub target_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfEvolutionMutationProposalContract {
+    pub mutation_proposal: MutationProposal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_scope: Option<MutationProposalScope>,
+    pub validation_budget: MutationProposalValidationBudget,
+    pub approval_required: bool,
+    pub expected_evidence: Vec<MutationProposalEvidence>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
+    pub reason_code: MutationProposalContractReasonCode,
+    pub fail_closed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
