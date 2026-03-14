@@ -1,6 +1,7 @@
 # Oris Runtime — Consolidated Release History
 
-This document merges all release notes from **v0.1.0** through **v0.21.0**. For the latest validation and links, see the end of this file.
+This document merges all release notes from **v0.1.0** through **v0.30.0**.
+The latest standalone release note remains in `RELEASE_v0.31.0.md`.
 
 ---
 
@@ -316,15 +317,334 @@ First stable release of **Oris**: a programmable execution runtime for AI agents
 
 ---
 
-## Validation (current)
+## v0.22.0 — Runtime Signal Extraction
+
+Add automatic runtime signal extraction as a dedicated stage in the evolution loop for self-evolving agents.
+
+### What's in this release
+
+- **Runtime Signal Extraction**: New `RuntimeSignalExtractor` module in oris-evokernel for automatic signal extraction from execution context.
+- `CompilerDiagnosticsParser`: extract signals from rustc errors and warnings.
+- `StackTraceParser`: extract signals from panic stack traces.
+- `LogAnalyzer`: extract signals from execution logs such as timeouts, resource exhaustion, and test failures.
+- Signal types: `CompilerDiagnostic`, `RuntimePanic`, `Timeout`, `TestFailure`, `PerformanceIssue`, `ResourceExhaustion`, `ConfigError`, `SecurityIssue`, `GenericError`.
+- Signals are deterministically extracted using regex pattern matching.
+
+### Validation
+
+- `cargo fmt --all`
+- `cargo test -p oris-evokernel` (30 tests passed)
+- `cargo build -p oris-runtime --all-features`
+- `cargo publish -p oris-runtime --all-features --dry-run`
+- `cargo publish -p oris-runtime --all-features`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## v0.22.1 — GEP Compatibility Matrix Hardening
+
+Strengthen GEP envelope/schema compatibility validation so protocol mismatch and payload errors return deterministic A2A-compatible error details.
+
+### What's in this release
+
+- Added deterministic `a2a_error_code` details for GEP envelope and hello parsing failures, including protocol, version, message type, sender, and payload evidence.
+- Expanded GEP compliance tests to lock schema, version, envelope, `message_type`, and fallback translation behavior against regressions.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-runtime --features "full-evolution-experimental execution-server sqlite-persistence" execution_server::api_handlers::tests:: -- --nocapture`
+- `cargo test -p oris-evolution --lib`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+- `cargo publish -p oris-execution-runtime --dry-run --registry crates-io`
+- `cargo publish -p oris-execution-runtime --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --dry-run --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --registry crates-io`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## v0.23.0 — GEP Delta Sync and Resume Token
+
+Add incremental GEP synchronization primitives so peers can pull deltas with resumable cursors and receive machine-readable sync audit evidence.
+
+### What's in this release
+
+- Added `since_cursor` and `resume_token` support for publish and fetch protocol messages, with deterministic cursor progression and resume token validation.
+- Added `sync_audit` response evidence with scanned, applied, skipped, and failed counts plus reasons, and idempotent import behavior across evokernel and runtime compatibility APIs.
+- Extended runtime A2A fetch compatibility APIs and tests to verify delta synchronization and resume-token continuation end-to-end.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evolution-network`
+- `cargo test -p oris-evokernel`
+- `cargo test -p oris-runtime evolution_a2a_fetch_returns_sync_cursor_and_supports_resume_token_delta --features "sqlite-persistence,execution-server,agent-contract-experimental,evolution-network-experimental" -- --nocapture --test-threads=1`
+- `cargo test --workspace -- --skip official_experience_reuse_with_real_qwen`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features -- --skip official_experience_reuse_with_real_qwen`
+- `cargo publish -p oris-evolution --registry crates-io`
+- `cargo publish -p oris-governor --registry crates-io`
+- `cargo publish -p oris-sandbox --registry crates-io`
+- `cargo publish -p oris-spec --registry crates-io`
+- `cargo publish -p oris-evolution-network --registry crates-io`
+- `cargo publish -p oris-evokernel --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --dry-run --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --registry crates-io`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## v0.24.0 — Stable Task-Class Replay Evidence
+
+Strengthen self-evolution replay generalization so semantically equivalent multi-signal tasks reuse learned capsules more reliably while preserving stable machine-readable task-class evidence.
+
+### What's in this release
+
+- Normalized semantically equivalent task signals across evolution and evokernel replay matching, including missing-state aliases and filler-token suppression, so same-class tasks replay consistently without regressing adjacent negative samples.
+- Stabilized task-class evidence in replay feedback and derived gene metadata, and added regression coverage to prove multi-signal semantic variants keep replay labels audit-friendly and deterministic.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evolution normalized_signal_overlap -- --nocapture`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression multi_signal_semantic_variants_keep_task_class_feedback_stable -- --nocapture`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression replay_feedback_surfaces_planner_hints_and_reasoning_savings -- --nocapture`
+- `cargo test -p oris-evokernel --lib replay_roi_release_gate_summary_window_boundary_filters_old_events -- --nocapture`
+- `cargo test -p oris-evokernel --release --lib replay_roi_release_gate_summary_window_boundary_filters_old_events -- --nocapture`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression -- --nocapture`
+- `cargo test -p oris-runtime --test agent_self_evolution_travel_network --features full-evolution-experimental travel_network_demo_flow_captures_publishes_imports_and_replays -- --nocapture`
+- `cargo test -p oris-runtime --release --test agent_self_evolution_travel_network --features full-evolution-experimental travel_network_demo_flow_captures_publishes_imports_and_replays -- --nocapture`
+- `cargo test --workspace`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+- `cargo publish -p oris-agent-contract --dry-run --allow-dirty --registry crates-io`
+- `cargo publish -p oris-agent-contract --allow-dirty --registry crates-io`
+- `cargo publish -p oris-evolution --dry-run --allow-dirty --registry crates-io`
+- `cargo publish -p oris-evolution --allow-dirty --registry crates-io`
+- `cargo publish -p oris-evokernel --dry-run --allow-dirty --registry crates-io`
+- `cargo publish -p oris-evokernel --allow-dirty --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --dry-run --allow-dirty --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --allow-dirty --registry crates-io`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## v0.25.0 — Continuous Confidence Control
+
+Harden continuous confidence control so stale or regressing self-evolution assets emit deterministic reason codes, carry auditable evidence summaries, and stay aligned through the runtime evolution facade.
+
+### What's in this release
+
+- Unified confidence transition evidence generation for replay-failure revocation and governor-driven confidence regression demotion, including decayed confidence, decay ratio, and phase-tagged summaries.
+- Added regression assertions for stale confidence revalidation and local governor revocation so downgrade paths prove the emitted evidence contract instead of only checking terminal state.
+- Exposed `TransitionEvidence` and `TransitionReasonCode` through the runtime evolution facade and locked that surface with feature wiring coverage.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression local_capture_uses_existing_confidence_context_for_governor -- --nocapture`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression stale_confidence_forces_revalidation_before_replay -- --nocapture`
+- `cargo test -p oris-evokernel --lib`
+- `cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental -- --nocapture`
+- `cargo test --workspace`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+- `cargo publish -p oris-evokernel --registry crates-io`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## v0.26.0 — Replay ROI Stability
+
+Stabilize replay ROI metrics so runtime release-gate evidence stays comparable to metrics snapshots across the same replay history.
+
+### What's in this release
+
+- Unified evokernel replay ROI aggregation so `metrics_snapshot()` and replay release-gate summaries consume the same task-class and source totals.
+- Preserved legacy fallback reconstruction for histories that predate `ReplayEconomicsRecorded`, preventing release-gate summaries from drifting to zero while metrics still report replay activity.
+- Tightened runtime travel-network regression coverage so release-gate contract input must match the generated replay ROI summary for the same window.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evokernel --lib replay_roi_release_gate_summary_ -- --nocapture`
+- `cargo test -p oris-runtime --test agent_self_evolution_travel_network --features full-evolution-experimental -- --nocapture`
+- `cargo test --workspace`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+- `cargo publish -p oris-evokernel --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --dry-run --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --registry crates-io`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## v0.27.0 — Bounded Supervised Devloop Expansion
+
+`oris-runtime` now exposes a bounded supervised DEVLOOP path for small multi-file docs workflows while keeping failure handling fail-closed and auditable.
+
+### What's in this release
+
+- Expand supervised DEVLOOP from single-file docs tasks to bounded multi-file docs tasks under `docs/` with deterministic file-count limits.
+- Keep `reason_code`, `recovery_hint`, and fail-closed rejection semantics aligned across API outcomes, evolution events, and runtime facade coverage.
+- Update devloop documentation to reflect the new bounded docs-task surface.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression supervised_devloop_ -- --nocapture`
+- `cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental -- --nocapture`
+- `cargo test --workspace`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+- `cargo publish -p oris-runtime --all-features --dry-run`
+- `cargo publish -p oris-runtime --all-features`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/fanjia1024/oris
+
+---
+
+## v0.28.0 — Federated Revocation Hardening
+
+`oris-runtime` now fail-closes spoofed remote revoke requests and preserves remote attribution through replay revocation evidence.
+
+### What's in this release
+
+- Hardened federated revoke handling so imported remote assets can only be revoked by the sender that originally published them, while mixed-ownership revoke requests are rejected as a whole.
+- Added stable remote attribution evidence for replay-failure revocations and locked the import, replay, and revoke path with evokernel and travel-network regressions.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression remote_revoke_ -- --nocapture`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression remote_replay_failure_ -- --nocapture`
+- `cargo test -p oris-evokernel --lib`
+- `cargo test -p oris-runtime --test agent_self_evolution_travel_network --features full-evolution-experimental -- --nocapture`
+- `cargo test --workspace`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+- `cargo publish -p oris-evokernel --dry-run --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --dry-run --registry crates-io`
+- `cargo publish -p oris-runtime --all-features --registry crates-io`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/fanjia1024/oris
+
+---
+
+## v0.29.0 — Self-Evolution Candidate Intake Contracts
+
+`oris-runtime` now exposes a bounded GitHub issue-style self-evolution candidate intake path with machine-readable accept/reject decisions and fail-closed reason codes.
+
+Also shipped:
+
+- `oris-agent-contract v0.4.0`
+- `oris-evokernel v0.11.0`
+
+### What's in this release
+
+- Added `SelfEvolutionCandidateIntakeRequest`, `SelfEvolutionSelectionReasonCode`, and `SelfEvolutionSelectionDecision` to the public agent contract surface.
+- Added `EvoKernel::select_self_evolution_candidate(...)` so bounded GitHub issue-shaped candidates can be accepted or rejected before proposal generation.
+- Locked accept, reject, and fail-closed selection behavior with evokernel regressions and runtime facade wiring coverage.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression candidate_intake_ -- --nocapture`
+- `cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental -- --nocapture`
+- `cargo test --workspace`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## v0.30.0 — Structured Mutation Proposal Contracts
+
+`oris-runtime` now exposes structured self-evolution mutation proposal contracts that declare bounded scope, validation budget, approval requirements, expected evidence, and fail-closed rejection semantics before execution begins.
+
+### What's in this release
+
+- Added machine-readable self-evolution mutation proposal contracts to the experimental agent contract surface, including `proposal_scope`, `validation_budget`, `approval_required`, `expected_evidence`, `reason_code`, and `fail_closed`.
+- Added `EvoKernel::prepare_self_evolution_mutation_proposal(...)` and pre-execution proposal validation so malformed or out-of-bounds supervised mutations are rejected before execution starts.
+- Extended evokernel regression coverage and runtime feature wiring coverage for accepted proposal generation, fail-closed scope rejection, and missing target-file rejection.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `cargo test -p oris-evokernel --test evolution_lifecycle_regression mutation_proposal_ -- --nocapture`
+- `cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental -- --nocapture`
+- `cargo test --workspace`
+- `cargo build --verbose --all --release --all-features`
+- `cargo test --release --all-features`
+- `cargo publish -p oris-runtime --all-features --dry-run --registry crates-io --allow-dirty`
+- `cargo publish -p oris-runtime --all-features --registry crates-io --allow-dirty`
+
+### Links
+
+- Crate: https://crates.io/crates/oris-runtime
+- Docs: https://docs.rs/oris-runtime
+- Repo: https://github.com/Colin4k1024/Oris
+
+---
+
+## Common Validation Baseline
 
 - `cargo fmt --all -- --check`
 - `cargo build --all --release --all-features`
 - `cargo test --release --all-features`
 
-## Links
+## Repository Links
 
 - **Crate:** [crates.io/crates/oris-runtime](https://crates.io/crates/oris-runtime)
 - **Docs:** [docs.rs/oris-runtime](https://docs.rs/oris-runtime)
 - **Repo:** [github.com/Colin4k1024/Oris](https://github.com/Colin4k1024/Oris)
 - **Examples:** [examples](https://github.com/Colin4k1024/Oris/tree/main/examples)
+
+## Latest Standalone Release Note
+
+- `RELEASE_v0.31.0.md`
