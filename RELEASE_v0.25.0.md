@@ -1,4 +1,4 @@
-# v0.24.0 - Continuous Confidence Control
+# v0.25.0 - Continuous Confidence Control
 
 Harden continuous confidence control so stale or regressing self-evolution assets emit deterministic reason codes, carry auditable evidence summaries, and stay aligned through the runtime evolution facade.
 
@@ -18,6 +18,7 @@ Harden continuous confidence control so stale or regressing self-evolution asset
 - cargo test --workspace
 - cargo build --verbose --all --release --all-features
 - cargo test --release --all-features
+- cargo publish -p oris-evokernel --registry crates-io
 
 ## Links
 
