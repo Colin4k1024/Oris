@@ -23,7 +23,7 @@ use oris_evokernel::{
 };
 use oris_evolution::{
     compute_artifact_hash, rebuild_projection_from_events, stable_hash_json, EvolutionEvent,
-    PreparedMutation, StoredEvolutionEvent, TransitionReasonCode,
+    PreparedMutation, StoredEvolutionEvent, TransitionReasonCode, MIN_REPLAY_CONFIDENCE,
 };
 use oris_governor::{DefaultGovernor, GovernorConfig};
 use oris_kernel::{
@@ -1654,6 +1654,33 @@ async fn stale_confidence_forces_revalidation_before_replay() {
                 && reason_code == &TransitionReasonCode::RevalidationConfidenceDecay
                 && reason.contains("confidence decayed")
     )));
+    let revalidation_evidence = events.iter().find_map(|stored| match &stored.event {
+        EvolutionEvent::PromotionEvaluated {
+            gene_id,
+            state: EvoAssetState::Quarantined,
+            reason_code,
+            evidence,
+            ..
+        } if gene_id == &gene.id
+            && reason_code == &TransitionReasonCode::RevalidationConfidenceDecay =>
+        {
+            evidence.clone()
+        }
+        _ => None,
+    });
+    let revalidation_evidence =
+        revalidation_evidence.expect("expected confidence revalidation evidence");
+    assert!(
+        revalidation_evidence
+            .decayed_confidence
+            .expect("expected decayed confidence")
+            < MIN_REPLAY_CONFIDENCE
+    );
+    assert!(revalidation_evidence
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("phase=confidence_revalidation"));
     assert_eq!(metrics.confidence_revalidations_total, 1);
 }
 
@@ -2628,16 +2655,33 @@ async fn local_capture_uses_existing_confidence_context_for_governor() {
     assert_eq!(second.capsule.state, EvoAssetState::Revoked);
     let events = store.scan(1).unwrap();
     let metrics = evo.metrics_snapshot().unwrap();
-    assert!(events.iter().any(|stored| matches!(
-        &stored.event,
+    let revocation_evidence = events.iter().find_map(|stored| match &stored.event {
         EvolutionEvent::PromotionEvaluated {
             gene_id,
             state: EvoAssetState::Revoked,
             reason_code,
+            evidence,
             ..
         } if gene_id == &second.gene.id
-            && reason_code == &TransitionReasonCode::DowngradeConfidenceRegression
-    )));
+            && reason_code == &TransitionReasonCode::DowngradeConfidenceRegression =>
+        {
+            evidence.clone()
+        }
+        _ => None,
+    });
+    let revocation_evidence =
+        revocation_evidence.expect("expected confidence regression revocation evidence");
+    assert!(
+        revocation_evidence
+            .confidence_decay_ratio
+            .expect("expected confidence decay ratio")
+            < 1.0
+    );
+    assert!(revocation_evidence
+        .summary
+        .as_deref()
+        .unwrap_or_default()
+        .contains("phase=confidence_regression"));
     assert!(events.iter().any(|stored| matches!(
         &stored.event,
         EvolutionEvent::GeneRevoked { gene_id, .. } if gene_id == &second.gene.id

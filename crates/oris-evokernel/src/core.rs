@@ -25,8 +25,7 @@ use oris_evolution::{
     BlastRadius, CandidateSource, Capsule, CapsuleId, EnvFingerprint, EvolutionError,
     EvolutionEvent, EvolutionProjection, EvolutionStore, Gene, GeneCandidate, MutationId,
     PreparedMutation, ReplayRoiEvidence, ReplayRoiReasonCode, Selector, SelectorInput,
-    StoreBackedSelector, StoredEvolutionEvent, TransitionEvidence, TransitionReasonCode,
-    ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
+    StoreBackedSelector, StoredEvolutionEvent, ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
 };
 use oris_evolution_network::{EvolutionEnvelope, NetworkAsset, SyncAudit};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
@@ -44,7 +43,8 @@ pub use oris_evolution::{
     BlastRadius as EvoBlastRadius, CandidateSource as EvoCandidateSource,
     EnvFingerprint as EvoEnvFingerprint, EvolutionStore as EvoEvolutionStore, JsonlEvolutionStore,
     MutationArtifact, MutationIntent, MutationTarget, Outcome, RiskLevel,
-    SelectorInput as EvoSelectorInput, TransitionReasonCode as EvoTransitionReasonCode,
+    SelectorInput as EvoSelectorInput, TransitionEvidence, TransitionReasonCode,
+    TransitionReasonCode as EvoTransitionReasonCode,
 };
 pub use oris_evolution_network::{
     FetchQuery, FetchResponse, MessageType, PublishRequest, RevokeNotice,
@@ -1642,8 +1642,7 @@ impl StoreReplayExecutor {
     ) -> Result<(), ReplayError> {
         let projection = projection_snapshot(self.store.as_ref())
             .map_err(|err| ReplayError::Store(err.to_string()))?;
-        let (current_confidence, historical_peak_confidence, confidence_last_updated_secs) =
-            Self::confidence_context(&projection, &best.gene.id);
+        let confidence_context = Self::confidence_context(&projection, &best.gene.id);
 
         self.store
             .append_event(EvolutionEvent::ValidationFailed {
@@ -1668,9 +1667,9 @@ impl StoreReplayExecutor {
             },
             replay_failures,
             recent_mutation_ages_secs: Vec::new(),
-            current_confidence,
-            historical_peak_confidence,
-            confidence_last_updated_secs,
+            current_confidence: confidence_context.current_confidence,
+            historical_peak_confidence: confidence_context.historical_peak_confidence,
+            confidence_last_updated_secs: confidence_context.confidence_last_updated_secs,
         });
 
         if matches!(governor_decision.target_state, AssetState::Revoked) {
@@ -1680,24 +1679,19 @@ impl StoreReplayExecutor {
                     state: AssetState::Revoked,
                     reason: governor_decision.reason.clone(),
                     reason_code: governor_decision.reason_code.clone(),
-                    evidence: Some(TransitionEvidence {
-                        replay_attempts: Some(replay_failures),
-                        replay_successes: None,
-                        replay_success_rate: None,
-                        environment_match_factor: None,
-                        decayed_confidence: Some(current_confidence),
-                        confidence_decay_ratio: if historical_peak_confidence > 0.0 {
-                            Some((current_confidence / historical_peak_confidence).clamp(0.0, 1.0))
-                        } else {
-                            None
-                        },
-                        summary: Some(replay_failure_revocation_summary(
+                    evidence: Some(confidence_context.to_transition_evidence(
+                        "replay_failure_revocation",
+                        Some(replay_failures),
+                        None,
+                        None,
+                        None,
+                        Some(replay_failure_revocation_summary(
                             replay_failures,
                             current_confidence,
                             historical_peak_confidence,
                             source_sender_id.as_deref(),
                         )),
-                    }),
+                    )),
                 })
                 .map_err(|err| ReplayError::Store(err.to_string()))?;
             self.store
@@ -1721,7 +1715,7 @@ impl StoreReplayExecutor {
     fn confidence_context(
         projection: &EvolutionProjection,
         gene_id: &str,
-    ) -> (f32, f32, Option<u64>) {
+    ) -> ConfidenceTransitionContext {
         let peak_confidence = projection
             .capsules
             .iter()
@@ -1732,7 +1726,11 @@ impl StoreReplayExecutor {
             .last_updated_at
             .get(gene_id)
             .and_then(|timestamp| Self::seconds_since_timestamp(timestamp, Utc::now()));
-        (peak_confidence, peak_confidence, age_secs)
+        ConfidenceTransitionContext {
+            current_confidence: peak_confidence,
+            historical_peak_confidence: peak_confidence,
+            confidence_last_updated_secs: age_secs,
+        }
     }
 
     fn seconds_since_timestamp(timestamp: &str, now: DateTime<Utc>) -> Option<u64> {
@@ -1839,6 +1837,65 @@ impl ShadowTransitionEvidence {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ConfidenceTransitionContext {
+    current_confidence: f32,
+    historical_peak_confidence: f32,
+    confidence_last_updated_secs: Option<u64>,
+}
+
+impl ConfidenceTransitionContext {
+    fn decayed_confidence(self) -> f32 {
+        decayed_replay_confidence(self.current_confidence, self.confidence_last_updated_secs)
+    }
+
+    fn confidence_decay_ratio(self) -> Option<f32> {
+        if self.historical_peak_confidence > 0.0 {
+            Some((self.decayed_confidence() / self.historical_peak_confidence).clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    }
+
+    fn to_transition_evidence(
+        self,
+        phase: &str,
+        replay_attempts: Option<u64>,
+        replay_successes: Option<u64>,
+        replay_success_rate: Option<f32>,
+        environment_match_factor: Option<f32>,
+        extra_summary: Option<String>,
+    ) -> TransitionEvidence {
+        let decayed_confidence = self.decayed_confidence();
+        let confidence_decay_ratio = self.confidence_decay_ratio();
+        let age_secs = self
+            .confidence_last_updated_secs
+            .map(|age| age.to_string())
+            .unwrap_or_else(|| "unknown".into());
+        let mut summary = format!(
+            "phase={phase}; current_confidence={:.3}; decayed_confidence={:.3}; historical_peak_confidence={:.3}; confidence_last_updated_secs={age_secs}",
+            self.current_confidence, decayed_confidence, self.historical_peak_confidence
+        );
+        if let Some(ratio) = confidence_decay_ratio {
+            summary.push_str(&format!("; confidence_decay_ratio={ratio:.3}"));
+        }
+        if let Some(extra_summary) = extra_summary {
+            summary.push_str("; ");
+            summary.push_str(&extra_summary);
+        }
+
+        TransitionEvidence {
+            replay_attempts,
+            replay_successes,
+            replay_success_rate,
+            environment_match_factor,
+            decayed_confidence: Some(decayed_confidence),
+            confidence_decay_ratio,
+            summary: Some(summary),
+        }
+    }
+}
+
 fn shadow_promotion_gate_passed(evidence: &ShadowTransitionEvidence) -> bool {
     evidence.replay_attempts >= SHADOW_PROMOTION_MIN_REPLAY_ATTEMPTS
         && evidence.replay_success_rate >= SHADOW_PROMOTION_MIN_SUCCESS_RATE
@@ -1860,6 +1917,26 @@ fn shadow_evidence_summary(
         evidence.decayed_confidence,
         evidence.confidence_decay_ratio,
     )
+}
+
+fn confidence_transition_evidence_for_governor(
+    confidence_context: ConfidenceTransitionContext,
+    governor_decision: &GovernorDecision,
+    success_count: u64,
+) -> Option<TransitionEvidence> {
+    match governor_decision.reason_code {
+        TransitionReasonCode::DowngradeConfidenceRegression => {
+            Some(confidence_context.to_transition_evidence(
+                "confidence_regression",
+                None,
+                Some(success_count),
+                None,
+                None,
+                Some(format!("target_state={:?}", governor_decision.target_state)),
+            ))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2438,8 +2515,7 @@ impl<S: KernelState> EvoKernel<S> {
             &self.validation_plan.profile,
             &extracted_signals.values,
         );
-        let (current_confidence, historical_peak_confidence, confidence_last_updated_secs) =
-            StoreReplayExecutor::confidence_context(&projection, &gene.id);
+        let confidence_context = StoreReplayExecutor::confidence_context(&projection, &gene.id);
         let success_count = projection
             .genes
             .iter()
@@ -2459,9 +2535,9 @@ impl<S: KernelState> EvoKernel<S> {
             blast_radius: blast_radius.clone(),
             replay_failures: 0,
             recent_mutation_ages_secs,
-            current_confidence,
-            historical_peak_confidence,
-            confidence_last_updated_secs,
+            current_confidence: confidence_context.current_confidence,
+            historical_peak_confidence: confidence_context.historical_peak_confidence,
+            confidence_last_updated_secs: confidence_context.confidence_last_updated_secs,
         });
 
         gene.state = governor_decision.target_state.clone();
@@ -2474,7 +2550,11 @@ impl<S: KernelState> EvoKernel<S> {
                 state: governor_decision.target_state.clone(),
                 reason: governor_decision.reason.clone(),
                 reason_code: governor_decision.reason_code.clone(),
-                evidence: None,
+                evidence: confidence_transition_evidence_for_governor(
+                    confidence_context,
+                    &governor_decision,
+                    success_count,
+                ),
             })
             .map_err(store_err)?;
         if matches!(governor_decision.target_state, AssetState::Promoted) {
