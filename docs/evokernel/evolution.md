@@ -15,7 +15,7 @@ The current `crates/oris-evolution` and `crates/oris-evokernel` layers implement
 - selector ranking by signal overlap, success rate, reuse count, recency, and environment match
 - mutation preparation plus capsule capture and replay-first fallback flows
 - caller-attributable replay reuse events when `replay_or_fallback_for_run(...)` is used
-- a narrow supervised DEVLOOP path for single-file `docs/*.md` tasks with explicit human approval gating
+- a narrow supervised DEVLOOP path for bounded `docs/*.md` tasks (1 to 3 files) with explicit human approval gating
 - `spec_id` linkage for spec-driven mutations
 - store-derived Prometheus metrics for replay success, replay reasoning avoided by task class, promotion ratio, revoke frequency, and mutation velocity
 - runtime `/metrics` and `/healthz` endpoints that surface the current evolution observability snapshot
@@ -234,9 +234,13 @@ check.
 
 ## 8.2 Supervised DEVLOOP (Bounded Scope + Fail-Closed Taxonomy)
 
-`run_supervised_devloop(...)` remains bounded to one task class (single
-Markdown file under `docs/`) and now enforces deterministic fail-closed
-constraints before execution:
+`run_supervised_devloop(...)` remains bounded to docs Markdown tasks under
+`docs/` and now enforces deterministic fail-closed constraints before
+execution:
+
+- `DocsSingleFile` for one Markdown file
+- `DocsMultiFile` for 2 to 3 Markdown files
+- reject anything outside that bounded docs scope
 
 - reject out-of-scope proposals (`policy_denied`)
 - reject over-budget payload size / validation budget (`policy_denied`)

@@ -176,6 +176,7 @@ const MUTATION_NEEDED_MAX_DIFF_BYTES: usize = 128 * 1024;
 const MUTATION_NEEDED_MAX_CHANGED_LINES: usize = 600;
 const MUTATION_NEEDED_MAX_SANDBOX_DURATION_MS: u64 = 120_000;
 const MUTATION_NEEDED_MAX_VALIDATION_BUDGET_MS: u64 = 900_000;
+const SUPERVISED_DEVLOOP_MAX_DOC_FILES: usize = 3;
 pub const REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS: [&str; 2] =
     ["task_class", "source_sender_id"];
 
@@ -3540,16 +3541,35 @@ fn mutation_needed_audit_mutation_id(request: &SupervisedDevloopRequest) -> Stri
 fn classify_supervised_devloop_request(
     request: &SupervisedDevloopRequest,
 ) -> Option<BoundedTaskClass> {
-    let path = request.proposal.files.first()?.trim();
-    if request.proposal.files.len() != 1 || path.is_empty() {
+    let file_count = normalized_supervised_devloop_docs_files(&request.proposal.files)?.len();
+    match file_count {
+        1 => Some(BoundedTaskClass::DocsSingleFile),
+        2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => Some(BoundedTaskClass::DocsMultiFile),
+        _ => None,
+    }
+}
+
+fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<String>> {
+    if files.is_empty() || files.len() > SUPERVISED_DEVLOOP_MAX_DOC_FILES {
         return None;
     }
-    let normalized = path.replace('\\', "/");
-    if normalized.starts_with("docs/") && normalized.ends_with(".md") {
-        Some(BoundedTaskClass::DocsSingleFile)
-    } else {
-        None
+
+    let mut normalized_files = Vec::with_capacity(files.len());
+    let mut seen = BTreeSet::new();
+
+    for path in files {
+        let normalized = path.trim().replace('\\', "/");
+        if normalized.is_empty()
+            || !normalized.starts_with("docs/")
+            || !normalized.ends_with(".md")
+            || !seen.insert(normalized.clone())
+        {
+            return None;
+        }
+        normalized_files.push(normalized);
     }
+
+    Some(normalized_files)
 }
 
 fn find_declared_mutation(

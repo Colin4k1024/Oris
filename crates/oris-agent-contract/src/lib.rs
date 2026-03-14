@@ -671,6 +671,7 @@ fn mutation_needed_failure_defaults(
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BoundedTaskClass {
     DocsSingleFile,
+    DocsMultiFile,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

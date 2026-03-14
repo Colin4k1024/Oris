@@ -117,6 +117,11 @@ fn full_evolution_experimental_paths_resolve() {
         oris_runtime::agent_contract::A2aCapability::Coordination,
     ]);
     assert!(accepted.accepted);
+    let docs_multi_file = oris_runtime::agent_contract::BoundedTaskClass::DocsMultiFile;
+    assert!(matches!(
+        docs_multi_file,
+        oris_runtime::agent_contract::BoundedTaskClass::DocsMultiFile
+    ));
     let _ = oris_runtime::agent_contract::infer_replay_fallback_reason_code;
     let _ = oris_runtime::agent_contract::normalize_replay_fallback_contract;
     let rejected = oris_runtime::agent_contract::A2aHandshakeResponse::reject(
