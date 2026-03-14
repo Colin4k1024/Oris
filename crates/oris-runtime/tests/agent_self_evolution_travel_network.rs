@@ -969,6 +969,18 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     );
     assert!(second_decision.used_capsule);
     assert!(!second_decision.fallback_to_planner);
+    let replay_feedback = EvoKernel::<TestState>::replay_feedback_for_agent(
+        &merge_signals(&fixed_signals, &capture.gene.signals),
+        &second_decision,
+    );
+    assert_eq!(
+        replay_feedback.task_class_id,
+        second_decision.detect_evidence.task_class_id
+    );
+    assert_eq!(
+        replay_feedback.task_label,
+        second_decision.detect_evidence.task_label
+    );
     append_audit_log(
         &audit_log,
         format!(

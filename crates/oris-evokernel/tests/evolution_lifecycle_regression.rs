@@ -1511,6 +1511,37 @@ async fn adjacent_task_class_signal_variants_can_replay_learned_capsule() {
 }
 
 #[tokio::test]
+async fn multi_signal_semantic_variants_keep_task_class_feedback_stable() {
+    let _audit =
+        TestAuditGuard::new("multi_signal_semantic_variants_keep_task_class_feedback_stable");
+    let (workspace, _store, evo) = test_evo("self-evolve-multisignal-task-class");
+
+    evo.capture_successful_mutation(
+        &"run-self-evolve-multisignal-task-class".to_string(),
+        sample_mutation_with_id("mutation-self-evolve-multisignal-task-class"),
+    )
+    .await
+    .unwrap();
+
+    let mut input = replay_input("README file absent", &workspace);
+    input.signals = vec![
+        "README file absent".to_string(),
+        "repository readme unavailable".to_string(),
+    ];
+    let decision = evo.replay_or_fallback(input.clone()).await.unwrap();
+    let feedback = EvoKernel::<TestState>::replay_feedback_for_agent(&input.signals, &decision);
+
+    assert!(decision.used_capsule);
+    assert!(!decision.fallback_to_planner);
+    assert_eq!(
+        feedback.task_class_id,
+        decision.detect_evidence.task_class_id
+    );
+    assert_eq!(feedback.task_label, decision.detect_evidence.task_label);
+    assert_eq!(feedback.task_label, "missing readme");
+}
+
+#[tokio::test]
 async fn unrelated_task_class_signal_variants_do_not_replay() {
     let _audit = TestAuditGuard::new("unrelated_task_class_signal_variants_do_not_replay");
     let (workspace, _store, evo) = test_evo("self-evolve-negative-task-class");

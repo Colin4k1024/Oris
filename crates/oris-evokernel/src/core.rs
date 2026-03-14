@@ -2569,7 +2569,17 @@ impl<S: KernelState> EvoKernel<S> {
         signals: &[String],
         decision: &ReplayDecision,
     ) -> ReplayFeedback {
-        let (task_class_id, task_label) = replay_task_descriptor(signals);
+        let (fallback_task_class_id, fallback_task_label) = replay_task_descriptor(signals);
+        let task_class_id = if decision.detect_evidence.task_class_id.is_empty() {
+            fallback_task_class_id
+        } else {
+            decision.detect_evidence.task_class_id.clone()
+        };
+        let task_label = if decision.detect_evidence.task_label.is_empty() {
+            fallback_task_label
+        } else {
+            decision.detect_evidence.task_label.clone()
+        };
         let planner_directive = if decision.used_capsule {
             ReplayPlannerDirective::SkipPlanner
         } else {
@@ -3224,7 +3234,10 @@ fn build_bootstrap_gene(
     template: &SeedTemplate,
     extracted: &SignalExtractionOutput,
 ) -> Result<Gene, EvolutionError> {
-    let strategy = vec![template.id.clone(), "bootstrap".into()];
+    let mut strategy = vec![template.id.clone(), "bootstrap".into()];
+    let (task_class_id, task_label) = replay_task_descriptor(&extracted.values);
+    ensure_strategy_metadata(&mut strategy, "task_class", &task_class_id);
+    ensure_strategy_metadata(&mut strategy, "task_label", &task_label);
     let id = stable_hash_json(&(
         "bootstrap-gene",
         &template.id,
@@ -3312,7 +3325,20 @@ fn derive_gene(
     for token in mutation.intent.intent.split_whitespace().take(8) {
         strategy.insert(token.to_ascii_lowercase());
     }
-    let strategy = strategy.into_iter().collect::<Vec<_>>();
+    let mut strategy = strategy.into_iter().collect::<Vec<_>>();
+    let descriptor_signals = if mutation
+        .intent
+        .signals
+        .iter()
+        .any(|signal| normalize_signal_phrase(signal).is_some())
+    {
+        mutation.intent.signals.as_slice()
+    } else {
+        extracted_signals
+    };
+    let (task_class_id, task_label) = replay_task_descriptor(descriptor_signals);
+    ensure_strategy_metadata(&mut strategy, "task_class", &task_class_id);
+    ensure_strategy_metadata(&mut strategy, "task_label", &task_label);
     let id = stable_hash_json(&(extracted_signals, &strategy, validation_profile))
         .unwrap_or_else(|_| next_id("gene"));
     Gene {
@@ -3414,35 +3440,49 @@ fn extend_signal_tokens(out: &mut BTreeSet<String>, input: &str) {
 }
 
 fn normalize_signal_phrase(input: &str) -> Option<String> {
-    let normalized = input
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter_map(|raw| {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let normalized = if is_rust_error_code(trimmed) {
-                let mut chars = trimmed.chars();
-                let prefix = chars
-                    .next()
-                    .map(|ch| ch.to_ascii_uppercase())
-                    .unwrap_or('E');
-                format!("{prefix}{}", chars.as_str())
-            } else {
-                trimmed.to_ascii_lowercase()
-            };
-            if normalized.len() < 3 {
-                None
-            } else {
-                Some(normalized)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut seen = BTreeSet::new();
+    let mut normalized_tokens = Vec::new();
+    for raw in input.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        let Some(token) = canonical_replay_signal_token(raw) else {
+            continue;
+        };
+        if seen.insert(token.clone()) {
+            normalized_tokens.push(token);
+        }
+    }
+    let normalized = normalized_tokens.join(" ");
     if normalized.is_empty() {
         None
     } else {
         Some(normalized)
+    }
+}
+
+fn canonical_replay_signal_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = if is_rust_error_code(trimmed) {
+        let mut chars = trimmed.chars();
+        let prefix = chars
+            .next()
+            .map(|ch| ch.to_ascii_uppercase())
+            .unwrap_or('E');
+        format!("{prefix}{}", chars.as_str())
+    } else {
+        trimmed.to_ascii_lowercase()
+    };
+    if normalized.len() < 3 {
+        return None;
+    }
+    if normalized.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    match normalized.as_str() {
+        "absent" | "unavailable" | "vanished" => Some("missing".into()),
+        "file" | "files" | "error" | "errors" => None,
+        _ => Some(normalized),
     }
 }
 
@@ -3458,14 +3498,27 @@ fn replay_task_descriptor(signals: &[String]) -> (String, String) {
     }
     let task_label = normalized
         .iter()
-        .find(|value| {
-            value.as_str() != "validation passed" && value.as_str() != "validation failed"
+        .filter(|value| !is_validation_summary_phrase(value))
+        .max_by_key(|value| {
+            let token_count = value.split_whitespace().count();
+            (
+                value.chars().any(|ch| ch.is_ascii_alphabetic()),
+                token_count >= 2,
+                token_count,
+                value.len(),
+            )
         })
         .cloned()
         .unwrap_or_else(|| normalized[0].clone());
     let task_class_id = stable_hash_json(&normalized)
         .unwrap_or_else(|_| compute_artifact_hash(&normalized.join("\n")));
     (task_class_id, task_label)
+}
+
+fn is_validation_summary_phrase(value: &str) -> bool {
+    let tokens = value.split_whitespace().collect::<BTreeSet<_>>();
+    tokens == BTreeSet::from(["validation", "passed"])
+        || tokens == BTreeSet::from(["validation", "failed"])
 }
 
 fn normalized_signal_values(signals: &[String]) -> Vec<String> {
