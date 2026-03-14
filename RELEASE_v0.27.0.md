@@ -20,6 +20,8 @@ auditable.
 - cargo test --workspace
 - cargo build --verbose --all --release --all-features
 - cargo test --release --all-features
+- cargo publish -p oris-runtime --all-features --dry-run
+- cargo publish -p oris-runtime --all-features
 
 ## Links
 
