@@ -87,6 +87,8 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::evolution::ReplayCandidateEvidence>();
     assert_type::<oris_runtime::evolution::ReplaySelectEvidence>();
     assert_type::<oris_runtime::evolution::ReplayDecision>();
+    assert_type::<oris_runtime::evolution::TransitionEvidence>();
+    assert_type::<oris_runtime::evolution::TransitionReasonCode>();
     assert_type::<oris_runtime::evolution::SeedTemplate>();
     assert_type::<oris_runtime::evolution::BootstrapReport>();
     assert_type::<oris_runtime::evolution::ValidationPlan>();
