@@ -12,6 +12,7 @@ use chrono::{Duration, Utc};
 use oris_agent_contract::{
     AgentTask, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
     ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayPlannerDirective,
+    SelfEvolutionCandidateIntakeRequest, SelfEvolutionSelectionReasonCode,
     SupervisedDevloopRequest, SupervisedDevloopStatus,
 };
 use oris_evokernel::{
@@ -269,6 +270,25 @@ fn devloop_request_with_files(
             },
             note: Some("regression test".into()),
         },
+    }
+}
+
+fn github_issue_candidate_request(
+    issue_number: u64,
+    state: &str,
+    labels: Vec<&str>,
+    candidate_hint_paths: Vec<&str>,
+) -> SelfEvolutionCandidateIntakeRequest {
+    SelfEvolutionCandidateIntakeRequest {
+        issue_number,
+        title: format!("Issue {issue_number}"),
+        body: "Bounded self-evolution candidate".into(),
+        labels: labels.into_iter().map(|label| label.to_string()).collect(),
+        state: state.into(),
+        candidate_hint_paths: candidate_hint_paths
+            .into_iter()
+            .map(|path| path.to_string())
+            .collect(),
     }
 }
 
@@ -1223,6 +1243,155 @@ async fn supervised_devloop_fails_closed_on_timeout_with_consistent_reason_code(
             ..
         } if reason_code == "timeout" && *fail_closed
     )));
+}
+
+#[test]
+fn candidate_intake_accepts_open_evolution_feature_docs_issue() {
+    let _audit = TestAuditGuard::new("candidate_intake_accepts_open_evolution_feature_docs_issue");
+    let (_workspace, _store, evo) = test_evo("candidate-intake-accept");
+    let request = github_issue_candidate_request(
+        234,
+        "OPEN",
+        vec!["area/evolution", "type/feature"],
+        vec!["docs/w8-intake.md"],
+    );
+
+    let decision = evo.select_self_evolution_candidate(&request).unwrap();
+
+    assert!(decision.selected);
+    assert_eq!(
+        decision.candidate_class,
+        Some(BoundedTaskClass::DocsSingleFile)
+    );
+    assert_eq!(
+        decision.reason_code,
+        Some(SelfEvolutionSelectionReasonCode::Accepted)
+    );
+    assert_eq!(decision.failure_reason, None);
+    assert_eq!(decision.recovery_hint, None);
+    assert!(!decision.fail_closed);
+}
+
+#[test]
+fn candidate_intake_rejects_closed_issue_fail_closed() {
+    let _audit = TestAuditGuard::new("candidate_intake_rejects_closed_issue_fail_closed");
+    let (_workspace, _store, evo) = test_evo("candidate-intake-closed");
+    let request = github_issue_candidate_request(
+        235,
+        "CLOSED",
+        vec!["area/evolution", "type/feature"],
+        vec!["docs/w8-intake.md"],
+    );
+
+    let decision = evo.select_self_evolution_candidate(&request).unwrap();
+
+    assert!(!decision.selected);
+    assert_eq!(decision.candidate_class, None);
+    assert_eq!(
+        decision.reason_code,
+        Some(SelfEvolutionSelectionReasonCode::IssueClosed)
+    );
+    assert!(decision.fail_closed);
+    assert!(decision
+        .failure_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("closed")));
+    assert!(decision.recovery_hint.is_some());
+}
+
+#[test]
+fn candidate_intake_rejects_missing_evolution_label() {
+    let _audit = TestAuditGuard::new("candidate_intake_rejects_missing_evolution_label");
+    let (_workspace, _store, evo) = test_evo("candidate-intake-missing-evolution");
+    let request = github_issue_candidate_request(
+        236,
+        "OPEN",
+        vec!["type/feature"],
+        vec!["docs/w8-intake.md"],
+    );
+
+    let decision = evo.select_self_evolution_candidate(&request).unwrap();
+
+    assert!(!decision.selected);
+    assert_eq!(decision.candidate_class, None);
+    assert_eq!(
+        decision.reason_code,
+        Some(SelfEvolutionSelectionReasonCode::MissingEvolutionLabel)
+    );
+    assert!(decision.fail_closed);
+    assert!(decision.recovery_hint.is_some());
+}
+
+#[test]
+fn candidate_intake_rejects_missing_feature_label() {
+    let _audit = TestAuditGuard::new("candidate_intake_rejects_missing_feature_label");
+    let (_workspace, _store, evo) = test_evo("candidate-intake-missing-feature");
+    let request = github_issue_candidate_request(
+        237,
+        "OPEN",
+        vec!["area/evolution"],
+        vec!["docs/w8-intake.md"],
+    );
+
+    let decision = evo.select_self_evolution_candidate(&request).unwrap();
+
+    assert!(!decision.selected);
+    assert_eq!(decision.candidate_class, None);
+    assert_eq!(
+        decision.reason_code,
+        Some(SelfEvolutionSelectionReasonCode::MissingFeatureLabel)
+    );
+    assert!(decision.fail_closed);
+    assert!(decision.recovery_hint.is_some());
+}
+
+#[test]
+fn candidate_intake_rejects_excluded_label() {
+    let _audit = TestAuditGuard::new("candidate_intake_rejects_excluded_label");
+    let (_workspace, _store, evo) = test_evo("candidate-intake-excluded-label");
+    let request = github_issue_candidate_request(
+        238,
+        "OPEN",
+        vec!["area/evolution", "type/feature", "duplicate"],
+        vec!["docs/w8-intake.md"],
+    );
+
+    let decision = evo.select_self_evolution_candidate(&request).unwrap();
+
+    assert!(!decision.selected);
+    assert_eq!(decision.candidate_class, None);
+    assert_eq!(
+        decision.reason_code,
+        Some(SelfEvolutionSelectionReasonCode::ExcludedByLabel)
+    );
+    assert!(decision.fail_closed);
+    assert!(decision.recovery_hint.is_some());
+}
+
+#[test]
+fn candidate_intake_rejects_unsupported_scope() {
+    let _audit = TestAuditGuard::new("candidate_intake_rejects_unsupported_scope");
+    let (_workspace, _store, evo) = test_evo("candidate-intake-unsupported-scope");
+    let request = github_issue_candidate_request(
+        239,
+        "OPEN",
+        vec!["area/evolution", "type/feature"],
+        vec!["src/lib.rs"],
+    );
+
+    let decision = evo.select_self_evolution_candidate(&request).unwrap();
+
+    assert!(!decision.selected);
+    assert_eq!(decision.candidate_class, None);
+    assert_eq!(
+        decision.reason_code,
+        Some(SelfEvolutionSelectionReasonCode::UnsupportedCandidateScope)
+    );
+    assert!(decision.fail_closed);
+    assert!(decision
+        .failure_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("scope")));
 }
 
 #[tokio::test]

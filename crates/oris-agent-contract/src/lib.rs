@@ -675,6 +675,158 @@ pub enum BoundedTaskClass {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfEvolutionCandidateIntakeRequest {
+    pub issue_number: u64,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    pub state: String,
+    #[serde(default)]
+    pub candidate_hint_paths: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfEvolutionSelectionReasonCode {
+    Accepted,
+    IssueClosed,
+    MissingEvolutionLabel,
+    MissingFeatureLabel,
+    ExcludedByLabel,
+    UnsupportedCandidateScope,
+    UnknownFailClosed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfEvolutionSelectionDecision {
+    pub issue_number: u64,
+    pub selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_class: Option<BoundedTaskClass>,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<SelfEvolutionSelectionReasonCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
+    pub fail_closed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SelfEvolutionSelectionDefaults {
+    failure_reason: &'static str,
+    recovery_hint: &'static str,
+}
+
+fn self_evolution_selection_defaults(
+    reason_code: &SelfEvolutionSelectionReasonCode,
+) -> Option<SelfEvolutionSelectionDefaults> {
+    match reason_code {
+        SelfEvolutionSelectionReasonCode::Accepted => None,
+        SelfEvolutionSelectionReasonCode::IssueClosed => Some(SelfEvolutionSelectionDefaults {
+            failure_reason: "self-evolution candidate rejected because the issue is closed",
+            recovery_hint: "Reopen the issue or choose an active open issue before retrying selection.",
+        }),
+        SelfEvolutionSelectionReasonCode::MissingEvolutionLabel => {
+            Some(SelfEvolutionSelectionDefaults {
+                failure_reason: "self-evolution candidate rejected because the issue is missing area/evolution",
+                recovery_hint:
+                    "Add the area/evolution label or choose an issue already scoped to self-evolution.",
+            })
+        }
+        SelfEvolutionSelectionReasonCode::MissingFeatureLabel => {
+            Some(SelfEvolutionSelectionDefaults {
+                failure_reason: "self-evolution candidate rejected because the issue is missing type/feature",
+                recovery_hint:
+                    "Add the type/feature label or narrow the issue to a bounded feature slice before retrying.",
+            })
+        }
+        SelfEvolutionSelectionReasonCode::ExcludedByLabel => Some(SelfEvolutionSelectionDefaults {
+            failure_reason: "self-evolution candidate rejected by an excluded issue label",
+            recovery_hint:
+                "Remove the excluded label or choose a non-duplicate, non-invalid, actionable issue.",
+        }),
+        SelfEvolutionSelectionReasonCode::UnsupportedCandidateScope => {
+            Some(SelfEvolutionSelectionDefaults {
+                failure_reason:
+                    "self-evolution candidate rejected because the hinted file scope is outside the bounded docs policy",
+                recovery_hint:
+                    "Narrow candidate paths to the approved docs/*.md boundary before retrying selection.",
+            })
+        }
+        SelfEvolutionSelectionReasonCode::UnknownFailClosed => Some(SelfEvolutionSelectionDefaults {
+            failure_reason: "self-evolution candidate failed with an unmapped selection reason",
+            recovery_hint: "Unknown selection failure; fail closed and require explicit maintainer triage before retry.",
+        }),
+    }
+}
+
+pub fn accept_self_evolution_selection_decision(
+    issue_number: u64,
+    candidate_class: BoundedTaskClass,
+    summary: Option<&str>,
+) -> SelfEvolutionSelectionDecision {
+    let summary = normalize_optional_text(summary).unwrap_or_else(|| {
+        format!("selected GitHub issue #{issue_number} as a bounded self-evolution candidate")
+    });
+    SelfEvolutionSelectionDecision {
+        issue_number,
+        selected: true,
+        candidate_class: Some(candidate_class),
+        summary,
+        reason_code: Some(SelfEvolutionSelectionReasonCode::Accepted),
+        failure_reason: None,
+        recovery_hint: None,
+        fail_closed: false,
+    }
+}
+
+pub fn reject_self_evolution_selection_decision(
+    issue_number: u64,
+    reason_code: SelfEvolutionSelectionReasonCode,
+    failure_reason: Option<&str>,
+    summary: Option<&str>,
+) -> SelfEvolutionSelectionDecision {
+    let defaults = self_evolution_selection_defaults(&reason_code)
+        .unwrap_or(SelfEvolutionSelectionDefaults {
+        failure_reason: "self-evolution candidate rejected",
+        recovery_hint:
+            "Review candidate selection inputs and retry within the bounded self-evolution policy.",
+    });
+    let failure_reason = normalize_optional_text(failure_reason)
+        .unwrap_or_else(|| defaults.failure_reason.to_string());
+    let reason_code_key = match reason_code {
+        SelfEvolutionSelectionReasonCode::Accepted => "accepted",
+        SelfEvolutionSelectionReasonCode::IssueClosed => "issue_closed",
+        SelfEvolutionSelectionReasonCode::MissingEvolutionLabel => "missing_evolution_label",
+        SelfEvolutionSelectionReasonCode::MissingFeatureLabel => "missing_feature_label",
+        SelfEvolutionSelectionReasonCode::ExcludedByLabel => "excluded_by_label",
+        SelfEvolutionSelectionReasonCode::UnsupportedCandidateScope => {
+            "unsupported_candidate_scope"
+        }
+        SelfEvolutionSelectionReasonCode::UnknownFailClosed => "unknown_fail_closed",
+    };
+    let summary = normalize_optional_text(summary).unwrap_or_else(|| {
+        format!(
+            "rejected GitHub issue #{issue_number} as a self-evolution candidate [{reason_code_key}]"
+        )
+    });
+
+    SelfEvolutionSelectionDecision {
+        issue_number,
+        selected: false,
+        candidate_class: None,
+        summary,
+        reason_code: Some(reason_code),
+        failure_reason: Some(failure_reason),
+        recovery_hint: Some(defaults.recovery_hint.to_string()),
+        fail_closed: true,
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HumanApproval {
     pub approved: bool,
     pub approver: Option<String>,
@@ -871,6 +1023,49 @@ mod tests {
             MutationNeededRecoveryAction::EscalateFailClosed
         );
         assert!(contract.fail_closed);
+    }
+
+    #[test]
+    fn reject_self_evolution_selection_decision_maps_closed_issue_defaults() {
+        let decision = reject_self_evolution_selection_decision(
+            234,
+            SelfEvolutionSelectionReasonCode::IssueClosed,
+            None,
+            None,
+        );
+
+        assert!(!decision.selected);
+        assert_eq!(decision.issue_number, 234);
+        assert_eq!(
+            decision.reason_code,
+            Some(SelfEvolutionSelectionReasonCode::IssueClosed)
+        );
+        assert!(decision.fail_closed);
+        assert!(decision
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("closed")));
+        assert!(decision.recovery_hint.is_some());
+    }
+
+    #[test]
+    fn accept_self_evolution_selection_decision_marks_candidate_selected() {
+        let decision =
+            accept_self_evolution_selection_decision(235, BoundedTaskClass::DocsSingleFile, None);
+
+        assert!(decision.selected);
+        assert_eq!(decision.issue_number, 235);
+        assert_eq!(
+            decision.candidate_class,
+            Some(BoundedTaskClass::DocsSingleFile)
+        );
+        assert_eq!(
+            decision.reason_code,
+            Some(SelfEvolutionSelectionReasonCode::Accepted)
+        );
+        assert!(!decision.fail_closed);
+        assert_eq!(decision.failure_reason, None);
+        assert_eq!(decision.recovery_hint, None);
     }
 }
 

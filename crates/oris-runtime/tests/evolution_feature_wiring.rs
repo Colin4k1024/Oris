@@ -19,6 +19,7 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::replay_feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::run_supervised_devloop;
+    let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_self_evolution_candidate;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::coordinate;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::bootstrap_if_empty;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_candidates;
@@ -69,6 +70,9 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::ReplayFallbackNextAction>();
     assert_type::<oris_runtime::agent_contract::ReplayFallbackContract>();
     assert_type::<oris_runtime::agent_contract::BoundedTaskClass>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionCandidateIntakeRequest>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionSelectionReasonCode>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionSelectionDecision>();
     assert_type::<oris_runtime::agent_contract::HumanApproval>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopRequest>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopStatus>();
