@@ -6,7 +6,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use oris_runtime::agent_contract::MutationProposal;
+use oris_runtime::agent_contract::{
+    AgentTask, HumanApproval, MutationProposal, SupervisedDeliveryReasonCode,
+    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
+    SupervisedDevloopStatus,
+};
 use oris_runtime::evolution::{
     CommandValidator, EvoAssetState, EvoEvolutionStore as EvolutionStore, EvoKernel,
     EvoSandboxPolicy as SandboxPolicy, EvoSelectorInput as SelectorInput, EvolutionNetworkNode,
@@ -326,6 +330,31 @@ fn build_test_evo(
     .with_validation_plan(empty_validation_plan());
 
     (workspace, store, evo, sandbox_root, store_root)
+}
+
+fn delivery_request(task_id: &str, file: &str, approved: bool) -> SupervisedDevloopRequest {
+    SupervisedDevloopRequest {
+        task: AgentTask {
+            id: task_id.to_string(),
+            description: format!("Prepare delivery artifacts for {file}"),
+        },
+        proposal: MutationProposal {
+            intent: format!("Update {file}"),
+            files: vec![file.to_string()],
+            expected_effect: format!("Keep {file} in sync"),
+        },
+        approval: HumanApproval {
+            approved,
+            approver: approved.then(|| "maintainer".to_string()),
+            note: Some("travel-network regression".to_string()),
+        },
+    }
+}
+
+fn delivery_diff(path: &str, title: &str) -> String {
+    format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,3 @@\n+# {title}\n+\n+bounded delivery preparation\n"
+    )
 }
 
 fn experience_diff(path: &str, plan_preview: &str) -> String {
@@ -1385,6 +1414,61 @@ async fn travel_network_demo_flow_captures_publishes_imports_and_replays() {
     assert!(!manifest
         .missing_assets
         .contains(&"self_repair_trace".to_string()));
+}
+
+#[tokio::test]
+async fn travel_network_delivery_prepares_branch_and_pr_summary() {
+    let (_workspace, _store, evo, _sandbox_root, _store_root) =
+        build_test_evo("travel-network-delivery-success");
+    let request = delivery_request(
+        "travel-network-delivery-task",
+        "docs/evolution/travel-delivery.md",
+        true,
+    );
+    let outcome = evo
+        .run_supervised_devloop(
+            &"travel-network-delivery-run".to_string(),
+            &request,
+            delivery_diff("docs/evolution/travel-delivery.md", "Travel Delivery"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+
+    assert_eq!(delivery.delivery_status, SupervisedDeliveryStatus::Prepared);
+    assert!(delivery.branch_name.is_some());
+    assert!(delivery.pr_title.is_some());
+    assert!(delivery.pr_summary.is_some());
+}
+
+#[tokio::test]
+async fn travel_network_delivery_denied_negative_control_is_fail_closed() {
+    let (_workspace, _store, evo, _sandbox_root, _store_root) =
+        build_test_evo("travel-network-delivery-denied");
+    let request = delivery_request(
+        "travel-network-delivery-denied-task",
+        "docs/evolution/travel-delivery-denied.md",
+        true,
+    );
+    let outcome = SupervisedDevloopOutcome {
+        task_id: request.task.id.clone(),
+        task_class: None,
+        status: SupervisedDevloopStatus::Executed,
+        execution_feedback: None,
+        failure_contract: None,
+        summary: "missing delivery evidence".to_string(),
+    };
+
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+
+    assert_eq!(delivery.delivery_status, SupervisedDeliveryStatus::Denied);
+    assert_eq!(
+        delivery.reason_code,
+        SupervisedDeliveryReasonCode::UnsupportedTaskScope
+    );
+    assert!(delivery.fail_closed);
 }
 
 #[tokio::test]

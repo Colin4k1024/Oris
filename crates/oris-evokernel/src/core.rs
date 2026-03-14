@@ -18,8 +18,10 @@ use oris_agent_contract::{
     MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
     MutationProposalValidationBudget, ReplayFeedback, ReplayPlannerDirective,
     SelfEvolutionCandidateIntakeRequest, SelfEvolutionMutationProposalContract,
-    SelfEvolutionSelectionDecision, SelfEvolutionSelectionReasonCode, SupervisedDevloopOutcome,
-    SupervisedDevloopRequest, SupervisedDevloopStatus,
+    SelfEvolutionSelectionDecision, SelfEvolutionSelectionReasonCode,
+    SupervisedDeliveryApprovalState, SupervisedDeliveryContract, SupervisedDeliveryReasonCode,
+    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
+    SupervisedDevloopStatus,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -1689,8 +1691,8 @@ impl StoreReplayExecutor {
                         None,
                         Some(replay_failure_revocation_summary(
                             replay_failures,
-                            current_confidence,
-                            historical_peak_confidence,
+                            confidence_context.current_confidence,
+                            confidence_context.historical_peak_confidence,
                             source_sender_id.as_deref(),
                         )),
                     )),
@@ -2955,6 +2957,137 @@ impl<S: KernelState> EvoKernel<S> {
         })
     }
 
+    pub fn prepare_supervised_delivery(
+        &self,
+        request: &SupervisedDevloopRequest,
+        outcome: &SupervisedDevloopOutcome,
+    ) -> Result<SupervisedDeliveryContract, EvoKernelError> {
+        let audit_mutation_id = mutation_needed_audit_mutation_id(request);
+        let approval_state = supervised_delivery_approval_state(&request.approval);
+        if !matches!(approval_state, SupervisedDeliveryApprovalState::Approved) {
+            let contract = supervised_delivery_denied_contract(
+                request,
+                SupervisedDeliveryReasonCode::AwaitingApproval,
+                "supervised delivery requires explicit approved supervision with a named approver",
+                Some(
+                    "Grant explicit human approval and record the approver before preparing delivery artifacts.",
+                ),
+                approval_state,
+            );
+            self.record_delivery_rejection(&audit_mutation_id, &contract)?;
+            return Ok(contract);
+        }
+
+        let Some(task_class) = outcome.task_class.as_ref() else {
+            let contract = supervised_delivery_denied_contract(
+                request,
+                SupervisedDeliveryReasonCode::UnsupportedTaskScope,
+                "supervised delivery rejected because the executed task has no bounded task class",
+                Some(
+                    "Execute a bounded docs-scoped supervised task before preparing branch and PR artifacts.",
+                ),
+                approval_state,
+            );
+            self.record_delivery_rejection(&audit_mutation_id, &contract)?;
+            return Ok(contract);
+        };
+
+        if !matches!(outcome.status, SupervisedDevloopStatus::Executed) {
+            let contract = supervised_delivery_denied_contract(
+                request,
+                SupervisedDeliveryReasonCode::InconsistentDeliveryEvidence,
+                "supervised delivery rejected because execution did not complete successfully",
+                Some(
+                    "Only prepare delivery artifacts from a successfully executed supervised devloop outcome.",
+                ),
+                approval_state,
+            );
+            self.record_delivery_rejection(&audit_mutation_id, &contract)?;
+            return Ok(contract);
+        }
+
+        let Some(feedback) = outcome.execution_feedback.as_ref() else {
+            let contract = supervised_delivery_denied_contract(
+                request,
+                SupervisedDeliveryReasonCode::DeliveryEvidenceMissing,
+                "supervised delivery rejected because execution feedback is missing",
+                Some(
+                    "Re-run supervised execution and retain validation evidence before preparing delivery artifacts.",
+                ),
+                approval_state,
+            );
+            self.record_delivery_rejection(&audit_mutation_id, &contract)?;
+            return Ok(contract);
+        };
+
+        if !feedback.accepted {
+            let contract = supervised_delivery_denied_contract(
+                request,
+                SupervisedDeliveryReasonCode::ValidationEvidenceMissing,
+                "supervised delivery rejected because execution feedback is not accepted",
+                Some(
+                    "Resolve validation failures and only prepare delivery artifacts from accepted execution results.",
+                ),
+                approval_state,
+            );
+            self.record_delivery_rejection(&audit_mutation_id, &contract)?;
+            return Ok(contract);
+        }
+
+        if validate_bounded_docs_files(&request.proposal.files).is_err() {
+            let contract = supervised_delivery_denied_contract(
+                request,
+                SupervisedDeliveryReasonCode::UnsupportedTaskScope,
+                "supervised delivery rejected because proposal files are outside the bounded docs policy",
+                Some(
+                    "Restrict delivery preparation to one to three docs/*.md files that were executed under supervision.",
+                ),
+                approval_state,
+            );
+            self.record_delivery_rejection(&audit_mutation_id, &contract)?;
+            return Ok(contract);
+        }
+
+        let branch_name = supervised_delivery_branch_name(&request.task.id, task_class);
+        let pr_title = supervised_delivery_pr_title(request);
+        let pr_summary = supervised_delivery_pr_summary(request, outcome, feedback);
+        let approver = request
+            .approval
+            .approver
+            .as_deref()
+            .unwrap_or("unknown approver");
+        let delivery_summary = format!(
+            "prepared bounded branch and PR artifacts for supervised task '{}' with approver {}",
+            request.task.id, approver
+        );
+        let contract = SupervisedDeliveryContract {
+            delivery_summary: delivery_summary.clone(),
+            branch_name: Some(branch_name.clone()),
+            pr_title: Some(pr_title.clone()),
+            pr_summary: Some(pr_summary.clone()),
+            delivery_status: SupervisedDeliveryStatus::Prepared,
+            approval_state,
+            reason_code: SupervisedDeliveryReasonCode::DeliveryPrepared,
+            fail_closed: false,
+            recovery_hint: None,
+        };
+
+        self.store
+            .append_event(EvolutionEvent::DeliveryPrepared {
+                task_id: request.task.id.clone(),
+                branch_name,
+                pr_title,
+                pr_summary,
+                delivery_summary,
+                delivery_status: delivery_status_key(contract.delivery_status).to_string(),
+                approval_state: delivery_approval_state_key(contract.approval_state).to_string(),
+                reason_code: delivery_reason_code_key(contract.reason_code).to_string(),
+            })
+            .map_err(store_err)?;
+
+        Ok(contract)
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -3989,6 +4122,153 @@ fn mutation_needed_audit_mutation_id(request: &SupervisedDevloopRequest) -> Stri
     ))
     .map(|hash| format!("mutation-needed-{hash}"))
     .unwrap_or_else(|_| format!("mutation-needed-{}", request.task.id))
+}
+
+fn supervised_delivery_approval_state(
+    approval: &oris_agent_contract::HumanApproval,
+) -> SupervisedDeliveryApprovalState {
+    if approval.approved
+        && approval
+            .approver
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        SupervisedDeliveryApprovalState::Approved
+    } else {
+        SupervisedDeliveryApprovalState::MissingExplicitApproval
+    }
+}
+
+fn supervised_delivery_denied_contract(
+    request: &SupervisedDevloopRequest,
+    reason_code: SupervisedDeliveryReasonCode,
+    failure_reason: &str,
+    recovery_hint: Option<&str>,
+    approval_state: SupervisedDeliveryApprovalState,
+) -> SupervisedDeliveryContract {
+    SupervisedDeliveryContract {
+        delivery_summary: format!(
+            "supervised delivery denied for task '{}' [{}]: {}",
+            request.task.id,
+            delivery_reason_code_key(reason_code),
+            failure_reason
+        ),
+        branch_name: None,
+        pr_title: None,
+        pr_summary: None,
+        delivery_status: SupervisedDeliveryStatus::Denied,
+        approval_state,
+        reason_code,
+        fail_closed: true,
+        recovery_hint: recovery_hint.map(|value| value.to_string()),
+    }
+}
+
+fn supervised_delivery_branch_name(task_id: &str, task_class: &BoundedTaskClass) -> String {
+    let prefix = match task_class {
+        BoundedTaskClass::DocsSingleFile => "self-evolution/docs",
+        BoundedTaskClass::DocsMultiFile => "self-evolution/docs-batch",
+    };
+    let slug = sanitize_delivery_component(task_id);
+    truncate_delivery_field(&format!("{prefix}/{slug}"), 72)
+}
+
+fn supervised_delivery_pr_title(request: &SupervisedDevloopRequest) -> String {
+    truncate_delivery_field(
+        &format!("[self-evolution] {}", request.task.description.trim()),
+        96,
+    )
+}
+
+fn supervised_delivery_pr_summary(
+    request: &SupervisedDevloopRequest,
+    outcome: &SupervisedDevloopOutcome,
+    feedback: &ExecutionFeedback,
+) -> String {
+    let files = request.proposal.files.join(", ");
+    let approval_note = request.approval.note.as_deref().unwrap_or("none recorded");
+    truncate_delivery_field(
+        &format!(
+            "task_id={}\nstatus={:?}\nfiles={}\nvalidation_summary={}\napproval_note={}",
+            request.task.id, outcome.status, files, feedback.summary, approval_note
+        ),
+        600,
+    )
+}
+
+fn sanitize_delivery_component(value: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in value.chars() {
+        let normalized = if ch.is_ascii_alphanumeric() {
+            last_dash = false;
+            ch.to_ascii_lowercase()
+        } else {
+            if last_dash {
+                continue;
+            }
+            last_dash = true;
+            '-'
+        };
+        out.push(normalized);
+    }
+    out.trim_matches('-').chars().take(48).collect()
+}
+
+fn truncate_delivery_field(value: &str, max_chars: usize) -> String {
+    let truncated = value.chars().take(max_chars).collect::<String>();
+    if truncated.is_empty() {
+        "delivery-artifact".to_string()
+    } else {
+        truncated
+    }
+}
+
+fn delivery_reason_code_key(reason_code: SupervisedDeliveryReasonCode) -> &'static str {
+    match reason_code {
+        SupervisedDeliveryReasonCode::DeliveryPrepared => "delivery_prepared",
+        SupervisedDeliveryReasonCode::AwaitingApproval => "awaiting_approval",
+        SupervisedDeliveryReasonCode::DeliveryEvidenceMissing => "delivery_evidence_missing",
+        SupervisedDeliveryReasonCode::ValidationEvidenceMissing => "validation_evidence_missing",
+        SupervisedDeliveryReasonCode::UnsupportedTaskScope => "unsupported_task_scope",
+        SupervisedDeliveryReasonCode::InconsistentDeliveryEvidence => {
+            "inconsistent_delivery_evidence"
+        }
+        SupervisedDeliveryReasonCode::UnknownFailClosed => "unknown_fail_closed",
+    }
+}
+
+fn delivery_status_key(status: SupervisedDeliveryStatus) -> &'static str {
+    match status {
+        SupervisedDeliveryStatus::Prepared => "prepared",
+        SupervisedDeliveryStatus::Denied => "denied",
+    }
+}
+
+fn delivery_approval_state_key(state: SupervisedDeliveryApprovalState) -> &'static str {
+    match state {
+        SupervisedDeliveryApprovalState::Approved => "approved",
+        SupervisedDeliveryApprovalState::MissingExplicitApproval => "missing_explicit_approval",
+    }
+}
+
+impl<S: KernelState> EvoKernel<S> {
+    fn record_delivery_rejection(
+        &self,
+        mutation_id: &str,
+        contract: &SupervisedDeliveryContract,
+    ) -> Result<(), EvoKernelError> {
+        self.store
+            .append_event(EvolutionEvent::MutationRejected {
+                mutation_id: mutation_id.to_string(),
+                reason: contract.delivery_summary.clone(),
+                reason_code: Some(delivery_reason_code_key(contract.reason_code).to_string()),
+                recovery_hint: contract.recovery_hint.clone(),
+                fail_closed: contract.fail_closed,
+            })
+            .map(|_| ())
+            .map_err(store_err)
+    }
 }
 
 fn default_mutation_proposal_expected_evidence() -> Vec<MutationProposalEvidence> {

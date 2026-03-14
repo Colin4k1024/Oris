@@ -334,6 +334,16 @@ pub enum EvolutionEvent {
         mutation_id: MutationId,
         spec_id: String,
     },
+    DeliveryPrepared {
+        task_id: String,
+        branch_name: String,
+        pr_title: String,
+        pr_summary: String,
+        delivery_summary: String,
+        delivery_status: String,
+        approval_state: String,
+        reason_code: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

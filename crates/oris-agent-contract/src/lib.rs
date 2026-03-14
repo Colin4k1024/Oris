@@ -900,6 +900,50 @@ pub enum SupervisedDevloopStatus {
     Executed,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedDeliveryStatus {
+    Prepared,
+    Denied,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedDeliveryApprovalState {
+    Approved,
+    MissingExplicitApproval,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedDeliveryReasonCode {
+    DeliveryPrepared,
+    AwaitingApproval,
+    DeliveryEvidenceMissing,
+    ValidationEvidenceMissing,
+    UnsupportedTaskScope,
+    InconsistentDeliveryEvidence,
+    UnknownFailClosed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SupervisedDeliveryContract {
+    pub delivery_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_summary: Option<String>,
+    pub delivery_status: SupervisedDeliveryStatus,
+    pub approval_state: SupervisedDeliveryApprovalState,
+    pub reason_code: SupervisedDeliveryReasonCode,
+    #[serde(default)]
+    pub fail_closed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SupervisedDevloopOutcome {
     pub task_id: String,

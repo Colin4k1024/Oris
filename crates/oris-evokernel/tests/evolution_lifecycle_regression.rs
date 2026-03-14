@@ -13,7 +13,9 @@ use oris_agent_contract::{
     AgentTask, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
     MutationProposalContractReasonCode, MutationProposalEvidence, ReplayFallbackNextAction,
     ReplayFallbackReasonCode, ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest,
-    SelfEvolutionSelectionReasonCode, SupervisedDevloopRequest, SupervisedDevloopStatus,
+    SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState,
+    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
+    SupervisedDevloopRequest, SupervisedDevloopStatus,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -1242,6 +1244,92 @@ async fn supervised_devloop_fails_closed_on_timeout_with_consistent_reason_code(
             fail_closed,
             ..
         } if reason_code == "timeout" && *fail_closed
+    )));
+}
+
+#[tokio::test]
+async fn delivery_summary_prepares_bounded_branch_and_pr_after_supervised_execution() {
+    let _audit = TestAuditGuard::new(
+        "delivery_summary_prepares_bounded_branch_and_pr_after_supervised_execution",
+    );
+    let (_workspace, store, evo) = test_evo("delivery-summary-prepared");
+    let request = devloop_request("task-docs-delivery", "docs/delivery-summary.md", true);
+
+    let outcome = evo
+        .run_supervised_devloop(
+            &"run-delivery-summary-prepared".to_string(),
+            &request,
+            proposal_diff_for("docs/delivery-summary.md", "Delivery Summary"),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+
+    assert_eq!(delivery.delivery_status, SupervisedDeliveryStatus::Prepared);
+    assert_eq!(
+        delivery.approval_state,
+        SupervisedDeliveryApprovalState::Approved
+    );
+    assert_eq!(
+        delivery.reason_code,
+        SupervisedDeliveryReasonCode::DeliveryPrepared
+    );
+    assert!(delivery
+        .branch_name
+        .as_deref()
+        .is_some_and(|value| value.starts_with("self-evolution/docs/")));
+    assert!(delivery
+        .pr_title
+        .as_deref()
+        .is_some_and(|value| value.contains("self-evolution")));
+    assert!(delivery
+        .pr_summary
+        .as_deref()
+        .is_some_and(|value| value.contains("validation_summary=")));
+    assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::DeliveryPrepared {
+            reason_code,
+            delivery_status,
+            approval_state,
+            ..
+        } if reason_code == "delivery_prepared"
+            && delivery_status == "prepared"
+            && approval_state == "approved"
+    )));
+}
+
+#[tokio::test]
+async fn delivery_summary_denies_when_execution_evidence_is_missing() {
+    let _audit = TestAuditGuard::new("delivery_summary_denies_when_execution_evidence_is_missing");
+    let (_workspace, store, evo) = test_evo("delivery-summary-denied");
+    let request = devloop_request("task-docs-delivery-denied", "docs/delivery-denied.md", true);
+    let outcome = SupervisedDevloopOutcome {
+        task_id: request.task.id.clone(),
+        task_class: Some(BoundedTaskClass::DocsSingleFile),
+        status: SupervisedDevloopStatus::Executed,
+        execution_feedback: None,
+        failure_contract: None,
+        summary: "simulated executed outcome with missing feedback".into(),
+    };
+
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+
+    assert_eq!(delivery.delivery_status, SupervisedDeliveryStatus::Denied);
+    assert_eq!(
+        delivery.reason_code,
+        SupervisedDeliveryReasonCode::DeliveryEvidenceMissing
+    );
+    assert!(delivery.fail_closed);
+    assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::MutationRejected {
+            reason_code: Some(reason_code),
+            fail_closed,
+            ..
+        } if reason_code == "delivery_evidence_missing" && *fail_closed
     )));
 }
 

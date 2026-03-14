@@ -19,6 +19,7 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::replay_feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::run_supervised_devloop;
+    let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::prepare_supervised_delivery;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_self_evolution_candidate;
     let _ =
         oris_runtime::evolution::EvoKernel::<FeatureState>::prepare_self_evolution_mutation_proposal;
@@ -83,6 +84,10 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::HumanApproval>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopRequest>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopStatus>();
+    assert_type::<oris_runtime::agent_contract::SupervisedDeliveryStatus>();
+    assert_type::<oris_runtime::agent_contract::SupervisedDeliveryApprovalState>();
+    assert_type::<oris_runtime::agent_contract::SupervisedDeliveryReasonCode>();
+    assert_type::<oris_runtime::agent_contract::SupervisedDeliveryContract>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopOutcome>();
     assert_type::<oris_runtime::economics::EconomicsSignal>();
     assert_type::<oris_runtime::economics::StakePolicy>();
