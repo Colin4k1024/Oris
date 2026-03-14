@@ -20,6 +20,8 @@ fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::replay_feedback_for_agent;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::run_supervised_devloop;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::prepare_supervised_delivery;
+    let _ =
+        oris_runtime::evolution::EvoKernel::<FeatureState>::evaluate_self_evolution_acceptance_gate;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::select_self_evolution_candidate;
     let _ =
         oris_runtime::evolution::EvoKernel::<FeatureState>::prepare_self_evolution_mutation_proposal;
@@ -92,6 +94,13 @@ fn full_evolution_experimental_paths_resolve() {
     assert_type::<oris_runtime::agent_contract::SupervisedValidationOutcome>();
     assert_type::<oris_runtime::agent_contract::SupervisedExecutionReasonCode>();
     assert_type::<oris_runtime::agent_contract::SupervisedDevloopOutcome>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionAuditConsistencyResult>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionAcceptanceGateReasonCode>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionApprovalEvidence>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionDeliveryOutcome>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionReasonCodeMatrix>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionAcceptanceGateInput>();
+    assert_type::<oris_runtime::agent_contract::SelfEvolutionAcceptanceGateContract>();
     assert_type::<oris_runtime::economics::EconomicsSignal>();
     assert_type::<oris_runtime::economics::StakePolicy>();
     assert_type::<oris_runtime::evolution::SignalExtractionInput>();

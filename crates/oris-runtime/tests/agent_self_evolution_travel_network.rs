@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use oris_runtime::agent_contract::{
-    AgentTask, HumanApproval, MutationProposal, SupervisedDeliveryReasonCode,
-    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
-    SupervisedDevloopStatus, SupervisedExecutionDecision, SupervisedExecutionReasonCode,
-    SupervisedValidationOutcome,
+    AgentTask, HumanApproval, MutationProposal, MutationProposalContractReasonCode,
+    SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
+    SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
+    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
+    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
+    SupervisedExecutionReasonCode, SupervisedValidationOutcome,
 };
 use oris_runtime::evolution::{
     CommandValidator, EvoAssetState, EvoEvolutionStore as EvolutionStore, EvoKernel,
@@ -356,6 +358,20 @@ fn delivery_diff(path: &str, title: &str) -> String {
     format!(
         "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,3 @@\n+# {title}\n+\n+bounded delivery preparation\n"
     )
+}
+
+fn github_issue_candidate_request(
+    issue_number: u64,
+    file: &str,
+) -> SelfEvolutionCandidateIntakeRequest {
+    SelfEvolutionCandidateIntakeRequest {
+        issue_number,
+        title: format!("Issue {issue_number}"),
+        body: "Bounded self-evolution candidate".into(),
+        labels: vec!["area/evolution".into(), "type/feature".into()],
+        state: "OPEN".into(),
+        candidate_hint_paths: vec![file.to_string()],
+    }
 }
 
 fn experience_diff(path: &str, plan_preview: &str) -> String {
@@ -1477,6 +1493,108 @@ async fn travel_network_delivery_denied_negative_control_is_fail_closed() {
         SupervisedDeliveryReasonCode::UnsupportedTaskScope
     );
     assert!(delivery.fail_closed);
+}
+
+#[tokio::test]
+async fn travel_network_acceptance_gate_passes_supervised_closed_loop() {
+    let (_workspace, _store, evo, _sandbox_root, _store_root) =
+        build_test_evo("travel-network-acceptance-success");
+    let issue_request = github_issue_candidate_request(238, "docs/evolution/travel-acceptance.md");
+    let selection = evo.select_self_evolution_candidate(&issue_request).unwrap();
+    let proposal = evo
+        .prepare_self_evolution_mutation_proposal(&issue_request)
+        .unwrap();
+    let request = delivery_request(
+        "travel-network-acceptance-task",
+        "docs/evolution/travel-acceptance.md",
+        true,
+    );
+    let outcome = evo
+        .run_supervised_devloop(
+            &"travel-network-acceptance-run".to_string(),
+            &request,
+            delivery_diff("docs/evolution/travel-acceptance.md", "Travel Acceptance"),
+            None,
+        )
+        .await
+        .unwrap();
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+
+    let gate = evo
+        .evaluate_self_evolution_acceptance_gate(&SelfEvolutionAcceptanceGateInput {
+            selection_decision: selection,
+            proposal_contract: proposal,
+            supervised_request: request,
+            execution_outcome: outcome,
+            delivery_contract: delivery,
+        })
+        .unwrap();
+
+    assert_eq!(
+        gate.audit_consistency_result,
+        SelfEvolutionAuditConsistencyResult::Consistent
+    );
+    assert_eq!(
+        gate.reason_code,
+        SelfEvolutionAcceptanceGateReasonCode::Accepted
+    );
+    assert_eq!(
+        gate.reason_code_matrix.proposal_reason_code,
+        MutationProposalContractReasonCode::Accepted
+    );
+    assert!(!gate.fail_closed);
+}
+
+#[tokio::test]
+async fn travel_network_acceptance_gate_denied_when_reason_codes_conflict() {
+    let (_workspace, _store, evo, _sandbox_root, _store_root) =
+        build_test_evo("travel-network-acceptance-denied");
+    let issue_request =
+        github_issue_candidate_request(239, "docs/evolution/travel-acceptance-denied.md");
+    let selection = evo.select_self_evolution_candidate(&issue_request).unwrap();
+    let proposal = evo
+        .prepare_self_evolution_mutation_proposal(&issue_request)
+        .unwrap();
+    let request = delivery_request(
+        "travel-network-acceptance-denied-task",
+        "docs/evolution/travel-acceptance-denied.md",
+        true,
+    );
+    let outcome = evo
+        .run_supervised_devloop(
+            &"travel-network-acceptance-denied-run".to_string(),
+            &request,
+            delivery_diff(
+                "docs/evolution/travel-acceptance-denied.md",
+                "Travel Acceptance Denied",
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+    let mut conflicting_outcome = outcome.clone();
+    conflicting_outcome.reason_code = Some(SupervisedExecutionReasonCode::PolicyDenied);
+
+    let gate = evo
+        .evaluate_self_evolution_acceptance_gate(&SelfEvolutionAcceptanceGateInput {
+            selection_decision: selection,
+            proposal_contract: proposal,
+            supervised_request: request,
+            execution_outcome: conflicting_outcome,
+            delivery_contract: delivery,
+        })
+        .unwrap();
+
+    assert_eq!(
+        gate.audit_consistency_result,
+        SelfEvolutionAuditConsistencyResult::Inconsistent
+    );
+    assert_eq!(
+        gate.reason_code,
+        SelfEvolutionAcceptanceGateReasonCode::InconsistentReasonCodeMatrix
+    );
+    assert!(gate.fail_closed);
 }
 
 #[tokio::test]

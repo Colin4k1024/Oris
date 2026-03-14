@@ -17,8 +17,11 @@ use oris_agent_contract::{
     MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
     MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
     MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
-    ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest,
-    SelfEvolutionMutationProposalContract, SelfEvolutionSelectionDecision,
+    ReplayPlannerDirective, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
+    SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
+    SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
+    SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
+    SelfEvolutionReasonCodeMatrix, SelfEvolutionSelectionDecision,
     SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState, SupervisedDeliveryContract,
     SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
     SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
@@ -3205,6 +3208,193 @@ impl<S: KernelState> EvoKernel<S> {
         Ok(contract)
     }
 
+    pub fn evaluate_self_evolution_acceptance_gate(
+        &self,
+        input: &SelfEvolutionAcceptanceGateInput,
+    ) -> Result<SelfEvolutionAcceptanceGateContract, EvoKernelError> {
+        let approval_evidence =
+            self_evolution_approval_evidence(&input.proposal_contract, &input.supervised_request);
+        let delivery_outcome = self_evolution_delivery_outcome(&input.delivery_contract);
+        let reason_code_matrix = self_evolution_reason_code_matrix(input);
+
+        let selection_candidate_class = match input.selection_decision.candidate_class.as_ref() {
+            Some(candidate_class)
+                if input.selection_decision.selected
+                    && matches!(
+                        input.selection_decision.reason_code,
+                        Some(SelfEvolutionSelectionReasonCode::Accepted)
+                    ) =>
+            {
+                candidate_class
+            }
+            _ => {
+                let contract = acceptance_gate_fail_contract(
+                    "acceptance gate rejected because selection evidence is missing or fail-closed",
+                    SelfEvolutionAcceptanceGateReasonCode::MissingSelectionEvidence,
+                    Some(
+                        "Select an accepted bounded self-evolution candidate before evaluating the closed-loop gate.",
+                    ),
+                    approval_evidence,
+                    delivery_outcome,
+                    reason_code_matrix,
+                );
+                self.record_acceptance_gate_result(input, &contract)?;
+                return Ok(contract);
+            }
+        };
+
+        let proposal_scope = match input.proposal_contract.proposal_scope.as_ref() {
+            Some(scope)
+                if !input.proposal_contract.fail_closed
+                    && matches!(
+                        input.proposal_contract.reason_code,
+                        MutationProposalContractReasonCode::Accepted
+                    ) =>
+            {
+                scope
+            }
+            _ => {
+                let contract = acceptance_gate_fail_contract(
+                    "acceptance gate rejected because proposal evidence is missing or fail-closed",
+                    SelfEvolutionAcceptanceGateReasonCode::MissingProposalEvidence,
+                    Some(
+                        "Prepare an accepted bounded mutation proposal before evaluating the closed-loop gate.",
+                    ),
+                    approval_evidence,
+                    delivery_outcome,
+                    reason_code_matrix,
+                );
+                self.record_acceptance_gate_result(input, &contract)?;
+                return Ok(contract);
+            }
+        };
+
+        if !input.proposal_contract.approval_required
+            || !approval_evidence.approved
+            || approval_evidence.approver.is_none()
+            || !input
+                .proposal_contract
+                .expected_evidence
+                .contains(&MutationProposalEvidence::HumanApproval)
+        {
+            let contract = acceptance_gate_fail_contract(
+                "acceptance gate rejected because explicit approval evidence is incomplete",
+                SelfEvolutionAcceptanceGateReasonCode::MissingApprovalEvidence,
+                Some(
+                    "Record explicit human approval with a named approver before evaluating the closed-loop gate.",
+                ),
+                approval_evidence,
+                delivery_outcome,
+                reason_code_matrix,
+            );
+            self.record_acceptance_gate_result(input, &contract)?;
+            return Ok(contract);
+        }
+
+        let execution_feedback_accepted = input
+            .execution_outcome
+            .execution_feedback
+            .as_ref()
+            .is_some_and(|feedback| feedback.accepted);
+        if !matches!(
+            input.execution_outcome.status,
+            SupervisedDevloopStatus::Executed
+        ) || !matches!(
+            input.execution_outcome.validation_outcome,
+            SupervisedValidationOutcome::Passed
+        ) || !execution_feedback_accepted
+            || input.execution_outcome.reason_code.is_none()
+        {
+            let contract = acceptance_gate_fail_contract(
+                "acceptance gate rejected because execution evidence is missing or fail-closed",
+                SelfEvolutionAcceptanceGateReasonCode::MissingExecutionEvidence,
+                Some(
+                    "Run supervised execution to a validated accepted outcome before evaluating the closed-loop gate.",
+                ),
+                approval_evidence,
+                delivery_outcome,
+                reason_code_matrix,
+            );
+            self.record_acceptance_gate_result(input, &contract)?;
+            return Ok(contract);
+        }
+
+        if input.delivery_contract.fail_closed
+            || !matches!(
+                input.delivery_contract.delivery_status,
+                SupervisedDeliveryStatus::Prepared
+            )
+            || !matches!(
+                input.delivery_contract.approval_state,
+                SupervisedDeliveryApprovalState::Approved
+            )
+            || !matches!(
+                input.delivery_contract.reason_code,
+                SupervisedDeliveryReasonCode::DeliveryPrepared
+            )
+            || input.delivery_contract.branch_name.is_none()
+            || input.delivery_contract.pr_title.is_none()
+            || input.delivery_contract.pr_summary.is_none()
+        {
+            let contract = acceptance_gate_fail_contract(
+                "acceptance gate rejected because delivery evidence is missing or fail-closed",
+                SelfEvolutionAcceptanceGateReasonCode::MissingDeliveryEvidence,
+                Some(
+                    "Prepare bounded delivery artifacts successfully before evaluating the closed-loop gate.",
+                ),
+                approval_evidence,
+                delivery_outcome,
+                reason_code_matrix,
+            );
+            self.record_acceptance_gate_result(input, &contract)?;
+            return Ok(contract);
+        }
+
+        let expected_evidence = [
+            MutationProposalEvidence::HumanApproval,
+            MutationProposalEvidence::BoundedScope,
+            MutationProposalEvidence::ValidationPass,
+            MutationProposalEvidence::ExecutionAudit,
+        ];
+        if proposal_scope.task_class != *selection_candidate_class
+            || input.execution_outcome.task_class.as_ref() != Some(&proposal_scope.task_class)
+            || proposal_scope.target_files != input.supervised_request.proposal.files
+            || !expected_evidence
+                .iter()
+                .all(|evidence| input.proposal_contract.expected_evidence.contains(evidence))
+            || !reason_code_matrix_consistent(&reason_code_matrix, &input.execution_outcome)
+        {
+            let contract = acceptance_gate_fail_contract(
+                "acceptance gate rejected because stage reason codes or bounded evidence drifted across the closed-loop path",
+                SelfEvolutionAcceptanceGateReasonCode::InconsistentReasonCodeMatrix,
+                Some(
+                    "Reconcile selection, proposal, execution, and delivery contracts so the bounded closed-loop evidence remains internally consistent.",
+                ),
+                approval_evidence,
+                delivery_outcome,
+                reason_code_matrix,
+            );
+            self.record_acceptance_gate_result(input, &contract)?;
+            return Ok(contract);
+        }
+
+        let contract = SelfEvolutionAcceptanceGateContract {
+            acceptance_gate_summary: format!(
+                "accepted supervised closed-loop self-evolution task '{}' for issue #{} as internally consistent and auditable",
+                input.supervised_request.task.id, input.selection_decision.issue_number
+            ),
+            audit_consistency_result: SelfEvolutionAuditConsistencyResult::Consistent,
+            approval_evidence,
+            delivery_outcome,
+            reason_code_matrix,
+            fail_closed: false,
+            reason_code: SelfEvolutionAcceptanceGateReasonCode::Accepted,
+            recovery_hint: None,
+        };
+        self.record_acceptance_gate_result(input, &contract)?;
+        Ok(contract)
+    }
+
     async fn supervised_devloop_replay_outcome(
         &self,
         run_id: &RunId,
@@ -4520,6 +4710,150 @@ fn delivery_approval_state_key(state: SupervisedDeliveryApprovalState) -> &'stat
     }
 }
 
+fn self_evolution_approval_evidence(
+    proposal_contract: &SelfEvolutionMutationProposalContract,
+    request: &SupervisedDevloopRequest,
+) -> SelfEvolutionApprovalEvidence {
+    SelfEvolutionApprovalEvidence {
+        approval_required: proposal_contract.approval_required,
+        approved: request.approval.approved,
+        approver: non_empty_owned(request.approval.approver.as_ref()),
+    }
+}
+
+fn self_evolution_delivery_outcome(
+    contract: &SupervisedDeliveryContract,
+) -> SelfEvolutionDeliveryOutcome {
+    SelfEvolutionDeliveryOutcome {
+        delivery_status: contract.delivery_status,
+        approval_state: contract.approval_state,
+        reason_code: contract.reason_code,
+    }
+}
+
+fn self_evolution_reason_code_matrix(
+    input: &SelfEvolutionAcceptanceGateInput,
+) -> SelfEvolutionReasonCodeMatrix {
+    SelfEvolutionReasonCodeMatrix {
+        selection_reason_code: input.selection_decision.reason_code,
+        proposal_reason_code: input.proposal_contract.reason_code,
+        execution_reason_code: input.execution_outcome.reason_code,
+        delivery_reason_code: input.delivery_contract.reason_code,
+    }
+}
+
+fn acceptance_gate_fail_contract(
+    summary: &str,
+    reason_code: SelfEvolutionAcceptanceGateReasonCode,
+    recovery_hint: Option<&str>,
+    approval_evidence: SelfEvolutionApprovalEvidence,
+    delivery_outcome: SelfEvolutionDeliveryOutcome,
+    reason_code_matrix: SelfEvolutionReasonCodeMatrix,
+) -> SelfEvolutionAcceptanceGateContract {
+    SelfEvolutionAcceptanceGateContract {
+        acceptance_gate_summary: summary.to_string(),
+        audit_consistency_result: SelfEvolutionAuditConsistencyResult::Inconsistent,
+        approval_evidence,
+        delivery_outcome,
+        reason_code_matrix,
+        fail_closed: true,
+        reason_code,
+        recovery_hint: recovery_hint.map(str::to_string),
+    }
+}
+
+fn reason_code_matrix_consistent(
+    matrix: &SelfEvolutionReasonCodeMatrix,
+    execution_outcome: &SupervisedDevloopOutcome,
+) -> bool {
+    matches!(
+        matrix.selection_reason_code,
+        Some(SelfEvolutionSelectionReasonCode::Accepted)
+    ) && matches!(
+        matrix.proposal_reason_code,
+        MutationProposalContractReasonCode::Accepted
+    ) && matches!(
+        matrix.execution_reason_code,
+        Some(SupervisedExecutionReasonCode::ReplayHit)
+            | Some(SupervisedExecutionReasonCode::ReplayFallback)
+    ) && matches!(
+        matrix.delivery_reason_code,
+        SupervisedDeliveryReasonCode::DeliveryPrepared
+    ) && execution_reason_matches_decision(
+        execution_outcome.execution_decision,
+        matrix.execution_reason_code,
+    )
+}
+
+fn execution_reason_matches_decision(
+    decision: SupervisedExecutionDecision,
+    reason_code: Option<SupervisedExecutionReasonCode>,
+) -> bool {
+    matches!(
+        (decision, reason_code),
+        (
+            SupervisedExecutionDecision::ReplayHit,
+            Some(SupervisedExecutionReasonCode::ReplayHit)
+        ) | (
+            SupervisedExecutionDecision::PlannerFallback,
+            Some(SupervisedExecutionReasonCode::ReplayFallback)
+        )
+    )
+}
+
+fn acceptance_gate_reason_code_key(
+    reason_code: SelfEvolutionAcceptanceGateReasonCode,
+) -> &'static str {
+    match reason_code {
+        SelfEvolutionAcceptanceGateReasonCode::Accepted => "accepted",
+        SelfEvolutionAcceptanceGateReasonCode::MissingSelectionEvidence => {
+            "missing_selection_evidence"
+        }
+        SelfEvolutionAcceptanceGateReasonCode::MissingProposalEvidence => {
+            "missing_proposal_evidence"
+        }
+        SelfEvolutionAcceptanceGateReasonCode::MissingApprovalEvidence => {
+            "missing_approval_evidence"
+        }
+        SelfEvolutionAcceptanceGateReasonCode::MissingExecutionEvidence => {
+            "missing_execution_evidence"
+        }
+        SelfEvolutionAcceptanceGateReasonCode::MissingDeliveryEvidence => {
+            "missing_delivery_evidence"
+        }
+        SelfEvolutionAcceptanceGateReasonCode::InconsistentReasonCodeMatrix => {
+            "inconsistent_reason_code_matrix"
+        }
+        SelfEvolutionAcceptanceGateReasonCode::UnknownFailClosed => "unknown_fail_closed",
+    }
+}
+
+fn audit_consistency_result_key(result: SelfEvolutionAuditConsistencyResult) -> &'static str {
+    match result {
+        SelfEvolutionAuditConsistencyResult::Consistent => "consistent",
+        SelfEvolutionAuditConsistencyResult::Inconsistent => "inconsistent",
+    }
+}
+
+fn serialize_acceptance_field<T: Serialize>(value: &T) -> Result<String, EvoKernelError> {
+    serde_json::to_string(value).map_err(|err| {
+        EvoKernelError::Validation(format!(
+            "failed to serialize acceptance gate event field: {err}"
+        ))
+    })
+}
+
+fn non_empty_owned(value: Option<&String>) -> Option<String> {
+    value.and_then(|inner| {
+        let trimmed = inner.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 impl<S: KernelState> EvoKernel<S> {
     fn record_delivery_rejection(
         &self,
@@ -4533,6 +4867,30 @@ impl<S: KernelState> EvoKernel<S> {
                 reason_code: Some(delivery_reason_code_key(contract.reason_code).to_string()),
                 recovery_hint: contract.recovery_hint.clone(),
                 fail_closed: contract.fail_closed,
+            })
+            .map(|_| ())
+            .map_err(store_err)
+    }
+
+    fn record_acceptance_gate_result(
+        &self,
+        input: &SelfEvolutionAcceptanceGateInput,
+        contract: &SelfEvolutionAcceptanceGateContract,
+    ) -> Result<(), EvoKernelError> {
+        self.store
+            .append_event(EvolutionEvent::AcceptanceGateEvaluated {
+                task_id: input.supervised_request.task.id.clone(),
+                issue_number: input.selection_decision.issue_number,
+                acceptance_gate_summary: contract.acceptance_gate_summary.clone(),
+                audit_consistency_result: audit_consistency_result_key(
+                    contract.audit_consistency_result,
+                )
+                .to_string(),
+                approval_evidence: serialize_acceptance_field(&contract.approval_evidence)?,
+                delivery_outcome: serialize_acceptance_field(&contract.delivery_outcome)?,
+                reason_code_matrix: serialize_acceptance_field(&contract.reason_code_matrix)?,
+                fail_closed: contract.fail_closed,
+                reason_code: acceptance_gate_reason_code_key(contract.reason_code).to_string(),
             })
             .map(|_| ())
             .map_err(store_err)

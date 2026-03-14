@@ -12,11 +12,12 @@ use chrono::{Duration, Utc};
 use oris_agent_contract::{
     AgentTask, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
     MutationProposalContractReasonCode, MutationProposalEvidence, ReplayFallbackNextAction,
-    ReplayFallbackReasonCode, ReplayPlannerDirective, SelfEvolutionCandidateIntakeRequest,
-    SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState,
-    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
-    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
-    SupervisedExecutionReasonCode, SupervisedValidationOutcome,
+    ReplayFallbackReasonCode, ReplayPlannerDirective, SelfEvolutionAcceptanceGateInput,
+    SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionAuditConsistencyResult,
+    SelfEvolutionCandidateIntakeRequest, SelfEvolutionSelectionReasonCode,
+    SupervisedDeliveryApprovalState, SupervisedDeliveryReasonCode, SupervisedDeliveryStatus,
+    SupervisedDevloopOutcome, SupervisedDevloopRequest, SupervisedDevloopStatus,
+    SupervisedExecutionDecision, SupervisedExecutionReasonCode, SupervisedValidationOutcome,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -1512,6 +1513,137 @@ async fn delivery_summary_denies_when_execution_evidence_is_missing() {
             fail_closed,
             ..
         } if reason_code == "delivery_evidence_missing" && *fail_closed
+    )));
+}
+
+#[tokio::test]
+async fn acceptance_gate_accepts_consistent_supervised_closed_loop() {
+    let _audit = TestAuditGuard::new("acceptance_gate_accepts_consistent_supervised_closed_loop");
+    let (_workspace, store, evo) = test_evo("acceptance-gate-success");
+    let issue_request = github_issue_candidate_request(
+        238,
+        "OPEN",
+        vec!["area/evolution", "type/feature"],
+        vec!["docs/w8-acceptance-gate.md"],
+    );
+    let selection = evo.select_self_evolution_candidate(&issue_request).unwrap();
+    let proposal = evo
+        .prepare_self_evolution_mutation_proposal(&issue_request)
+        .unwrap();
+    let request = devloop_request(
+        "task-w8-acceptance-gate",
+        "docs/w8-acceptance-gate.md",
+        true,
+    );
+    let outcome = evo
+        .run_supervised_devloop(
+            &"w8-acceptance-gate-run".to_string(),
+            &request,
+            proposal_diff_for("docs/w8-acceptance-gate.md", "W8 Acceptance Gate"),
+            None,
+        )
+        .await
+        .unwrap();
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+
+    let gate = evo
+        .evaluate_self_evolution_acceptance_gate(&SelfEvolutionAcceptanceGateInput {
+            selection_decision: selection,
+            proposal_contract: proposal,
+            supervised_request: request,
+            execution_outcome: outcome,
+            delivery_contract: delivery,
+        })
+        .unwrap();
+
+    assert_eq!(
+        gate.audit_consistency_result,
+        SelfEvolutionAuditConsistencyResult::Consistent
+    );
+    assert_eq!(
+        gate.reason_code,
+        SelfEvolutionAcceptanceGateReasonCode::Accepted
+    );
+    assert!(!gate.fail_closed);
+    assert!(gate.approval_evidence.approved);
+    assert_eq!(
+        gate.reason_code_matrix.proposal_reason_code,
+        MutationProposalContractReasonCode::Accepted
+    );
+    assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::AcceptanceGateEvaluated {
+            audit_consistency_result,
+            fail_closed,
+            reason_code,
+            ..
+        } if audit_consistency_result == "consistent"
+            && !fail_closed
+            && reason_code == "accepted"
+    )));
+}
+
+#[tokio::test]
+async fn acceptance_gate_fails_closed_when_reason_code_matrix_conflicts() {
+    let _audit =
+        TestAuditGuard::new("acceptance_gate_fails_closed_when_reason_code_matrix_conflicts");
+    let (_workspace, store, evo) = test_evo("acceptance-gate-conflict");
+    let issue_request = github_issue_candidate_request(
+        239,
+        "OPEN",
+        vec!["area/evolution", "type/feature"],
+        vec!["docs/w8-acceptance-conflict.md"],
+    );
+    let selection = evo.select_self_evolution_candidate(&issue_request).unwrap();
+    let proposal = evo
+        .prepare_self_evolution_mutation_proposal(&issue_request)
+        .unwrap();
+    let request = devloop_request(
+        "task-w8-acceptance-conflict",
+        "docs/w8-acceptance-conflict.md",
+        true,
+    );
+    let mut outcome = evo
+        .run_supervised_devloop(
+            &"w8-acceptance-conflict-run".to_string(),
+            &request,
+            proposal_diff_for("docs/w8-acceptance-conflict.md", "W8 Acceptance Conflict"),
+            None,
+        )
+        .await
+        .unwrap();
+    let delivery = evo.prepare_supervised_delivery(&request, &outcome).unwrap();
+    outcome.reason_code = Some(SupervisedExecutionReasonCode::PolicyDenied);
+
+    let gate = evo
+        .evaluate_self_evolution_acceptance_gate(&SelfEvolutionAcceptanceGateInput {
+            selection_decision: selection,
+            proposal_contract: proposal,
+            supervised_request: request,
+            execution_outcome: outcome,
+            delivery_contract: delivery,
+        })
+        .unwrap();
+
+    assert_eq!(
+        gate.audit_consistency_result,
+        SelfEvolutionAuditConsistencyResult::Inconsistent
+    );
+    assert_eq!(
+        gate.reason_code,
+        SelfEvolutionAcceptanceGateReasonCode::InconsistentReasonCodeMatrix
+    );
+    assert!(gate.fail_closed);
+    assert!(store.scan(1).unwrap().iter().any(|stored| matches!(
+        &stored.event,
+        EvolutionEvent::AcceptanceGateEvaluated {
+            audit_consistency_result,
+            fail_closed,
+            reason_code,
+            ..
+        } if audit_consistency_result == "inconsistent"
+            && *fail_closed
+            && reason_code == "inconsistent_reason_code_matrix"
     )));
 }
 

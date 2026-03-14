@@ -997,6 +997,73 @@ pub struct SupervisedDevloopOutcome {
     pub summary: String,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfEvolutionAuditConsistencyResult {
+    Consistent,
+    Inconsistent,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfEvolutionAcceptanceGateReasonCode {
+    Accepted,
+    MissingSelectionEvidence,
+    MissingProposalEvidence,
+    MissingApprovalEvidence,
+    MissingExecutionEvidence,
+    MissingDeliveryEvidence,
+    InconsistentReasonCodeMatrix,
+    UnknownFailClosed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfEvolutionApprovalEvidence {
+    pub approval_required: bool,
+    pub approved: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfEvolutionDeliveryOutcome {
+    pub delivery_status: SupervisedDeliveryStatus,
+    pub approval_state: SupervisedDeliveryApprovalState,
+    pub reason_code: SupervisedDeliveryReasonCode,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfEvolutionReasonCodeMatrix {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection_reason_code: Option<SelfEvolutionSelectionReasonCode>,
+    pub proposal_reason_code: MutationProposalContractReasonCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_reason_code: Option<SupervisedExecutionReasonCode>,
+    pub delivery_reason_code: SupervisedDeliveryReasonCode,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SelfEvolutionAcceptanceGateInput {
+    pub selection_decision: SelfEvolutionSelectionDecision,
+    pub proposal_contract: SelfEvolutionMutationProposalContract,
+    pub supervised_request: SupervisedDevloopRequest,
+    pub execution_outcome: SupervisedDevloopOutcome,
+    pub delivery_contract: SupervisedDeliveryContract,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelfEvolutionAcceptanceGateContract {
+    pub acceptance_gate_summary: String,
+    pub audit_consistency_result: SelfEvolutionAuditConsistencyResult,
+    pub approval_evidence: SelfEvolutionApprovalEvidence,
+    pub delivery_outcome: SelfEvolutionDeliveryOutcome,
+    pub reason_code_matrix: SelfEvolutionReasonCodeMatrix,
+    pub fail_closed: bool,
+    pub reason_code: SelfEvolutionAcceptanceGateReasonCode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -344,6 +344,17 @@ pub enum EvolutionEvent {
         approval_state: String,
         reason_code: String,
     },
+    AcceptanceGateEvaluated {
+        task_id: String,
+        issue_number: u64,
+        acceptance_gate_summary: String,
+        audit_consistency_result: String,
+        approval_evidence: String,
+        delivery_outcome: String,
+        reason_code_matrix: String,
+        fail_closed: bool,
+        reason_code: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

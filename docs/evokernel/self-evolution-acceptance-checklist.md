@@ -1,15 +1,20 @@
 # Evo Self-Evolution Acceptance Checklist
 
-> **Status: Active Baseline**
+> **Status: Active Supervised Closed-Loop Boundary**
 >
 > This checklist defines what "self-evolution works" means for the current checked-in Oris Evo implementation.
-> It is intentionally scoped to the behavior that exists today: replay-first learning from verified mutations.
-> It does **not** claim that Oris already implements a fully autonomous, always-on self-development loop.
+> It is intentionally scoped to the behavior that exists today: bounded selection, proposal, replay-assisted supervised execution, bounded delivery preparation, and one acceptance/audit gate under explicit human approval.
+> It does **not** claim that Oris already implements a fully autonomous, always-on self-development or release loop.
 
 ## 1. Scope
 
 Current acceptance is limited to:
 
+- bounded issue candidate intake and selection when an explicit caller provides issue metadata
+- machine-readable mutation proposal contracts for bounded docs-scoped work
+- replay-assisted supervised execution with fail-closed fallback semantics
+- bounded branch / PR preparation under explicit human approval
+- one machine-readable acceptance gate that checks the closed-loop evidence for internal consistency
 - successful mutation capture into the evolution store
 - later replay reuse for the same or equivalent task signals
 - controlled remote asset reuse after local validation
@@ -18,16 +23,21 @@ Current acceptance is limited to:
 
 Current acceptance explicitly excludes:
 
-- autonomous issue intake
-- autonomous task planning
-- autonomous branch / PR / release orchestration
+- autonomous issue discovery without a caller-provided candidate
+- autonomous task planning outside the bounded supervised path
+- autonomous merge, publish, or release orchestration
 - automatic mutation proposal generation without a caller
-- fully automatic reinjection of replay hints back into a coding agent loop
+- weakening explicit human approval boundaries for convenience
 
 ## 2. Current Acceptance Statement
 
-Oris may be considered to have passed the current self-evolution baseline only if all of the following are true:
+Oris may be considered to have passed the current self-evolution boundary only if all of the following are true:
 
+- a bounded candidate can be selected from explicit issue metadata with stable reason codes
+- a bounded mutation proposal contract can be prepared with explicit expected evidence and approval requirements
+- an approved proposal can execute through one replay-aware supervised path with machine-readable execution evidence
+- successful supervised execution can prepare bounded branch and pull-request artifacts without merging or releasing them
+- one acceptance gate can evaluate the end-to-end closed-loop evidence and fail closed on drift or missing evidence
 - it learns from at least one successful mutation
 - the same task can be replayed on a later run without re-solving from scratch
 - repeated learned tasks increase replay utilization
@@ -39,7 +49,7 @@ Oris may be considered to have passed the current self-evolution baseline only i
 
 At this stage, the correct product statement is:
 
-> Oris supports **constrained replay-driven self-evolution**.
+> Oris supports **a supervised closed-loop self-evolution path with bounded acceptance gating**.
 
 It is **not yet** accurate to claim:
 
@@ -78,17 +88,33 @@ It is **not yet** accurate to claim:
 - [x] Replay success totals remain stable across long repeated sequences.
 - [x] Replay counters in mixed task sequences count only real replay attempts.
 
+### E. Supervised Closed Loop
+
+- [x] Bounded candidate selection produces a machine-readable selection decision with stable reason codes.
+- [x] Bounded mutation proposal preparation produces an auditable proposal contract with approval requirements and expected evidence.
+- [x] Replay-assisted supervised execution unifies execution decision, validation result, fallback reasoning, and recovery hints in one contract.
+- [x] Bounded delivery preparation emits machine-readable branch / PR artifacts without merging or releasing them.
+- [x] The acceptance gate aggregates selection, proposal, execution, approval, and delivery evidence into one machine-readable result.
+- [x] Missing or conflicting closed-loop evidence fails closed and is recorded as an auditable acceptance-gate event.
+
 ## 4. Minimum Test Gate
 
 The current minimum acceptance gate is:
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p oris-evokernel --test evolution_lifecycle_regression
+cargo test -p oris-evokernel --test evolution_lifecycle_regression acceptance_gate_ -- --nocapture
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental -- --nocapture
+cargo test -p oris-runtime --test agent_self_evolution_travel_network --features full-evolution-experimental -- --nocapture
+cargo test --workspace
 ```
 
 The current checked-in regression suite covers:
 
+- bounded issue candidate selection and bounded mutation proposal contracts
+- replay-assisted supervised execution success and fail-closed replay outcomes
+- bounded delivery preparation success and denied escalation
+- acceptance-gate success and reason-code inconsistency fail-closed behavior
 - single-task learning and second-run replay
 - repeated-task replay rate shift
 - normalized signal replay
@@ -112,9 +138,9 @@ For the current baseline, the following thresholds should hold in the test harne
 
 The following are still outside the present acceptance envelope:
 
-- no dedicated runtime-owned detect/select/mutate pipeline as separate always-on stages
-- no autonomous mutation proposal generation
-- no autonomous planner loop
+- no autonomous issue discovery or triage loop
+- no autonomous mutation proposal generation without an explicit caller
+- no autonomous merge, publish, or release path
 - no autonomous issue-to-release closed loop
 - no broader semantic equivalence layer beyond the currently implemented signal normalization and matching behavior
 - no shadow-mode confidence lifecycle that continuously revalidates assets in the background
