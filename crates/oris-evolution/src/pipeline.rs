@@ -884,6 +884,7 @@ fn build_prepared_mutation(proposal: &MutationProposal) -> PreparedMutation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_pipeline_config_default() {
@@ -998,6 +999,52 @@ mod tests {
         fn new() -> Self {
             Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    struct CountingValidatePort {
+        call_count: Arc<AtomicUsize>,
+        passed: bool,
+    }
+
+    impl CountingValidatePort {
+        fn new(call_count: Arc<AtomicUsize>, passed: bool) -> Self {
+            Self { call_count, passed }
+        }
+    }
+
+    impl ValidatePort for CountingValidatePort {
+        fn validate(&self, input: &ValidateInput) -> ValidationResult {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            ValidationResult {
+                proposal_id: input.proposal_id.clone(),
+                passed: self.passed,
+                score: if self.passed { 0.95 } else { 0.15 },
+                issues: vec![],
+                simulation_results: None,
+            }
+        }
+    }
+
+    struct CountingEvaluatePort {
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl CountingEvaluatePort {
+        fn new(call_count: Arc<AtomicUsize>) -> Self {
+            Self { call_count }
+        }
+    }
+
+    impl EvaluatePort for CountingEvaluatePort {
+        fn evaluate(&self, _input: &EvaluateInput) -> EvaluationResult {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            EvaluationResult {
+                score: 0.91,
+                improvements: vec!["evaluate port called".to_string()],
+                regressions: vec![],
+                recommendation: EvaluationRecommendation::Accept,
             }
         }
     }
@@ -1188,5 +1235,90 @@ mod tests {
                 .improvements,
             vec!["Mutation applied successfully".to_string()]
         );
+    }
+
+    #[test]
+    fn test_execute_invokes_injected_validate_and_evaluate_ports() {
+        let validate_calls = Arc::new(AtomicUsize::new(0));
+        let evaluate_calls = Arc::new(AtomicUsize::new(0));
+        let config = EvolutionPipelineConfig {
+            enable_detect: false,
+            enable_select: true,
+            enable_mutate: true,
+            enable_execute: true,
+            enable_validate: true,
+            enable_evaluate: true,
+            enable_solidify: false,
+            enable_reuse: false,
+            ..Default::default()
+        };
+
+        let pipeline = StandardEvolutionPipeline::new(config, Arc::new(SingleCandidateSelector))
+            .with_validate_port(Arc::new(CountingValidatePort::new(
+                validate_calls.clone(),
+                true,
+            )))
+            .with_evaluate_port(Arc::new(CountingEvaluatePort::new(
+                evaluate_calls.clone(),
+            )));
+
+        let result = pipeline
+            .execute(PipelineContext::default())
+            .expect("pipeline should execute");
+
+        assert!(result.success);
+        assert_eq!(validate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(evaluate_calls.load(Ordering::SeqCst), 1);
+        assert!(result.error.is_none());
+        assert!(result.stage_states.iter().any(|stage| {
+            stage.stage_name == PipelineStage::Validate.as_str()
+                && stage.state == PipelineStageState::Completed
+        }));
+        assert!(result.stage_states.iter().any(|stage| {
+            stage.stage_name == PipelineStage::Evaluate.as_str()
+                && stage.state == PipelineStageState::Completed
+        }));
+    }
+
+    #[test]
+    fn test_execute_propagates_validate_port_failure_to_pipeline_result() {
+        let validate_calls = Arc::new(AtomicUsize::new(0));
+        let evaluate_calls = Arc::new(AtomicUsize::new(0));
+        let config = EvolutionPipelineConfig {
+            enable_detect: false,
+            enable_select: true,
+            enable_mutate: true,
+            enable_execute: true,
+            enable_validate: true,
+            enable_evaluate: true,
+            enable_solidify: false,
+            enable_reuse: false,
+            ..Default::default()
+        };
+
+        let pipeline = StandardEvolutionPipeline::new(config, Arc::new(SingleCandidateSelector))
+            .with_validate_port(Arc::new(CountingValidatePort::new(
+                validate_calls.clone(),
+                false,
+            )))
+            .with_evaluate_port(Arc::new(CountingEvaluatePort::new(
+                evaluate_calls.clone(),
+            )));
+
+        let result = pipeline
+            .execute(PipelineContext::default())
+            .expect("pipeline should execute");
+
+        assert!(!result.success);
+        assert_eq!(validate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(evaluate_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("Validation stage did not pass")
+        );
+        assert!(result.stage_states.iter().any(|stage| {
+            stage.stage_name == PipelineStage::Validate.as_str()
+                && stage.state == PipelineStageState::Failed("validation failed".to_string())
+        }));
     }
 }
