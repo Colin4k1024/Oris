@@ -228,6 +228,7 @@ pub trait EvolutionPipeline: Send + Sync {
     fn execute(&self, context: PipelineContext) -> Result<PipelineResult, PipelineError>;
 
     /// Execute a specific stage
+    #[deprecated(note = "Use execute() instead")]
     fn execute_stage(
         &self,
         stage: PipelineStage,
