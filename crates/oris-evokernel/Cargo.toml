@@ -13,7 +13,7 @@ async-trait = "0.1.80"
 chrono = { version = "0.4", default-features = true }
 oris-agent-contract = { version = "0.4.0", path = "../oris-agent-contract" }
 oris-economics = { version = "0.1.1", path = "../oris-economics" }
-oris-evolution = { version = "0.3.0", path = "../oris-evolution" }
+oris-evolution = { version = "0.3.2", path = "../oris-evolution" }
 oris-evolution-network = { version = "0.3.1", path = "../oris-evolution-network" }
 oris-genestore = { version = "0.1.0", path = "../oris-genestore" }
 oris-governor = { version = "0.3.0", path = "../oris-governor" }

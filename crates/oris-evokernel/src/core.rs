@@ -47,11 +47,12 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub use oris_evolution::{
-    default_store_root, ArtifactEncoding, AssetState as EvoAssetState,
-    BlastRadius as EvoBlastRadius, CandidateSource as EvoCandidateSource,
-    EnvFingerprint as EvoEnvFingerprint, EvolutionStore as EvoEvolutionStore, JsonlEvolutionStore,
-    MutationArtifact, MutationIntent, MutationTarget, Outcome, RiskLevel,
-    SelectorInput as EvoSelectorInput, TransitionEvidence, TransitionReasonCode,
+    builtin_task_classes, default_store_root, signals_match_class, ArtifactEncoding,
+    AssetState as EvoAssetState, BlastRadius as EvoBlastRadius,
+    CandidateSource as EvoCandidateSource, EnvFingerprint as EvoEnvFingerprint,
+    EvolutionStore as EvoEvolutionStore, JsonlEvolutionStore, MutationArtifact, MutationIntent,
+    MutationTarget, Outcome, RiskLevel, SelectorInput as EvoSelectorInput, TaskClass,
+    TaskClassMatcher, TransitionEvidence, TransitionReasonCode,
     TransitionReasonCode as EvoTransitionReasonCode,
 };
 pub use oris_evolution_network::{
@@ -4026,6 +4027,7 @@ fn build_bootstrap_gene(
         strategy,
         validation: vec![template.validation_profile.clone()],
         state: AssetState::Quarantined,
+        task_class_id: None,
     })
 }
 
@@ -4123,6 +4125,7 @@ fn derive_gene(
         strategy,
         validation: vec![validation_profile.to_string()],
         state: AssetState::Promoted,
+        task_class_id: None,
     }
 }
 
@@ -5811,6 +5814,7 @@ fn built_in_experience_genes() -> Vec<Gene> {
             ],
             validation: vec!["builtin-template".into(), "origin=builtin".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         },
         Gene {
             id: "builtin-experience-ci-fix-v1".into(),
@@ -5829,6 +5833,7 @@ fn built_in_experience_genes() -> Vec<Gene> {
             ],
             validation: vec!["builtin-template".into(), "origin=builtin".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         },
         Gene {
             id: "builtin-experience-task-decomposition-v1".into(),
@@ -5847,6 +5852,7 @@ fn built_in_experience_genes() -> Vec<Gene> {
             ],
             validation: vec!["builtin-template".into(), "origin=builtin".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         },
         Gene {
             id: "builtin-experience-project-workflow-v1".into(),
@@ -5865,6 +5871,7 @@ fn built_in_experience_genes() -> Vec<Gene> {
             ],
             validation: vec!["builtin-template".into(), "origin=builtin".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         },
         Gene {
             id: "builtin-experience-service-bid-v1".into(),
@@ -5883,6 +5890,7 @@ fn built_in_experience_genes() -> Vec<Gene> {
             ],
             validation: vec!["builtin-template".into(), "origin=builtin".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         },
     ]
 }
@@ -6180,6 +6188,7 @@ fn load_evomap_builtin_assets() -> Result<Option<BuiltinAssetBundle>, EvoKernelE
             strategy,
             validation,
             state: map_evomap_state(compatibility.as_ref()),
+            task_class_id: None,
         });
     }
 
@@ -6656,6 +6665,7 @@ fn record_reported_experience_in_store(
         strategy: normalized_strategy,
         validation: normalized_validation,
         state: AssetState::Promoted,
+        task_class_id: None,
     };
     let normalized_sender = normalized_sender_id(&sender_id);
 
@@ -8192,6 +8202,7 @@ index 0000000..1111111
             strategy: vec![file_name.into()],
             validation: vec!["test".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: capsule_id.into(),
@@ -8275,6 +8286,7 @@ index 0000000..1111111
             strategy: vec![file_name.into()],
             validation: vec!["test".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: capsule_id.into(),
@@ -9354,6 +9366,7 @@ index 0000000..1111111
                 strategy: vec!["README.md".into()],
                 validation: vec!["test".into()],
                 state: AssetState::Promoted,
+                task_class_id: None,
             }],
             capsules: vec![Capsule {
                 id: "capsule-stale".into(),
@@ -9501,6 +9514,7 @@ index 0000000..1111111
             strategy: vec!["README.md".into()],
             validation: vec!["test".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: "capsule-spec-linked".into(),

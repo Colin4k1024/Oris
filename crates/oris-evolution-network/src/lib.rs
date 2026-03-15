@@ -231,6 +231,7 @@ mod tests {
             strategy: vec!["summary=docs fix".to_string()],
             validation: vec!["cargo test".to_string()],
             state: AssetState::Promoted,
+            task_class_id: None,
         }
     }
 

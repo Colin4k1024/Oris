@@ -177,3 +177,44 @@ fn genestore_persist_adapter_resolves() {
         "SqliteGeneStorePersistAdapter::open(':memory:') should succeed"
     );
 }
+
+/// Issue #244 — Task-Class Generalization: semantic equivalence layer
+#[test]
+fn task_class_resolver_paths_resolve() {
+    // Type-resolution gate: TaskClass and TaskClassMatcher must be accessible via the facade
+    assert_type::<oris_runtime::evolution::TaskClass>();
+    assert_type::<oris_runtime::evolution::TaskClassMatcher>();
+
+    // Verify builtin class registry is accessible and non-empty
+    let classes = oris_runtime::evolution::builtin_task_classes();
+    assert!(
+        !classes.is_empty(),
+        "builtin task classes must not be empty"
+    );
+    assert!(
+        classes.iter().any(|c| c.id == "missing-import"),
+        "missing-import class must be present"
+    );
+
+    // Verify classify() works end-to-end via the runtime facade
+    let matcher = oris_runtime::evolution::TaskClassMatcher::with_builtins();
+    let signals = vec!["error[E0425]: cannot find value in scope".to_string()];
+    let cls = matcher
+        .classify(&signals)
+        .expect("E0425 signal must classify");
+    assert_eq!(cls.id, "missing-import");
+
+    // Cross-class: E0308 must NOT classify as borrow-conflict
+    let signals2 = vec!["error[E0308]: mismatched types".to_string()];
+    let cls2 = matcher
+        .classify(&signals2)
+        .expect("E0308 signal must classify");
+    assert_ne!(cls2.id, "borrow-conflict");
+
+    // signals_match_class helper is accessible and functional
+    assert!(oris_runtime::evolution::signals_match_class(
+        &signals,
+        "missing-import",
+        &classes
+    ));
+}

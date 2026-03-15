@@ -2118,6 +2118,7 @@ async fn stale_confidence_forces_revalidation_before_replay() {
         strategy: vec!["README.md".into()],
         validation: vec!["regression".into()],
         state: EvoAssetState::Promoted,
+        task_class_id: None,
     };
     let capsule = oris_evolution::Capsule {
         id: "capsule-stale-confidence".into(),

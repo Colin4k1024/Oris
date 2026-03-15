@@ -828,6 +828,7 @@ mod tests {
                     strategy: vec!["apply-fix".to_string()],
                     validation: vec!["cargo test".to_string()],
                     state: core::AssetState::default(),
+                    task_class_id: None,
                 },
                 capsules: vec![],
                 score: 0.9,

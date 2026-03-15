@@ -6,9 +6,11 @@ pub mod evolver;
 pub mod gep;
 pub mod pipeline;
 pub mod port;
+pub mod task_class;
 
 pub use confidence::*;
 pub use core::*;
 pub use evolver::*;
 pub use pipeline::*;
 pub use port::*;
+pub use task_class::{builtin_task_classes, signals_match_class, TaskClass, TaskClassMatcher};

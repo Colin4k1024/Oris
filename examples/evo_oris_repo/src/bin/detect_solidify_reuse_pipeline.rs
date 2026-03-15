@@ -55,6 +55,7 @@ impl Selector for DemoSelector {
             ],
             validation: vec!["cargo check".to_string()],
             state: AssetState::default(),
+            task_class_id: Some("missing-import".to_string()),
         };
 
         let capsule = Capsule {

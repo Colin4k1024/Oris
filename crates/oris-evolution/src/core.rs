@@ -228,6 +228,13 @@ pub struct Gene {
     pub validation: Vec<String>,
     #[serde(default)]
     pub state: AssetState,
+    /// Optional task-class ID from `oris_evolution::task_class::TaskClass`.
+    ///
+    /// When set, the `TaskClassAwareSelector` can match this gene for any
+    /// incoming signal list that classifies to the same task-class, enabling
+    /// semantic-equivalent task reuse beyond exact signal matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_class_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1159,6 +1166,7 @@ mod tests {
             strategy: vec!["crates".into()],
             validation: vec!["oris-default".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: "capsule-1".into(),
@@ -1210,6 +1218,7 @@ mod tests {
             strategy: vec!["crates".into()],
             validation: vec!["oris-default".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: "capsule-spec".into(),
@@ -1263,6 +1272,7 @@ mod tests {
             strategy: vec!["crates".into()],
             validation: vec!["oris-default".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: "capsule-spec-linked".into(),
@@ -1322,6 +1332,7 @@ mod tests {
             strategy: vec!["crates".into()],
             validation: vec!["oris-default".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: "capsule-inline-late".into(),
@@ -1373,6 +1384,7 @@ mod tests {
             strategy: vec!["crates".into()],
             validation: vec!["oris-default".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let capsule = Capsule {
             id: "capsule-scan".into(),
@@ -1451,6 +1463,7 @@ mod tests {
             strategy: vec!["a".into()],
             validation: vec!["oris-default".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let store = InconsistentSnapshotStore {
             scanned_events: vec![StoredEvolutionEvent {
@@ -1469,6 +1482,7 @@ mod tests {
                     strategy: vec!["b".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 }],
                 ..Default::default()
             },
@@ -1513,6 +1527,7 @@ mod tests {
             strategy: vec!["a".into()],
             validation: vec!["oris-default".into()],
             state: AssetState::Promoted,
+            task_class_id: None,
         };
         let scanned_capsule = Capsule {
             id: "capsule-scanned".into(),
@@ -1567,6 +1582,7 @@ mod tests {
                     strategy: vec!["b".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 }],
                 ..Default::default()
             },
@@ -1596,6 +1612,7 @@ mod tests {
                     strategy: vec!["a".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 },
                 Gene {
                     id: "gene-b".into(),
@@ -1603,6 +1620,7 @@ mod tests {
                     strategy: vec!["b".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 },
             ],
             capsules: vec![
@@ -1700,6 +1718,7 @@ mod tests {
                     strategy: vec!["a".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 },
                 Gene {
                     id: "gene-b".into(),
@@ -1707,6 +1726,7 @@ mod tests {
                     strategy: vec!["b".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 },
             ],
             capsules: vec![
@@ -1797,6 +1817,7 @@ mod tests {
                     strategy: vec!["a".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 },
                 Gene {
                     id: "gene-b".into(),
@@ -1804,6 +1825,7 @@ mod tests {
                     strategy: vec!["b".into()],
                     validation: vec!["oris-default".into()],
                     state: AssetState::Promoted,
+                    task_class_id: None,
                 },
             ],
             capsules: vec![
@@ -1919,6 +1941,7 @@ mod tests {
                 strategy: vec!["a".into()],
                 validation: vec!["oris-default".into()],
                 state: AssetState::Promoted,
+                task_class_id: None,
             }],
             capsules: vec![Capsule {
                 id: "capsule-fresh".into(),
@@ -1984,6 +2007,7 @@ mod tests {
                 strategy: vec!["a".into()],
                 validation: vec!["oris-default".into()],
                 state: AssetState::Promoted,
+                task_class_id: None,
             }],
             capsules: vec![Capsule {
                 id: "capsule-stale".into(),
