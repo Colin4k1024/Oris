@@ -3,6 +3,8 @@
 //! This module implements automatic confidence decay and lifecycle management
 //! for genes and capsules within the evolution crate.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -179,6 +181,244 @@ pub fn process_capsule_confidence(
     actions
 }
 
+// ---------------------------------------------------------------------------
+// ConfidenceController — continuous failure-rate-based confidence tracking
+// ---------------------------------------------------------------------------
+
+/// A single outcome record associated with an asset.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutcomeRecord {
+    pub asset_id: String,
+    pub success: bool,
+    pub recorded_at_ms: i64,
+}
+
+/// Configuration for [`ConfidenceController`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ControllerConfig {
+    /// Rolling time window in milliseconds used to compute failure rate
+    /// (default: 3 600 000 ms = 1 hour).
+    pub window_ms: i64,
+    /// Failure-rate threshold in [0.0, 1.0] that triggers a downgrade step
+    /// (default: 0.5).
+    pub failure_rate_threshold: f32,
+    /// Minimum number of outcomes inside the window before any downgrade
+    /// decision is made (default: 3).
+    pub min_samples: usize,
+    /// Confidence amount subtracted per downgrade step, also used as the
+    /// recovery boost per success (default: 0.15).
+    pub downgrade_penalty: f32,
+    /// Assets with confidence strictly below this value are considered
+    /// non-selectable and require re-validation (default:
+    /// `MIN_REPLAY_CONFIDENCE`).
+    pub min_selectable_confidence: f32,
+    /// Confidence assigned to assets that are not yet tracked (default: 1.0).
+    pub initial_confidence: f32,
+}
+
+impl Default for ControllerConfig {
+    fn default() -> Self {
+        Self {
+            window_ms: 3_600_000,
+            failure_rate_threshold: 0.5,
+            min_samples: 3,
+            downgrade_penalty: 0.15,
+            min_selectable_confidence: MIN_REPLAY_CONFIDENCE,
+            initial_confidence: 1.0,
+        }
+    }
+}
+
+/// An observability event emitted whenever an asset is automatically
+/// downgraded by the [`ConfidenceController`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DowngradeEvent {
+    pub asset_id: String,
+    pub old_confidence: f32,
+    pub new_confidence: f32,
+    /// Observed failure rate inside the rolling window.
+    pub failure_rate: f32,
+    /// Number of outcomes that were inside the window.
+    pub window_samples: usize,
+    pub event_at_ms: i64,
+    /// `true` when `new_confidence` fell below `min_selectable_confidence`,
+    /// indicating that re-validation should be triggered.
+    pub revalidation_required: bool,
+}
+
+/// Continuous confidence controller for genes and capsules.
+///
+/// Tracks per-asset success / failure outcomes within a rolling time window.
+/// When the failure rate exceeds the configured threshold and the minimum
+/// sample count is met, the asset's confidence score is automatically
+/// downgraded and a [`DowngradeEvent`] is appended to an internal
+/// observability log.  Successive successes can recover confidence.
+///
+/// # Selector integration
+///
+/// Call [`is_selectable`](ConfidenceController::is_selectable) before
+/// choosing a gene/capsule for reuse.  Assets below
+/// [`ControllerConfig::min_selectable_confidence`] return `false` and
+/// should be skipped until they have been re-validated.
+pub struct ConfidenceController {
+    config: ControllerConfig,
+    scores: HashMap<String, f32>,
+    history: HashMap<String, Vec<OutcomeRecord>>,
+    downgrade_log: Vec<DowngradeEvent>,
+}
+
+impl ConfidenceController {
+    /// Create a new controller with the given configuration.
+    pub fn new(config: ControllerConfig) -> Self {
+        Self {
+            config,
+            scores: HashMap::new(),
+            history: HashMap::new(),
+            downgrade_log: Vec::new(),
+        }
+    }
+
+    /// Create a controller using [`ControllerConfig::default`].
+    pub fn with_default_config() -> Self {
+        Self::new(ControllerConfig::default())
+    }
+
+    /// Current confidence score for `asset_id`.
+    /// Returns [`ControllerConfig::initial_confidence`] for unknown assets.
+    pub fn confidence(&self, asset_id: &str) -> f32 {
+        self.scores
+            .get(asset_id)
+            .copied()
+            .unwrap_or(self.config.initial_confidence)
+    }
+
+    /// Returns `true` when the asset's confidence is at or above
+    /// [`ControllerConfig::min_selectable_confidence`].
+    pub fn is_selectable(&self, asset_id: &str) -> bool {
+        self.confidence(asset_id) >= self.config.min_selectable_confidence
+    }
+
+    /// Record a **successful** outcome for `asset_id` at `now_ms`.
+    ///
+    /// Applies a recovery boost (capped at `initial_confidence`).
+    pub fn record_success(&mut self, asset_id: &str, now_ms: i64) {
+        self.history
+            .entry(asset_id.to_string())
+            .or_default()
+            .push(OutcomeRecord {
+                asset_id: asset_id.to_string(),
+                success: true,
+                recorded_at_ms: now_ms,
+            });
+        let initial = self.config.initial_confidence;
+        let penalty = self.config.downgrade_penalty;
+        let entry = self.scores.entry(asset_id.to_string()).or_insert(initial);
+        *entry = (*entry + penalty).min(initial);
+    }
+
+    /// Record a **failure** outcome for `asset_id` at `now_ms`.
+    ///
+    /// Immediately evaluates the rolling-window failure rate and downgrades
+    /// confidence if the threshold is exceeded.
+    pub fn record_failure(&mut self, asset_id: &str, now_ms: i64) {
+        self.history
+            .entry(asset_id.to_string())
+            .or_default()
+            .push(OutcomeRecord {
+                asset_id: asset_id.to_string(),
+                success: false,
+                recorded_at_ms: now_ms,
+            });
+        if let Some(evt) =
+            Self::compute_downgrade(&self.history, &self.scores, asset_id, now_ms, &self.config)
+        {
+            *self
+                .scores
+                .entry(asset_id.to_string())
+                .or_insert(evt.old_confidence) = evt.new_confidence;
+            self.downgrade_log.push(evt);
+        }
+    }
+
+    /// Sweep all tracked assets and apply downgrade logic at `now_ms`.
+    ///
+    /// Returns every [`DowngradeEvent`] generated in this sweep (also
+    /// appended to the internal log).
+    pub fn run_downgrade_check(&mut self, now_ms: i64) -> Vec<DowngradeEvent> {
+        let asset_ids: Vec<String> = self.history.keys().cloned().collect();
+        let mut events = Vec::new();
+        for id in &asset_ids {
+            if let Some(evt) =
+                Self::compute_downgrade(&self.history, &self.scores, id, now_ms, &self.config)
+            {
+                *self.scores.entry(id.clone()).or_insert(evt.old_confidence) = evt.new_confidence;
+                self.downgrade_log.push(evt.clone());
+                events.push(evt);
+            }
+        }
+        events
+    }
+
+    /// Full observability log of every downgrade event since construction.
+    pub fn downgrade_log(&self) -> &[DowngradeEvent] {
+        &self.downgrade_log
+    }
+
+    /// Asset IDs whose confidence has fallen below
+    /// [`ControllerConfig::min_selectable_confidence`] and therefore require
+    /// re-validation before they can be reused.
+    pub fn assets_requiring_revalidation(&self) -> Vec<String> {
+        self.scores
+            .iter()
+            .filter(|(_, &v)| v < self.config.min_selectable_confidence)
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    // --- private helpers ---
+
+    /// Pure function: decide whether `asset_id` should be downgraded given
+    /// current `history` and `scores`.  Returns `None` when no action is
+    /// needed.
+    fn compute_downgrade(
+        history: &HashMap<String, Vec<OutcomeRecord>>,
+        scores: &HashMap<String, f32>,
+        asset_id: &str,
+        now_ms: i64,
+        config: &ControllerConfig,
+    ) -> Option<DowngradeEvent> {
+        let window_start = now_ms - config.window_ms;
+        let records = history.get(asset_id)?;
+        let window: Vec<&OutcomeRecord> = records
+            .iter()
+            .filter(|r| r.recorded_at_ms >= window_start)
+            .collect();
+        let total = window.len();
+        if total < config.min_samples {
+            return None;
+        }
+        let failures = window.iter().filter(|r| !r.success).count();
+        let rate = failures as f32 / total as f32;
+        if rate < config.failure_rate_threshold {
+            return None;
+        }
+        let old = scores
+            .get(asset_id)
+            .copied()
+            .unwrap_or(config.initial_confidence);
+        let new_val = (old - config.downgrade_penalty).max(0.0);
+        Some(DowngradeEvent {
+            asset_id: asset_id.to_string(),
+            old_confidence: old,
+            new_confidence: new_val,
+            failure_rate: rate,
+            window_samples: total,
+            event_at_ms: now_ms,
+            revalidation_required: new_val < config.min_selectable_confidence,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +494,152 @@ mod tests {
         // Less than an hour
         let age = StandardConfidenceScheduler::calculate_age_hours(0, 1800000);
         assert!((age - 0.5).abs() < 0.001);
+    }
+
+    // -----------------------------------------------------------------------
+    // ConfidenceController tests
+    // -----------------------------------------------------------------------
+
+    const NOW: i64 = 1_000_000_000_000; // arbitrary fixed "now" in ms
+    const WINDOW: i64 = 3_600_000; // 1 hour window
+
+    fn controller_with_3_samples() -> ConfidenceController {
+        ConfidenceController::new(ControllerConfig {
+            window_ms: WINDOW,
+            failure_rate_threshold: 0.5,
+            min_samples: 3,
+            downgrade_penalty: 0.15,
+            min_selectable_confidence: MIN_REPLAY_CONFIDENCE,
+            initial_confidence: 1.0,
+        })
+    }
+
+    #[test]
+    fn test_controller_initial_confidence_is_one() {
+        let ctrl = controller_with_3_samples();
+        // Unknown asset → initial confidence
+        assert!((ctrl.confidence("gene-1") - 1.0).abs() < 0.001);
+        assert!(ctrl.is_selectable("gene-1"));
+    }
+
+    #[test]
+    fn test_controller_successive_failures_downgrade() {
+        let mut ctrl = controller_with_3_samples();
+        // 3 failures in the window → failure rate 1.0 ≥ 0.5 → first downgrade
+        ctrl.record_failure("gene-x", NOW);
+        ctrl.record_failure("gene-x", NOW + 1);
+        ctrl.record_failure("gene-x", NOW + 2);
+        let c = ctrl.confidence("gene-x");
+        // Expected: 1.0 - 0.15 = 0.85
+        assert!((c - 0.85).abs() < 0.01, "expected ~0.85, got {c}");
+        assert_eq!(ctrl.downgrade_log().len(), 1);
+    }
+
+    #[test]
+    fn test_controller_below_min_not_selectable() {
+        let mut ctrl = ConfidenceController::new(ControllerConfig {
+            window_ms: WINDOW,
+            failure_rate_threshold: 0.5,
+            min_samples: 2,
+            downgrade_penalty: 0.35,
+            min_selectable_confidence: MIN_REPLAY_CONFIDENCE,
+            initial_confidence: 0.5, // start near the edge
+        });
+        // Two failures → rate 1.0 ≥ 0.5, 2 ≥ min_samples=2 → downgrade
+        ctrl.record_failure("gene-low", NOW);
+        ctrl.record_failure("gene-low", NOW + 1);
+        // 0.5 - 0.35 = 0.15 < MIN_REPLAY_CONFIDENCE (0.35)
+        assert!(!ctrl.is_selectable("gene-low"));
+        assert_eq!(ctrl.downgrade_log()[0].revalidation_required, true);
+        let rv = ctrl.assets_requiring_revalidation();
+        assert!(rv.contains(&"gene-low".to_string()));
+    }
+
+    #[test]
+    fn test_controller_recovery_via_successes() {
+        let mut ctrl = controller_with_3_samples();
+        // Drive confidence down first
+        ctrl.record_failure("gene-r", NOW);
+        ctrl.record_failure("gene-r", NOW + 1);
+        ctrl.record_failure("gene-r", NOW + 2);
+        let after_failures = ctrl.confidence("gene-r");
+        // Now record two successes to partially recover
+        ctrl.record_success("gene-r", NOW + 3);
+        ctrl.record_success("gene-r", NOW + 4);
+        let after_recovery = ctrl.confidence("gene-r");
+        assert!(
+            after_recovery > after_failures,
+            "recovery expected: {after_recovery} > {after_failures}"
+        );
+    }
+
+    #[test]
+    fn test_controller_no_downgrade_below_min_samples() {
+        let mut ctrl = controller_with_3_samples();
+        // Only 2 failures — below min_samples=3 → no downgrade
+        ctrl.record_failure("gene-few", NOW);
+        ctrl.record_failure("gene-few", NOW + 1);
+        assert!((ctrl.confidence("gene-few") - 1.0).abs() < 0.001);
+        assert!(ctrl.downgrade_log().is_empty());
+    }
+
+    #[test]
+    fn test_controller_failures_outside_window_ignored() {
+        let mut ctrl = controller_with_3_samples();
+        // 2 failures far outside the 1-hour window (below min_samples=3 so no
+        // downgrade fires when they are recorded).
+        let old = NOW - WINDOW - 1;
+        ctrl.record_failure("gene-old", old);
+        ctrl.record_failure("gene-old", old + 1);
+        // run_downgrade_check at NOW: these 2 records are outside the window,
+        // count = 0 → below min_samples → no new downgrade event.
+        let events = ctrl.run_downgrade_check(NOW);
+        assert!(events.is_empty(), "expected no downgrade, got {events:?}");
+        assert!((ctrl.confidence("gene-old") - 1.0).abs() < 0.001);
+        assert!(ctrl.downgrade_log().is_empty());
+    }
+
+    #[test]
+    fn test_controller_run_downgrade_check_batch() {
+        let mut ctrl = controller_with_3_samples();
+        // Seed failures for two assets
+        for i in 0..3 {
+            ctrl.history
+                .entry("asset-a".to_string())
+                .or_default()
+                .push(OutcomeRecord {
+                    asset_id: "asset-a".to_string(),
+                    success: false,
+                    recorded_at_ms: NOW + i,
+                });
+            ctrl.history
+                .entry("asset-b".to_string())
+                .or_default()
+                .push(OutcomeRecord {
+                    asset_id: "asset-b".to_string(),
+                    success: false,
+                    recorded_at_ms: NOW + i,
+                });
+        }
+        let events = ctrl.run_downgrade_check(NOW + 10);
+        assert_eq!(events.len(), 2);
+        assert_eq!(ctrl.downgrade_log().len(), 2);
+    }
+
+    #[test]
+    fn test_controller_downgrade_event_fields() {
+        let mut ctrl = controller_with_3_samples();
+        ctrl.record_failure("gene-fields", NOW);
+        ctrl.record_failure("gene-fields", NOW + 1);
+        ctrl.record_failure("gene-fields", NOW + 2);
+        let log = ctrl.downgrade_log();
+        assert_eq!(log.len(), 1);
+        let evt = &log[0];
+        assert_eq!(evt.asset_id, "gene-fields");
+        assert!((evt.old_confidence - 1.0).abs() < 0.001);
+        assert!((evt.new_confidence - 0.85).abs() < 0.01);
+        assert!((evt.failure_rate - 1.0).abs() < 0.001);
+        assert_eq!(evt.window_samples, 3);
+        assert_eq!(evt.event_at_ms, NOW + 2);
     }
 }
