@@ -1,6 +1,6 @@
 # EvoKernel — Self-Evolution Runtime
 
-> **Oris evolves your code automatically.**
+> **Oris provides a supervised, bounded self-evolution runtime.**
 
 EvoKernel is the self-evolution subsystem of Oris, providing:
 
@@ -9,6 +9,12 @@ EvoKernel is the self-evolution subsystem of Oris, providing:
 - **Mutation Pipeline** — 8-stage evolution pipeline (Detect → Select → Mutate → Execute → Validate → Evaluate → Solidify → Reuse)
 - **Confidence Lifecycle** — Automatic decay/boost based on reuse success
 - **Issue Intake** — Automated problem detection and prioritization
+
+Current checked-in boundary:
+
+- Supervised, bounded, and auditable self-evolution flows.
+- Experience capture, replay reuse, and fail-closed policy enforcement.
+- No claim of always-on autonomous issue discovery, merge, publish, or release.
 
 ## Quick Start
 
@@ -46,6 +52,7 @@ What this already covers:
 - `ValidationPlan`-based verification stages
 - append-only JSONL evolution storage via `JsonlEvolutionStore`
 - replay-first candidate lookup through the selector path
+- supervised closed-loop self-evolution for a bounded subset of development work
 
 **Implemented Features:**
 
@@ -61,9 +68,9 @@ What this already covers:
 
 **In Development:**
 
-- Always-on autonomous development loops
-- Automatic issue intake and task planning
-- Automatic branch, review, and release orchestration
+- Broader autonomous issue discovery and task planning
+- Stronger always-on agent orchestration beyond the supervised bounded path
+- Autonomous branch, review, publish, and release orchestration
 
 ## Documentation Index
 

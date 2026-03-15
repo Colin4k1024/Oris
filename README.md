@@ -1,6 +1,6 @@
 # Oris
 
-**Oris is an AI Self-Evolution Framework for closed-loop software improvement.**
+**Oris is an AI self-evolution framework for supervised, bounded, closed-loop software improvement.**
 
 [![Latest Version](https://img.shields.io/crates/v/oris-runtime.svg)](https://crates.io/crates/oris-runtime)
 [![docs.rs](https://img.shields.io/docsrs/oris-runtime)](https://docs.rs/oris-runtime)
@@ -18,6 +18,12 @@ Oris focuses on **closed-loop improvement** for AI software:
 - Promote proven solutions into reusable assets.
 - Reuse successful solutions with confidence-aware replay.
 
+Current checked-in boundary:
+
+- Supervised, bounded, and auditable self-evolution.
+- Experience capture, replay reuse, and fail-closed policy enforcement.
+- No claim of fully autonomous issue discovery, merge, publish, or release.
+
 ---
 
 ## Capability Boundary
@@ -31,6 +37,8 @@ Oris focuses on **closed-loop improvement** for AI software:
 ---
 
 ## Self-Evolution Loop
+
+The current implementation supports a **supervised closed-loop self-evolution path with bounded acceptance gating**. It does not yet claim a fully autonomous self-evolving agent or always-on autonomous release loop.
 
 Oris implements an 8-stage self-evolution loop:
 
@@ -63,7 +71,7 @@ See [EvoMap alignment details](docs/evokernel/evomap.md).
 ## What You Can Build
 
 - Self-improving AI agents that learn from failed runs.
-- Supervised or autonomous dev loops for recurring issues.
+- Supervised dev loops for bounded recurring issues.
 - Evolution-aware replay pipelines with confidence lifecycle.
 - Cross-agent knowledge exchange over an evolution network surface.
 
