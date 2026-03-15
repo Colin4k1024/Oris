@@ -511,6 +511,17 @@ impl EvaluatePort for MutationEvaluatorAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oris_mutation_evaluator::{MockCritic, MutationEvaluator};
+
+    fn sample_evaluate_input() -> EvaluateInput {
+        EvaluateInput {
+            proposal_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            intent: "Fix compiler error in docs helper".to_string(),
+            original: "fn helper() -> i32 { broken_call() }".to_string(),
+            proposed: "fn helper() -> i32 { 42 }".to_string(),
+            signals: vec!["cannot find function `broken_call` in this scope".to_string()],
+        }
+    }
 
     #[test]
     fn validate_passes_on_success_with_clean_output() {
@@ -556,5 +567,25 @@ mod tests {
         assert!(result.passed);
         assert_eq!(result.score, 0.9);
         assert!(result.issues.is_empty());
+    }
+
+    #[test]
+    fn evaluator_adapter_from_mock_returns_accept() {
+        let adapter = MutationEvaluatorAdapter::from_mock();
+        let result = adapter.evaluate(&sample_evaluate_input());
+
+        assert_eq!(result.recommendation, EvaluationRecommendation::Accept);
+        assert!(result.score > 0.0);
+        assert_eq!(result.improvements.len(), 1);
+        assert!(result.regressions.is_empty());
+    }
+
+    #[test]
+    fn evaluator_adapter_maps_reject_to_reject() {
+        let adapter = MutationEvaluatorAdapter::new(MutationEvaluator::new(MockCritic::failing()));
+        let result = adapter.evaluate(&sample_evaluate_input());
+
+        assert_eq!(result.recommendation, EvaluationRecommendation::Reject);
+        assert!(result.score >= 0.0);
     }
 }
