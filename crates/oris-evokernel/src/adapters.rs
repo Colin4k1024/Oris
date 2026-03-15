@@ -357,9 +357,10 @@ const FAILURE_KEYWORDS: &[&str] = &[
 
 impl ValidatePort for SandboxOutputValidateAdapter {
     fn validate(&self, input: &ValidateInput) -> ValidationResult {
-        let stderr_has_errors = FAILURE_KEYWORDS
-            .iter()
-            .any(|kw| input.stderr.contains(kw));
+        // Limit the portion of stderr we scan for keywords to avoid excessive
+        // work on very large outputs; 4 KiB is more than enough context.
+        let check_region = &input.stderr[..input.stderr.len().min(4096)];
+        let stderr_has_errors = FAILURE_KEYWORDS.iter().any(|kw| check_region.contains(kw));
 
         let passed = input.execution_success && !stderr_has_errors;
 

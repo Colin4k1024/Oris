@@ -120,10 +120,7 @@ mod tests {
 
         assert_eq!(issues.len(), 1);
         assert!(issues[0].title.contains("ci.yml"));
-        assert!(issues[0]
-            .signals
-            .iter()
-            .any(|s| s.contains("failure")));
+        assert!(issues[0].signals.iter().any(|s| s.contains("failure")));
     }
 
     #[test]

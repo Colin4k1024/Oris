@@ -602,6 +602,9 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                 let input = EvaluateInput {
                     proposal_id,
                     intent,
+                    // original/proposed code content is not available in the
+                    // pipeline context at this stage; the evaluator adapter
+                    // should tolerate empty strings and rely on signals/intent.
                     original: String::new(),
                     proposed: String::new(),
                     signals,
@@ -695,6 +698,12 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             });
         }
 
+        // Note: hard failures in other stages (Detect, Execute, etc.) propagate
+        // as `Err(PipelineError)`, so they never reach this return path.
+        // `validation_failed` specifically captures the case where the
+        // ValidatePort signals `passed=false` — a soft failure that should
+        // still produce a complete PipelineResult (with success=false) rather
+        // than an error variant.
         Ok(PipelineResult {
             success: !validation_failed,
             stage_states,
@@ -1038,14 +1047,8 @@ mod tests {
     }
 
     impl ValidatePort for MockValidatePort {
-        fn validate(
-            &self,
-            input: &crate::port::ValidateInput,
-        ) -> crate::evolver::ValidationResult {
-            self.called
-                .lock()
-                .unwrap()
-                .push(input.proposal_id.clone());
+        fn validate(&self, input: &crate::port::ValidateInput) -> crate::evolver::ValidationResult {
+            self.called.lock().unwrap().push(input.proposal_id.clone());
             crate::evolver::ValidationResult {
                 proposal_id: input.proposal_id.clone(),
                 passed: self.should_pass,
