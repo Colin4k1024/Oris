@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::core::{GeneCandidate, PreparedMutation, Selector, SelectorInput};
 use crate::evolver::{EvolutionSignal, MutationProposal, MutationRiskLevel, ValidationResult};
-use crate::port::{SandboxPort, SignalExtractorInput, SignalExtractorPort};
+use crate::port::{GeneStorePersistPort, SandboxPort, SignalExtractorInput, SignalExtractorPort};
 
 /// Pipeline configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -282,6 +282,8 @@ pub struct StandardEvolutionPipeline {
     signal_extractor: Option<Arc<dyn SignalExtractorPort>>,
     /// Optional sandbox for the Execute stage.
     sandbox: Option<Arc<dyn SandboxPort>>,
+    /// Optional gene store for the Solidify/Reuse stages.
+    gene_store: Option<Arc<dyn GeneStorePersistPort>>,
 }
 
 impl StandardEvolutionPipeline {
@@ -295,6 +297,7 @@ impl StandardEvolutionPipeline {
             selector,
             signal_extractor: None,
             sandbox: None,
+            gene_store: None,
         }
     }
 
@@ -307,6 +310,12 @@ impl StandardEvolutionPipeline {
     /// Attach a `SandboxPort` for the Execute stage.
     pub fn with_sandbox(mut self, sandbox: Arc<dyn SandboxPort>) -> Self {
         self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Attach a `GeneStorePersistPort` for the Solidify/Reuse stages.
+    pub fn with_gene_store(mut self, gene_store: Arc<dyn GeneStorePersistPort>) -> Self {
+        self.gene_store = Some(gene_store);
         self
     }
 }
@@ -533,18 +542,23 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             });
         }
 
-        // Solidify phase - placeholder
+        // Solidify phase - persist promoted genes via the GeneStorePersistPort
         if self.config.enable_solidify {
             let mut stage = StageState::new(PipelineStage::Solidify.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
             let t0 = Instant::now();
-            context.solidified_genes = context
-                .candidates
-                .iter()
-                .map(|c| c.gene.id.clone())
-                .collect();
+            let mut solidified: Vec<String> = Vec::new();
+            for candidate in &context.candidates {
+                let gene = &candidate.gene;
+                // Persist via injected port when available.
+                if let Some(ref store) = self.gene_store {
+                    store.persist_gene(&gene.id, &gene.signals, &gene.strategy, &gene.validation);
+                }
+                solidified.push(gene.id.clone());
+            }
+            context.solidified_genes = solidified;
             let elapsed = t0.elapsed();
             context
                 .stage_timings
@@ -560,19 +574,23 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             });
         }
 
-        // Reuse phase - placeholder
+        // Reuse phase - record capsule reuse via the GeneStorePersistPort
         if self.config.enable_reuse {
             let mut stage = StageState::new(PipelineStage::Reuse.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
             let t0 = Instant::now();
-            // Mark capsules as reusable
-            context.reused_capsules = context
-                .candidates
-                .iter()
-                .flat_map(|c| c.capsules.iter().map(|cap| cap.id.clone()))
-                .collect();
+            let mut reused: Vec<String> = Vec::new();
+            for candidate in &context.candidates {
+                let cap_ids: Vec<String> =
+                    candidate.capsules.iter().map(|c| c.id.clone()).collect();
+                if let Some(ref store) = self.gene_store {
+                    store.mark_reused(&candidate.gene.id, &cap_ids);
+                }
+                reused.extend(cap_ids);
+            }
+            context.reused_capsules = reused;
             let elapsed = t0.elapsed();
             context
                 .stage_timings
@@ -669,6 +687,17 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                 Ok(PipelineStageState::Completed)
             }
             PipelineStage::Solidify => {
+                for candidate in &context.candidates {
+                    let gene = &candidate.gene;
+                    if let Some(ref store) = self.gene_store {
+                        store.persist_gene(
+                            &gene.id,
+                            &gene.signals,
+                            &gene.strategy,
+                            &gene.validation,
+                        );
+                    }
+                }
                 context.solidified_genes = context
                     .candidates
                     .iter()
@@ -677,11 +706,14 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                 Ok(PipelineStageState::Completed)
             }
             PipelineStage::Reuse => {
-                context.reused_capsules = context
-                    .candidates
-                    .iter()
-                    .flat_map(|c| c.capsules.iter().map(|cap| cap.id.clone()))
-                    .collect();
+                for candidate in &context.candidates {
+                    let cap_ids: Vec<String> =
+                        candidate.capsules.iter().map(|c| c.id.clone()).collect();
+                    if let Some(ref store) = self.gene_store {
+                        store.mark_reused(&candidate.gene.id, &cap_ids);
+                    }
+                    context.reused_capsules.extend(cap_ids);
+                }
                 Ok(PipelineStageState::Completed)
             }
         }
@@ -746,5 +778,91 @@ mod tests {
         // Just test that config works
         assert!(!config.enable_detect);
         assert!(config.enable_select);
+    }
+
+    // ─── GeneStorePersistPort integration test ─────────────────────────────
+
+    /// A minimal in-memory mock that records which genes/capsules were persisted.
+    struct MockGeneStore {
+        genes: std::sync::Mutex<Vec<String>>,
+        reused: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl MockGeneStore {
+        fn new() -> Self {
+            Self {
+                genes: std::sync::Mutex::new(Vec::new()),
+                reused: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl GeneStorePersistPort for MockGeneStore {
+        fn persist_gene(
+            &self,
+            gene_id: &str,
+            _signals: &[String],
+            _strategy: &[String],
+            _validation: &[String],
+        ) -> bool {
+            self.genes.lock().unwrap().push(gene_id.to_string());
+            true
+        }
+
+        fn mark_reused(&self, gene_id: &str, _capsule_ids: &[String]) -> bool {
+            self.reused.lock().unwrap().push(gene_id.to_string());
+            true
+        }
+    }
+
+    /// A minimal `Selector` that always returns one hard-coded candidate.
+    struct SingleCandidateSelector;
+
+    impl Selector for SingleCandidateSelector {
+        fn select(&self, _input: &SelectorInput) -> Vec<GeneCandidate> {
+            use crate::core;
+            vec![GeneCandidate {
+                gene: core::Gene {
+                    id: "gene-abc-001".to_string(),
+                    signals: vec!["test-signal".to_string()],
+                    strategy: vec!["apply-fix".to_string()],
+                    validation: vec!["cargo test".to_string()],
+                    state: core::AssetState::default(),
+                },
+                capsules: vec![],
+                score: 0.9,
+            }]
+        }
+    }
+
+    #[test]
+    fn test_solidify_reuse_calls_gene_store() {
+        let store = Arc::new(MockGeneStore::new());
+        let config = EvolutionPipelineConfig {
+            enable_detect: false,
+            enable_select: true,
+            enable_mutate: false,
+            enable_execute: false,
+            enable_validate: false,
+            enable_evaluate: false,
+            enable_solidify: true,
+            enable_reuse: true,
+            ..Default::default()
+        };
+
+        let pipeline = StandardEvolutionPipeline::new(config, Arc::new(SingleCandidateSelector))
+            .with_gene_store(store.clone());
+
+        let ctx = PipelineContext::default();
+        let result = pipeline.execute(ctx).expect("pipeline should succeed");
+        assert!(result.success);
+
+        // Verify Solidify stage persisted the gene
+        let persisted_genes = store.genes.lock().unwrap();
+        assert!(
+            persisted_genes.contains(&"gene-abc-001".to_string()),
+            "Solidify stage should have persisted gene-abc-001, got: {:?}",
+            persisted_genes
+        );
     }
 }

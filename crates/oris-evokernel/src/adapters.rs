@@ -25,13 +25,12 @@
 use std::path::PathBuf;
 
 use oris_evolution::{
-    EvolutionSignal, PreparedMutation, SandboxExecutionResult, SandboxPort, SignalExtractorInput,
-    SignalExtractorPort, SignalType,
+    EvolutionSignal, GeneStorePersistPort, PreparedMutation, SandboxExecutionResult, SandboxPort,
+    SignalExtractorInput, SignalExtractorPort, SignalType,
 };
 use oris_sandbox::{LocalProcessSandbox, Sandbox, SandboxError, SandboxPolicy};
 
 use crate::signal_extractor::RuntimeSignalExtractor;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // RuntimeSignalExtractorAdapter
 // ─────────────────────────────────────────────────────────────────────────────
@@ -204,5 +203,116 @@ impl SandboxPort for LocalSandboxAdapter {
                 0,
             ),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SqliteGeneStorePersistAdapter
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Implements `GeneStorePersistPort` using `oris_genestore::SqliteGeneStore`.
+///
+/// Convert `oris-evolution`'s string-typed Gene fields (signals/strategy/
+/// validation) into the richer `oris_genestore::Gene` domain model, then
+/// upsert into the SQLite store. The `gene_id` string is parsed as a UUID;
+/// if it is not a valid UUID a new random one is generated.
+///
+/// Async store calls are bridged synchronously via a dedicated thread,
+/// matching the pattern used by `LocalSandboxAdapter`.
+pub struct SqliteGeneStorePersistAdapter {
+    store: oris_genestore::SqliteGeneStore,
+}
+
+impl SqliteGeneStorePersistAdapter {
+    /// Open (or create) the store at `path`. Use `":memory:"` in tests.
+    pub fn open(path: &str) -> anyhow::Result<Self> {
+        Ok(Self {
+            store: oris_genestore::SqliteGeneStore::open(path)?,
+        })
+    }
+}
+
+impl GeneStorePersistPort for SqliteGeneStorePersistAdapter {
+    fn persist_gene(
+        &self,
+        gene_id: &str,
+        signals: &[String],
+        strategy: &[String],
+        validation: &[String],
+    ) -> bool {
+        use chrono::Utc;
+        use oris_genestore::{Gene, GeneStore};
+        use uuid::Uuid;
+
+        let id = Uuid::parse_str(gene_id).unwrap_or_else(|_| Uuid::new_v4());
+        let gene = Gene {
+            id,
+            name: format!("gene-{}", &gene_id[..gene_id.len().min(8)]),
+            description: signals.first().cloned().unwrap_or_default(),
+            tags: signals.to_vec(),
+            template: strategy.join("\n"),
+            preconditions: vec![],
+            validation_steps: validation.to_vec(),
+            confidence: 0.70,
+            use_count: 0,
+            success_count: 0,
+            quality_score: 0.60,
+            created_at: Utc::now(),
+            last_used_at: None,
+            last_boosted_at: None,
+        };
+
+        let store = &self.store;
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => std::thread::scope(|s| {
+                s.spawn(|| handle.block_on(store.upsert_gene(&gene)))
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("thread panicked")))
+            }),
+            Err(_) => tokio::runtime::Runtime::new()
+                .map_err(|e| anyhow::anyhow!(e))
+                .and_then(|rt| rt.block_on(store.upsert_gene(&gene))),
+        };
+
+        if let Err(ref e) = result {
+            eprintln!("[SqliteGeneStorePersistAdapter] persist_gene error: {e}");
+        }
+        result.is_ok()
+    }
+
+    fn mark_reused(&self, gene_id: &str, capsule_ids: &[String]) -> bool {
+        use oris_genestore::GeneStore;
+        use uuid::Uuid;
+
+        let id = match Uuid::parse_str(gene_id) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+
+        let store = &self.store;
+        let result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => std::thread::scope(|s| {
+                s.spawn(|| handle.block_on(store.record_gene_outcome(id, true)))
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("thread panicked")))
+            }),
+            Err(_) => tokio::runtime::Runtime::new()
+                .map_err(|e| anyhow::anyhow!(e))
+                .and_then(|rt| rt.block_on(store.record_gene_outcome(id, true))),
+        };
+
+        // Log capsule IDs for traceability (store doesn't have capsule-level
+        // reuse tracking in this minimal integration path).
+        if !capsule_ids.is_empty() {
+            eprintln!(
+                "[SqliteGeneStorePersistAdapter] mark_reused gene={} capsules={:?}",
+                gene_id, capsule_ids
+            );
+        }
+
+        if let Err(ref e) = result {
+            eprintln!("[SqliteGeneStorePersistAdapter] mark_reused error: {e}");
+        }
+        result.is_ok()
     }
 }

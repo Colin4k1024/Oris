@@ -9,6 +9,7 @@
 //! - Schema migrations: ALTER TABLE is far safer than rewriting JSONL files
 //! - Aggregate queries: confidence stats, success-rate histograms — free with SQL
 
+pub mod migrate;
 pub mod store;
 pub mod types;
 

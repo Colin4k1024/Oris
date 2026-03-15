@@ -162,3 +162,18 @@ fn full_evolution_experimental_paths_resolve() {
     assert!(!rejected.accepted);
     assert!(envelope.verify_content_hash());
 }
+
+/// Issue #243 — GeneStore SQLite CRUD + Solidify/Reuse wiring
+#[test]
+fn genestore_persist_adapter_resolves() {
+    // Verify SqliteGeneStorePersistAdapter is accessible via the evolution facade
+    assert_type::<oris_runtime::evolution::adapters::SqliteGeneStorePersistAdapter>();
+
+    // Verify in-memory store can be opened (no filesystem needed)
+    let adapter =
+        oris_runtime::evolution::adapters::SqliteGeneStorePersistAdapter::open(":memory:");
+    assert!(
+        adapter.is_ok(),
+        "SqliteGeneStorePersistAdapter::open(':memory:') should succeed"
+    );
+}

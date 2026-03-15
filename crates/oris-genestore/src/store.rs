@@ -497,3 +497,222 @@ fn relevance_score(gene: &Gene, query: &GeneQuery) -> f64 {
     // Blend tag score with confidence and quality.
     0.40 * tag_score + 0.35 * gene.confidence + 0.25 * gene.quality_score
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Capsule, Gene, GeneQuery};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn sample_gene(tags: &[&str]) -> Gene {
+        Gene {
+            id: Uuid::new_v4(),
+            name: "test-gene".into(),
+            description: "A test gene".into(),
+            tags: tags.iter().map(|s| s.to_string()).collect(),
+            template: "fix: {description}".into(),
+            preconditions: vec!["tests pass".into()],
+            validation_steps: vec!["cargo test".into()],
+            confidence: 0.80,
+            use_count: 0,
+            success_count: 0,
+            quality_score: 0.70,
+            created_at: Utc::now(),
+            last_used_at: None,
+            last_boosted_at: None,
+        }
+    }
+
+    fn sample_capsule(gene_id: Uuid) -> Capsule {
+        Capsule {
+            id: Uuid::new_v4(),
+            gene_id,
+            content: "patch content".into(),
+            env_fingerprint: "linux-x86_64".into(),
+            quality_score: 0.75,
+            confidence: 0.85,
+            use_count: 0,
+            success_count: 0,
+            last_replay_run_id: None,
+            created_at: Utc::now(),
+            last_used_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_and_get_gene() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&["rust", "compiler"]);
+        let id = gene.id;
+
+        store.upsert_gene(&gene).await.unwrap();
+
+        let fetched = store
+            .get_gene(id)
+            .await
+            .unwrap()
+            .expect("gene should exist");
+        assert_eq!(fetched.id, id);
+        assert_eq!(fetched.name, "test-gene");
+        assert!(fetched.tags.contains(&"rust".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_upsert_is_idempotent() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let mut gene = sample_gene(&["rust"]);
+        store.upsert_gene(&gene).await.unwrap();
+
+        gene.confidence = 0.95;
+        store.upsert_gene(&gene).await.unwrap();
+
+        let fetched = store.get_gene(gene.id).await.unwrap().unwrap();
+        assert!((fetched.confidence - 0.95).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_delete_gene() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&[]);
+        let id = gene.id;
+        store.upsert_gene(&gene).await.unwrap();
+        store.delete_gene(id).await.unwrap();
+        assert!(store.get_gene(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_search_genes_by_tag() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene_a = sample_gene(&["rust", "memory"]);
+        let gene_b = sample_gene(&["python"]);
+        store.upsert_gene(&gene_a).await.unwrap();
+        store.upsert_gene(&gene_b).await.unwrap();
+
+        let query = GeneQuery {
+            problem_description: "rust memory issue".into(),
+            required_tags: vec!["rust".into()],
+            min_confidence: 0.0,
+            limit: 10,
+        };
+        let results = store.search_genes(&query).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].gene.id, gene_a.id);
+    }
+
+    #[tokio::test]
+    async fn test_record_gene_outcome_success() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&[]);
+        let initial_confidence = gene.confidence;
+        store.upsert_gene(&gene).await.unwrap();
+
+        store.record_gene_outcome(gene.id, true).await.unwrap();
+
+        let fetched = store.get_gene(gene.id).await.unwrap().unwrap();
+        assert_eq!(fetched.use_count, 1);
+        assert_eq!(fetched.success_count, 1);
+        assert!(fetched.confidence > initial_confidence);
+    }
+
+    #[tokio::test]
+    async fn test_record_gene_outcome_failure() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&[]);
+        let initial_confidence = gene.confidence;
+        store.upsert_gene(&gene).await.unwrap();
+
+        store.record_gene_outcome(gene.id, false).await.unwrap();
+
+        let fetched = store.get_gene(gene.id).await.unwrap().unwrap();
+        assert_eq!(fetched.use_count, 1);
+        assert_eq!(fetched.success_count, 0);
+        assert!(fetched.confidence < initial_confidence);
+    }
+
+    #[tokio::test]
+    async fn test_decay_all() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&[]);
+        let initial = gene.confidence;
+        store.upsert_gene(&gene).await.unwrap();
+
+        store.decay_all().await.unwrap();
+
+        let fetched = store.get_gene(gene.id).await.unwrap().unwrap();
+        // confidence should decrease by DECAY_PER_QUERY or clamp to STALE_THRESHOLD
+        assert!(fetched.confidence <= initial);
+    }
+
+    #[tokio::test]
+    async fn test_stale_genes() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let mut gene = sample_gene(&[]);
+        // Set confidence to exactly the stale threshold
+        gene.confidence = Gene::STALE_THRESHOLD;
+        store.upsert_gene(&gene).await.unwrap();
+
+        let stale = store.stale_genes().await.unwrap();
+        assert!(!stale.is_empty());
+        assert_eq!(stale[0].id, gene.id);
+    }
+
+    #[tokio::test]
+    async fn test_capsule_crud() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&[]);
+        store.upsert_gene(&gene).await.unwrap();
+
+        let capsule = sample_capsule(gene.id);
+        let cid = capsule.id;
+        store.upsert_capsule(&capsule).await.unwrap();
+
+        let fetched = store
+            .get_capsule(cid)
+            .await
+            .unwrap()
+            .expect("capsule should exist");
+        assert_eq!(fetched.id, cid);
+        assert_eq!(fetched.gene_id, gene.id);
+    }
+
+    #[tokio::test]
+    async fn test_capsules_for_gene() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&[]);
+        store.upsert_gene(&gene).await.unwrap();
+
+        let c1 = sample_capsule(gene.id);
+        let c2 = sample_capsule(gene.id);
+        store.upsert_capsule(&c1).await.unwrap();
+        store.upsert_capsule(&c2).await.unwrap();
+
+        let caps = store.capsules_for_gene(gene.id).await.unwrap();
+        assert_eq!(caps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_record_capsule_outcome() {
+        let store = SqliteGeneStore::open(":memory:").unwrap();
+        let gene = sample_gene(&[]);
+        store.upsert_gene(&gene).await.unwrap();
+
+        let capsule = sample_capsule(gene.id);
+        let initial_conf = capsule.confidence;
+        store.upsert_capsule(&capsule).await.unwrap();
+
+        store
+            .record_capsule_outcome(capsule.id, true, None)
+            .await
+            .unwrap();
+
+        let fetched = store.get_capsule(capsule.id).await.unwrap().unwrap();
+        assert_eq!(fetched.use_count, 1);
+        assert_eq!(fetched.success_count, 1);
+        assert!(fetched.confidence > initial_conf);
+    }
+}

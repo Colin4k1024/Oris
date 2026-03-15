@@ -104,3 +104,36 @@ pub trait SandboxPort: Send + Sync {
     /// inside a sandbox and return the execution result.
     fn execute(&self, mutation: &PreparedMutation) -> SandboxExecutionResult;
 }
+
+/// Trait for persisting gene/capsule data during Solidify and Reuse stages.
+///
+/// Implement this in `oris-evokernel` (or any crate with access to
+/// `oris-genestore`) and inject via `StandardEvolutionPipeline::with_gene_store`.
+/// The trait is synchronous so the pipeline itself remains sync; async store
+/// calls should block internally (same pattern as `SandboxPort`).
+pub trait GeneStorePersistPort: Send + Sync {
+    /// Persist a candidate gene during the Solidify stage.
+    ///
+    /// * `gene_id` – opaque string ID from `oris-evolution::Gene`
+    /// * `signals`  – signal descriptions driving this gene
+    /// * `strategy` – strategy steps for solving the class of problem
+    /// * `validation` – validation criteria for the gene
+    ///
+    /// Returns `true` on success, `false` on a non-fatal error (the pipeline
+    /// records the outcome but does not abort).
+    fn persist_gene(
+        &self,
+        gene_id: &str,
+        signals: &[String],
+        strategy: &[String],
+        validation: &[String],
+    ) -> bool;
+
+    /// Record that a capsule was successfully reused during the Reuse stage.
+    ///
+    /// * `gene_id`    – the parent gene
+    /// * `capsule_ids` – the capsule IDs that were reused
+    ///
+    /// Returns `true` on success.
+    fn mark_reused(&self, gene_id: &str, capsule_ids: &[String]) -> bool;
+}
