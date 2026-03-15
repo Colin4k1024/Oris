@@ -507,3 +507,54 @@ impl EvaluatePort for MutationEvaluatorAdapter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_passes_on_success_with_clean_output() {
+        let adapter = SandboxOutputValidateAdapter::new();
+        let result = adapter.validate(&ValidateInput {
+            proposal_id: "proposal-clean".to_string(),
+            execution_success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        });
+
+        assert!(result.passed);
+        assert_eq!(result.score, 0.9);
+        assert!(result.issues.is_empty());
+    }
+
+    #[test]
+    fn validate_fails_on_execution_failure_with_fail_token() {
+        let adapter = SandboxOutputValidateAdapter::new();
+        let result = adapter.validate(&ValidateInput {
+            proposal_id: "proposal-failed".to_string(),
+            execution_success: false,
+            stdout: "test result: FAILED. 1 passed; 2 failed".to_string(),
+            stderr: "".to_string(),
+        });
+
+        assert!(!result.passed);
+        assert_eq!(result.score, 0.0);
+        assert_eq!(result.issues.len(), 1);
+        assert!(result.issues[0].description.contains("FAILED"));
+    }
+
+    #[test]
+    fn validate_passes_on_success_even_if_stdout_has_warnings() {
+        let adapter = SandboxOutputValidateAdapter::new();
+        let result = adapter.validate(&ValidateInput {
+            proposal_id: "proposal-warn".to_string(),
+            execution_success: true,
+            stdout: "warning: unused import\nwarning: dead_code".to_string(),
+            stderr: String::new(),
+        });
+
+        assert!(result.passed);
+        assert_eq!(result.score, 0.9);
+        assert!(result.issues.is_empty());
+    }
+}

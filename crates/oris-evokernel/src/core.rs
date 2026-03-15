@@ -3656,21 +3656,50 @@ impl<S: KernelState> EvoKernel<S> {
         }
 
         match supervised_devloop_mutation_proposal_scope(request) {
-            Ok(proposal_scope) => SelfEvolutionMutationProposalContract {
-                mutation_proposal: request.proposal.clone(),
-                proposal_scope: Some(proposal_scope),
-                validation_budget,
-                approval_required: true,
-                expected_evidence,
-                summary: format!(
-                    "supervised devloop mutation proposal prepared for task '{}'",
-                    request.task.id
-                ),
-                failure_reason: None,
-                recovery_hint: None,
-                reason_code: MutationProposalContractReasonCode::Accepted,
-                fail_closed: false,
-            },
+            Ok(proposal_scope) => {
+                if !matches!(
+                    proposal_scope.task_class,
+                    BoundedTaskClass::DocsSingleFile | BoundedTaskClass::DocsMultiFile
+                ) {
+                    return SelfEvolutionMutationProposalContract {
+                        mutation_proposal: request.proposal.clone(),
+                        proposal_scope: None,
+                        validation_budget,
+                        approval_required: true,
+                        expected_evidence,
+                        summary: format!(
+                            "supervised devloop rejected task '{}' before execution because the task class is outside the current docs-only bounded scope",
+                            request.task.id
+                        ),
+                        failure_reason: Some(format!(
+                            "supervised devloop rejected task '{}' because it is an unsupported task outside the bounded scope",
+                            request.task.id
+                        )),
+                        recovery_hint: Some(
+                            "Restrict proposal files to one to three unique docs/*.md paths before execution."
+                                .to_string(),
+                        ),
+                        reason_code: MutationProposalContractReasonCode::UnsupportedTaskClass,
+                        fail_closed: true,
+                    };
+                }
+
+                SelfEvolutionMutationProposalContract {
+                    mutation_proposal: request.proposal.clone(),
+                    proposal_scope: Some(proposal_scope),
+                    validation_budget,
+                    approval_required: true,
+                    expected_evidence,
+                    summary: format!(
+                        "supervised devloop mutation proposal prepared for task '{}'",
+                        request.task.id
+                    ),
+                    failure_reason: None,
+                    recovery_hint: None,
+                    reason_code: MutationProposalContractReasonCode::Accepted,
+                    fail_closed: false,
+                }
+            }
             Err(reason_code) => {
                 let failure_reason = match reason_code {
                     MutationProposalContractReasonCode::MissingTargetFiles => format!(
@@ -5121,20 +5150,13 @@ fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<Stri
 fn classify_self_evolution_candidate_request(
     request: &SelfEvolutionCandidateIntakeRequest,
 ) -> Option<BoundedTaskClass> {
-    if let Some(files) = normalized_supervised_devloop_docs_files(&request.candidate_hint_paths) {
-        return match files.len() {
+    normalized_supervised_devloop_docs_files(&request.candidate_hint_paths).and_then(|files| {
+        match files.len() {
             1 => Some(BoundedTaskClass::DocsSingleFile),
             2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => Some(BoundedTaskClass::DocsMultiFile),
             _ => None,
-        };
-    }
-    if validate_bounded_cargo_dep_files(&request.candidate_hint_paths).is_ok() {
-        return Some(BoundedTaskClass::CargoDepUpgrade);
-    }
-    if validate_bounded_lint_files(&request.candidate_hint_paths).is_ok() {
-        return Some(BoundedTaskClass::LintFix);
-    }
-    None
+        }
+    })
 }
 
 fn normalized_selection_labels(labels: &[String]) -> BTreeSet<String> {
