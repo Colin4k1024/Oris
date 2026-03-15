@@ -750,23 +750,67 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             }
             PipelineStage::Validate => {
                 if let Some(proposal) = context.proposals.first() {
-                    context.validation_result = Some(ValidationResult {
-                        proposal_id: proposal.proposal_id.clone(),
-                        passed: true,
-                        score: 0.8,
-                        issues: vec![],
-                        simulation_results: None,
-                    });
+                    let validation_result = if let Some(ref validator) = self.validate_port {
+                        let exec = context.execution_result.as_ref();
+                        let input = ValidateInput {
+                            proposal_id: proposal.proposal_id.clone(),
+                            execution_success: exec
+                                .and_then(|value| value.get("success"))
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false),
+                            stdout: exec
+                                .and_then(|value| value.get("stdout"))
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            stderr: exec
+                                .and_then(|value| value.get("stderr"))
+                                .and_then(|value| value.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        };
+                        validator.validate(&input)
+                    } else {
+                        ValidationResult {
+                            proposal_id: proposal.proposal_id.clone(),
+                            passed: true,
+                            score: 0.8,
+                            issues: vec![],
+                            simulation_results: None,
+                        }
+                    };
+                    context.validation_result = Some(validation_result);
                 }
-                Ok(PipelineStageState::Completed)
+                Ok(match context.validation_result.as_ref() {
+                    Some(result) if !result.passed => {
+                        PipelineStageState::Failed("validation failed".to_string())
+                    }
+                    _ => PipelineStageState::Completed,
+                })
             }
             PipelineStage::Evaluate => {
-                context.evaluation_result = Some(EvaluationResult {
-                    score: 0.8,
-                    improvements: vec![],
-                    regressions: vec![],
-                    recommendation: EvaluationRecommendation::Accept,
-                });
+                context.evaluation_result = if let Some(ref evaluator) = self.evaluate_port {
+                    context.proposals.first().map(|proposal| {
+                        evaluator.evaluate(&EvaluateInput {
+                            proposal_id: proposal.proposal_id.clone(),
+                            intent: proposal.description.clone(),
+                            original: String::new(),
+                            proposed: String::new(),
+                            signals: context
+                                .signals
+                                .iter()
+                                .map(|signal| signal.description.clone())
+                                .collect(),
+                        })
+                    })
+                } else {
+                    Some(EvaluationResult {
+                        score: 0.8,
+                        improvements: vec!["Mutation applied successfully".to_string()],
+                        regressions: vec![],
+                        recommendation: EvaluationRecommendation::Accept,
+                    })
+                };
                 Ok(PipelineStageState::Completed)
             }
             PipelineStage::Solidify => {
@@ -919,6 +963,57 @@ mod tests {
         }
     }
 
+    struct RecordingValidatePort {
+        passed: bool,
+        calls: std::sync::Mutex<Vec<ValidateInput>>,
+    }
+
+    impl RecordingValidatePort {
+        fn new(passed: bool) -> Self {
+            Self {
+                passed,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ValidatePort for RecordingValidatePort {
+        fn validate(&self, input: &ValidateInput) -> ValidationResult {
+            self.calls.lock().unwrap().push(input.clone());
+            ValidationResult {
+                proposal_id: input.proposal_id.clone(),
+                passed: self.passed,
+                score: if self.passed { 1.0 } else { 0.2 },
+                issues: vec![],
+                simulation_results: None,
+            }
+        }
+    }
+
+    struct RecordingEvaluatePort {
+        calls: std::sync::Mutex<Vec<EvaluateInput>>,
+    }
+
+    impl RecordingEvaluatePort {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl EvaluatePort for RecordingEvaluatePort {
+        fn evaluate(&self, input: &EvaluateInput) -> EvaluationResult {
+            self.calls.lock().unwrap().push(input.clone());
+            EvaluationResult {
+                score: 0.33,
+                improvements: vec!["used injected evaluator".to_string()],
+                regressions: vec!["none".to_string()],
+                recommendation: EvaluationRecommendation::NeedsRevision,
+            }
+        }
+    }
+
     #[test]
     fn test_solidify_reuse_calls_gene_store() {
         let store = Arc::new(MockGeneStore::new());
@@ -947,6 +1042,151 @@ mod tests {
             persisted_genes.contains(&"gene-abc-001".to_string()),
             "Solidify stage should have persisted gene-abc-001, got: {:?}",
             persisted_genes
+        );
+    }
+
+    #[test]
+    fn test_execute_stage_validate_uses_injected_port_and_fallback() {
+        let validator = Arc::new(RecordingValidatePort::new(false));
+        let pipeline = StandardEvolutionPipeline::new(
+            EvolutionPipelineConfig::default(),
+            Arc::new(SingleCandidateSelector),
+        )
+        .with_validate_port(validator.clone());
+
+        let mut context = PipelineContext::default();
+        context.proposals.push(MutationProposal {
+            proposal_id: "proposal-1".to_string(),
+            signal_ids: vec![],
+            gene_id: "gene-1".to_string(),
+            description: "validate proposal".to_string(),
+            estimated_impact: 0.5,
+            risk_level: MutationRiskLevel::Medium,
+            proposed_changes: serde_json::json!({}),
+        });
+        context.execution_result = Some(serde_json::json!({
+            "success": true,
+            "stdout": "validator stdout",
+            "stderr": ""
+        }));
+
+        let state = pipeline
+            .execute_stage(PipelineStage::Validate, &mut context)
+            .expect("validate stage should succeed");
+
+        assert_eq!(
+            state,
+            PipelineStageState::Failed("validation failed".to_string())
+        );
+        let calls = validator.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].proposal_id, "proposal-1");
+        assert!(calls[0].execution_success);
+        assert_eq!(calls[0].stdout, "validator stdout");
+        drop(calls);
+        assert!(!context.validation_result.as_ref().unwrap().passed);
+
+        let fallback_pipeline = StandardEvolutionPipeline::new(
+            EvolutionPipelineConfig::default(),
+            Arc::new(SingleCandidateSelector),
+        );
+        let mut fallback_context = PipelineContext::default();
+        fallback_context.proposals.push(MutationProposal {
+            proposal_id: "proposal-2".to_string(),
+            signal_ids: vec![],
+            gene_id: "gene-2".to_string(),
+            description: "fallback validate".to_string(),
+            estimated_impact: 0.4,
+            risk_level: MutationRiskLevel::Low,
+            proposed_changes: serde_json::json!({}),
+        });
+
+        let fallback_state = fallback_pipeline
+            .execute_stage(PipelineStage::Validate, &mut fallback_context)
+            .expect("fallback validate stage should succeed");
+
+        assert_eq!(fallback_state, PipelineStageState::Completed);
+        assert!(fallback_context.validation_result.as_ref().unwrap().passed);
+        assert_eq!(
+            fallback_context.validation_result.as_ref().unwrap().score,
+            0.8
+        );
+    }
+
+    #[test]
+    fn test_execute_stage_evaluate_uses_injected_port_and_fallback() {
+        let evaluator = Arc::new(RecordingEvaluatePort::new());
+        let pipeline = StandardEvolutionPipeline::new(
+            EvolutionPipelineConfig::default(),
+            Arc::new(SingleCandidateSelector),
+        )
+        .with_evaluate_port(evaluator.clone());
+
+        let mut context = PipelineContext::default();
+        context.signals.push(EvolutionSignal {
+            signal_id: "signal-1".to_string(),
+            signal_type: crate::evolver::SignalType::ErrorPattern {
+                error_type: "panic".to_string(),
+                frequency: 1,
+            },
+            source_task_id: "task-1".to_string(),
+            confidence: 0.9,
+            description: "improve evaluator path".to_string(),
+            metadata: serde_json::json!({}),
+        });
+        context.proposals.push(MutationProposal {
+            proposal_id: "proposal-3".to_string(),
+            signal_ids: vec!["signal-1".to_string()],
+            gene_id: "gene-3".to_string(),
+            description: "evaluate proposal".to_string(),
+            estimated_impact: 0.7,
+            risk_level: MutationRiskLevel::Medium,
+            proposed_changes: serde_json::json!({}),
+        });
+
+        let state = pipeline
+            .execute_stage(PipelineStage::Evaluate, &mut context)
+            .expect("evaluate stage should succeed");
+
+        assert_eq!(state, PipelineStageState::Completed);
+        let calls = evaluator.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].proposal_id, "proposal-3");
+        assert_eq!(calls[0].intent, "evaluate proposal");
+        assert_eq!(calls[0].signals, vec!["improve evaluator path".to_string()]);
+        drop(calls);
+        assert_eq!(
+            context.evaluation_result.as_ref().unwrap().recommendation,
+            EvaluationRecommendation::NeedsRevision
+        );
+        assert_eq!(context.evaluation_result.as_ref().unwrap().score, 0.33);
+
+        let fallback_pipeline = StandardEvolutionPipeline::new(
+            EvolutionPipelineConfig::default(),
+            Arc::new(SingleCandidateSelector),
+        );
+        let mut fallback_context = PipelineContext::default();
+
+        let fallback_state = fallback_pipeline
+            .execute_stage(PipelineStage::Evaluate, &mut fallback_context)
+            .expect("fallback evaluate stage should succeed");
+
+        assert_eq!(fallback_state, PipelineStageState::Completed);
+        assert_eq!(
+            fallback_context
+                .evaluation_result
+                .as_ref()
+                .unwrap()
+                .recommendation,
+            EvaluationRecommendation::Accept
+        );
+        assert_eq!(
+            fallback_context
+                .evaluation_result
+                .as_ref()
+                .unwrap()
+                .improvements,
+            vec!["Mutation applied successfully".to_string()]
         );
     }
 }
