@@ -1,4 +1,5 @@
 pub mod acceptance_gate;
+pub mod autonomous_loop;
 pub mod coordinator;
 pub mod evidence;
 pub mod github_adapter;
