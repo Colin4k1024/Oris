@@ -188,6 +188,8 @@ const MUTATION_NEEDED_MAX_CHANGED_LINES: usize = 600;
 const MUTATION_NEEDED_MAX_SANDBOX_DURATION_MS: u64 = 120_000;
 const MUTATION_NEEDED_MAX_VALIDATION_BUDGET_MS: u64 = 900_000;
 const SUPERVISED_DEVLOOP_MAX_DOC_FILES: usize = 3;
+const SUPERVISED_DEVLOOP_MAX_CARGO_TOML_FILES: usize = 5;
+const SUPERVISED_DEVLOOP_MAX_LINT_FILES: usize = 5;
 pub const REPLAY_RELEASE_GATE_AGGREGATION_DIMENSIONS: [&str; 2] =
     ["task_class", "source_sender_id"];
 
@@ -3155,7 +3157,10 @@ impl<S: KernelState> EvoKernel<S> {
             return Ok(contract);
         }
 
-        if validate_bounded_docs_files(&request.proposal.files).is_err() {
+        if validate_bounded_docs_files(&request.proposal.files).is_err()
+            && validate_bounded_cargo_dep_files(&request.proposal.files).is_err()
+            && validate_bounded_lint_files(&request.proposal.files).is_err()
+        {
             let contract = supervised_delivery_denied_contract(
                 request,
                 SupervisedDeliveryReasonCode::UnsupportedTaskScope,
@@ -4629,6 +4634,8 @@ fn supervised_delivery_branch_name(task_id: &str, task_class: &BoundedTaskClass)
     let prefix = match task_class {
         BoundedTaskClass::DocsSingleFile => "self-evolution/docs",
         BoundedTaskClass::DocsMultiFile => "self-evolution/docs-batch",
+        BoundedTaskClass::CargoDepUpgrade => "self-evolution/dep-upgrade",
+        BoundedTaskClass::LintFix => "self-evolution/lint-fix",
     };
     let slug = sanitize_delivery_component(task_id);
     truncate_delivery_field(&format!("{prefix}/{slug}"), 72)
@@ -4971,17 +4978,36 @@ fn mutation_needed_contract_from_proposal_contract(
 fn supervised_devloop_mutation_proposal_scope(
     request: &SupervisedDevloopRequest,
 ) -> Result<MutationProposalScope, MutationProposalContractReasonCode> {
-    let target_files = validate_bounded_docs_files(&request.proposal.files)?;
-    let task_class = match target_files.len() {
-        1 => BoundedTaskClass::DocsSingleFile,
-        2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => BoundedTaskClass::DocsMultiFile,
-        _ => return Err(MutationProposalContractReasonCode::UnsupportedTaskClass),
-    };
+    // Try docs classification first.
+    if let Ok(target_files) = validate_bounded_docs_files(&request.proposal.files) {
+        let task_class = match target_files.len() {
+            1 => BoundedTaskClass::DocsSingleFile,
+            2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => BoundedTaskClass::DocsMultiFile,
+            _ => return Err(MutationProposalContractReasonCode::UnsupportedTaskClass),
+        };
+        return Ok(MutationProposalScope {
+            task_class,
+            target_files,
+        });
+    }
 
-    Ok(MutationProposalScope {
-        task_class,
-        target_files,
-    })
+    // Try Cargo dependency-upgrade classification.
+    if let Ok(target_files) = validate_bounded_cargo_dep_files(&request.proposal.files) {
+        return Ok(MutationProposalScope {
+            task_class: BoundedTaskClass::CargoDepUpgrade,
+            target_files,
+        });
+    }
+
+    // Try lint-fix classification.
+    if let Ok(target_files) = validate_bounded_lint_files(&request.proposal.files) {
+        return Ok(MutationProposalScope {
+            task_class: BoundedTaskClass::LintFix,
+            target_files,
+        });
+    }
+
+    Err(MutationProposalContractReasonCode::UnsupportedTaskClass)
 }
 
 fn validate_bounded_docs_files(
@@ -5012,6 +5038,82 @@ fn validate_bounded_docs_files(
     Ok(normalized_files)
 }
 
+/// Validate that all files are Cargo manifests or the workspace lock file.
+/// Allows: `Cargo.toml`, `Cargo.lock`, `crates/*/Cargo.toml`.
+/// Safety: max 5 files, no path traversal.
+fn validate_bounded_cargo_dep_files(
+    files: &[String],
+) -> Result<Vec<String>, MutationProposalContractReasonCode> {
+    if files.is_empty() {
+        return Err(MutationProposalContractReasonCode::MissingTargetFiles);
+    }
+    if files.len() > SUPERVISED_DEVLOOP_MAX_CARGO_TOML_FILES {
+        return Err(MutationProposalContractReasonCode::UnsupportedTaskClass);
+    }
+
+    let mut normalized_files = Vec::with_capacity(files.len());
+    let mut seen = BTreeSet::new();
+
+    for path in files {
+        let normalized = path.trim().replace('\\', "/");
+        if normalized.is_empty() || normalized.contains("..") {
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
+        }
+        // Allow: Cargo.toml, Cargo.lock, <prefix>/Cargo.toml, <prefix>/Cargo.lock.
+        let basename = normalized.split('/').next_back().unwrap_or(&normalized);
+        if basename != "Cargo.toml" && basename != "Cargo.lock" {
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
+        }
+        if !seen.insert(normalized.clone()) {
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
+        }
+        normalized_files.push(normalized);
+    }
+
+    Ok(normalized_files)
+}
+
+/// Validate that all files are Rust source files eligible for auto-fix linting.
+/// Allows: `**/*.rs` paths within `src/`, `crates/`, `examples/`.
+/// Safety: max 5 files, no path traversal, no Cargo manifests.
+fn validate_bounded_lint_files(
+    files: &[String],
+) -> Result<Vec<String>, MutationProposalContractReasonCode> {
+    if files.is_empty() {
+        return Err(MutationProposalContractReasonCode::MissingTargetFiles);
+    }
+    if files.len() > SUPERVISED_DEVLOOP_MAX_LINT_FILES {
+        return Err(MutationProposalContractReasonCode::UnsupportedTaskClass);
+    }
+
+    let allowed_prefixes = ["src/", "crates/", "examples/"];
+
+    let mut normalized_files = Vec::with_capacity(files.len());
+    let mut seen = BTreeSet::new();
+
+    for path in files {
+        let normalized = path.trim().replace('\\', "/");
+        if normalized.is_empty() || normalized.contains("..") {
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
+        }
+        if !normalized.ends_with(".rs") {
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
+        }
+        let in_allowed_prefix = allowed_prefixes
+            .iter()
+            .any(|prefix| normalized.starts_with(prefix));
+        if !in_allowed_prefix {
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
+        }
+        if !seen.insert(normalized.clone()) {
+            return Err(MutationProposalContractReasonCode::OutOfBoundsPath);
+        }
+        normalized_files.push(normalized);
+    }
+
+    Ok(normalized_files)
+}
+
 fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<String>> {
     validate_bounded_docs_files(files).ok()
 }
@@ -5019,12 +5121,20 @@ fn normalized_supervised_devloop_docs_files(files: &[String]) -> Option<Vec<Stri
 fn classify_self_evolution_candidate_request(
     request: &SelfEvolutionCandidateIntakeRequest,
 ) -> Option<BoundedTaskClass> {
-    let file_count = normalized_supervised_devloop_docs_files(&request.candidate_hint_paths)?.len();
-    match file_count {
-        1 => Some(BoundedTaskClass::DocsSingleFile),
-        2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => Some(BoundedTaskClass::DocsMultiFile),
-        _ => None,
+    if let Some(files) = normalized_supervised_devloop_docs_files(&request.candidate_hint_paths) {
+        return match files.len() {
+            1 => Some(BoundedTaskClass::DocsSingleFile),
+            2..=SUPERVISED_DEVLOOP_MAX_DOC_FILES => Some(BoundedTaskClass::DocsMultiFile),
+            _ => None,
+        };
     }
+    if validate_bounded_cargo_dep_files(&request.candidate_hint_paths).is_ok() {
+        return Some(BoundedTaskClass::CargoDepUpgrade);
+    }
+    if validate_bounded_lint_files(&request.candidate_hint_paths).is_ok() {
+        return Some(BoundedTaskClass::LintFix);
+    }
+    None
 }
 
 fn normalized_selection_labels(labels: &[String]) -> BTreeSet<String> {
@@ -10705,5 +10815,206 @@ index 0000000..1111111
             })
             .collect::<Vec<_>>();
         assert!(docs_genes.len() >= 3);
+    }
+
+    // ── #252 Supervised DEVLOOP expansion: new task-class boundary tests ──
+
+    #[test]
+    fn cargo_dep_upgrade_single_manifest_accepted() {
+        let files = vec!["Cargo.toml".to_string()];
+        let result = validate_bounded_cargo_dep_files(&files);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec!["Cargo.toml"]);
+    }
+
+    #[test]
+    fn cargo_dep_upgrade_nested_manifest_accepted() {
+        let files = vec!["crates/oris-runtime/Cargo.toml".to_string()];
+        let result = validate_bounded_cargo_dep_files(&files);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cargo_dep_upgrade_lock_file_accepted() {
+        let files = vec!["Cargo.lock".to_string()];
+        let result = validate_bounded_cargo_dep_files(&files);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn cargo_dep_upgrade_too_many_files_rejected_fail_closed() {
+        let files: Vec<String> = (0..6)
+            .map(|i| format!("crates/crate{i}/Cargo.toml"))
+            .collect();
+        let result = validate_bounded_cargo_dep_files(&files);
+        assert!(
+            result.is_err(),
+            "more than 5 manifests should be rejected fail-closed"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            MutationProposalContractReasonCode::UnsupportedTaskClass
+        );
+    }
+
+    #[test]
+    fn cargo_dep_upgrade_rs_source_file_rejected_fail_closed() {
+        let files = vec!["crates/oris-runtime/src/lib.rs".to_string()];
+        let result = validate_bounded_cargo_dep_files(&files);
+        assert!(
+            result.is_err(),
+            ".rs files must be rejected from dep-upgrade scope"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            MutationProposalContractReasonCode::OutOfBoundsPath
+        );
+    }
+
+    #[test]
+    fn cargo_dep_upgrade_path_traversal_rejected_fail_closed() {
+        let files = vec!["../outside/Cargo.toml".to_string()];
+        let result = validate_bounded_cargo_dep_files(&files);
+        assert!(
+            result.is_err(),
+            "path traversal must be rejected fail-closed"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            MutationProposalContractReasonCode::OutOfBoundsPath
+        );
+    }
+
+    #[test]
+    fn lint_fix_src_rs_file_accepted() {
+        let files = vec!["src/lib.rs".to_string()];
+        let result = validate_bounded_lint_files(&files);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), vec!["src/lib.rs"]);
+    }
+
+    #[test]
+    fn lint_fix_crates_rs_file_accepted() {
+        let files = vec!["crates/oris-runtime/src/agent.rs".to_string()];
+        let result = validate_bounded_lint_files(&files);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn lint_fix_examples_rs_file_accepted() {
+        let files = vec!["examples/evo_oris_repo/src/main.rs".to_string()];
+        let result = validate_bounded_lint_files(&files);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn lint_fix_too_many_files_rejected_fail_closed() {
+        let files: Vec<String> = (0..6).map(|i| format!("src/module{i}.rs")).collect();
+        let result = validate_bounded_lint_files(&files);
+        assert!(
+            result.is_err(),
+            "more than 5 source files should be rejected fail-closed"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            MutationProposalContractReasonCode::UnsupportedTaskClass
+        );
+    }
+
+    #[test]
+    fn lint_fix_non_rs_extension_rejected_fail_closed() {
+        let files = vec!["src/config.toml".to_string()];
+        let result = validate_bounded_lint_files(&files);
+        assert!(
+            result.is_err(),
+            "non-.rs files must be rejected from lint-fix scope"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            MutationProposalContractReasonCode::OutOfBoundsPath
+        );
+    }
+
+    #[test]
+    fn lint_fix_out_of_allowed_prefix_rejected_fail_closed() {
+        let files = vec!["scripts/helper.rs".to_string()];
+        let result = validate_bounded_lint_files(&files);
+        assert!(
+            result.is_err(),
+            "rs files outside allowed prefixes must be rejected fail-closed"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            MutationProposalContractReasonCode::OutOfBoundsPath
+        );
+    }
+
+    #[test]
+    fn lint_fix_path_traversal_rejected_fail_closed() {
+        let files = vec!["../../outside/src/lib.rs".to_string()];
+        let result = validate_bounded_lint_files(&files);
+        assert!(
+            result.is_err(),
+            "path traversal must be rejected fail-closed"
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            MutationProposalContractReasonCode::OutOfBoundsPath
+        );
+    }
+
+    #[test]
+    fn proposal_scope_classifies_cargo_dep_upgrade() {
+        use oris_agent_contract::{
+            AgentTask, BoundedTaskClass, HumanApproval, MutationProposal, SupervisedDevloopRequest,
+        };
+        let request = SupervisedDevloopRequest {
+            task: AgentTask {
+                id: "t-dep".into(),
+                description: "bump serde".into(),
+            },
+            proposal: MutationProposal {
+                intent: "bump serde to 1.0.200".into(),
+                expected_effect: "version field updated".into(),
+                files: vec!["Cargo.toml".to_string()],
+            },
+            approval: HumanApproval {
+                approved: true,
+                approver: Some("alice".into()),
+                note: None,
+            },
+        };
+        let scope_result = supervised_devloop_mutation_proposal_scope(&request);
+        assert!(scope_result.is_ok());
+        assert_eq!(
+            scope_result.unwrap().task_class,
+            BoundedTaskClass::CargoDepUpgrade
+        );
+    }
+
+    #[test]
+    fn proposal_scope_classifies_lint_fix() {
+        use oris_agent_contract::{
+            AgentTask, BoundedTaskClass, HumanApproval, MutationProposal, SupervisedDevloopRequest,
+        };
+        let request = SupervisedDevloopRequest {
+            task: AgentTask {
+                id: "t-lint".into(),
+                description: "cargo fmt fix".into(),
+            },
+            proposal: MutationProposal {
+                intent: "apply cargo fmt to src/lib.rs".into(),
+                expected_effect: "formatting normalized".into(),
+                files: vec!["src/lib.rs".to_string()],
+            },
+            approval: HumanApproval {
+                approved: true,
+                approver: Some("alice".into()),
+                note: None,
+            },
+        };
+        let scope_result = supervised_devloop_mutation_proposal_scope(&request);
+        assert!(scope_result.is_ok());
+        assert_eq!(scope_result.unwrap().task_class, BoundedTaskClass::LintFix);
     }
 }

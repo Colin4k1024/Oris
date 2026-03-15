@@ -701,6 +701,12 @@ fn mutation_needed_failure_defaults(
 pub enum BoundedTaskClass {
     DocsSingleFile,
     DocsMultiFile,
+    /// Dependency version bump: restricted to `Cargo.toml` / `Cargo.lock`
+    /// paths, version fields only, max 5 manifests.
+    CargoDepUpgrade,
+    /// Lint / formatting fix: auto-fixable `cargo fmt` or `cargo clippy --fix`
+    /// changes, no logic modifications, max 5 source files.
+    LintFix,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
