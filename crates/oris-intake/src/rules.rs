@@ -80,6 +80,14 @@ pub struct RuleApplication {
     pub should_skip: bool,
 }
 
+/// Result of applying all matching rules to a single intake event.
+#[derive(Clone, Debug)]
+pub struct RuleProcessingResult {
+    pub event: IntakeEvent,
+    pub applications: Vec<RuleApplication>,
+    pub should_skip: bool,
+}
+
 /// Rule engine for evaluating and applying rules
 pub struct RuleEngine {
     rules: Vec<IntakeRule>,
@@ -227,6 +235,44 @@ impl RuleEngine {
         results
     }
 
+    /// Apply matching rules to an event and return the processed result.
+    pub fn apply(&self, event: &IntakeEvent, signals: &[ExtractedSignal]) -> RuleProcessingResult {
+        let applications = self.evaluate(event, signals);
+        let mut modified_event = event.clone();
+        let mut should_skip = false;
+
+        for application in &applications {
+            should_skip |= application.should_skip;
+
+            for action in &application.actions_applied {
+                match action {
+                    RuleAction::SetSeverity { severity } => {
+                        if let Some(mapped) = parse_severity(severity) {
+                            modified_event.severity = mapped;
+                        }
+                    }
+                    RuleAction::AddSignals { signals } => {
+                        for signal in signals {
+                            if !modified_event.signals.contains(signal) {
+                                modified_event.signals.push(signal.clone());
+                            }
+                        }
+                    }
+                    RuleAction::Skip => {
+                        should_skip = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        RuleProcessingResult {
+            event: modified_event,
+            applications,
+            should_skip,
+        }
+    }
+
     /// Check if conditions match
     fn matches_conditions(
         &self,
@@ -319,6 +365,17 @@ impl RuleEngine {
 impl Default for RuleEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn parse_severity(value: &str) -> Option<crate::source::IssueSeverity> {
+    match value.to_ascii_lowercase().as_str() {
+        "critical" => Some(crate::source::IssueSeverity::Critical),
+        "high" => Some(crate::source::IssueSeverity::High),
+        "medium" => Some(crate::source::IssueSeverity::Medium),
+        "low" => Some(crate::source::IssueSeverity::Low),
+        "info" => Some(crate::source::IssueSeverity::Info),
+        _ => None,
     }
 }
 
@@ -525,5 +582,38 @@ mod tests {
 
         engine.add_rule(rule);
         assert!(engine.get_rules().len() > 4);
+    }
+
+    #[test]
+    fn test_apply_returns_skip_when_matching_rule_requests_it() {
+        let engine = RuleEngine::with_rules(vec![IntakeRule {
+            id: "skip_high".to_string(),
+            name: "Skip high severity".to_string(),
+            description: "skip event".to_string(),
+            priority: 100,
+            enabled: true,
+            conditions: RuleConditions {
+                severities: vec!["high".to_string()],
+                ..Default::default()
+            },
+            actions: vec![RuleAction::Skip],
+        }]);
+
+        let event = IntakeEvent {
+            event_id: "evt-1".to_string(),
+            source_type: IntakeSourceType::Github,
+            source_event_id: None,
+            title: "Build failed".to_string(),
+            description: "compiler broke".to_string(),
+            severity: IssueSeverity::High,
+            signals: vec![],
+            raw_payload: None,
+            timestamp_ms: 0,
+        };
+
+        let result = engine.apply(&event, &[]);
+        assert!(result.should_skip);
+        assert_eq!(result.applications.len(), 1);
+        assert_eq!(result.applications[0].rule_id, "skip_high");
     }
 }

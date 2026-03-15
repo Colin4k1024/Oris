@@ -1,5 +1,6 @@
 //! Deduplication, priority evaluation, and rate limiting for intake events
 
+use crate::rules::RuleEngine;
 use crate::source::IntakeEvent;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -290,6 +291,7 @@ pub struct RateLimiterStats {
 /// Auto-prioritizer combining deduplication, priority evaluation, and rate limiting
 pub struct AutoPrioritizer {
     deduplicator: Deduplicator,
+    rule_engine: RuleEngine,
     evaluator: PriorityEvaluator,
     limiter: RateLimiter,
 }
@@ -298,14 +300,22 @@ impl AutoPrioritizer {
     /// Create a new auto-prioritizer
     pub fn new(
         deduplicator: Deduplicator,
+        rule_engine: RuleEngine,
         evaluator: PriorityEvaluator,
         limiter: RateLimiter,
     ) -> Self {
         Self {
             deduplicator,
+            rule_engine,
             evaluator,
             limiter,
         }
+    }
+
+    /// Override the rule engine used between deduplication and prioritization.
+    pub fn with_rule_engine(mut self, rule_engine: RuleEngine) -> Self {
+        self.rule_engine = rule_engine;
+        self
     }
 
     /// Process an event through the full prioritization pipeline
@@ -319,18 +329,28 @@ impl AutoPrioritizer {
             return PrioritizationResult::Duplicate;
         }
 
+        let rule_result = self.rule_engine.apply(event, signals);
+        if rule_result.should_skip {
+            return PrioritizationResult::Filtered {
+                rule_ids: rule_result
+                    .applications
+                    .into_iter()
+                    .map(|application| application.rule_id)
+                    .collect(),
+            };
+        }
+
+        let event = rule_result.event;
+
         // Check rate limit
         if let Err(backoff) = self.limiter.try_acquire() {
             return PrioritizationResult::RateLimited(backoff);
         }
 
         // Evaluate priority
-        let priority = self.evaluator.evaluate(event, signals);
+        let priority = self.evaluator.evaluate(&event, signals);
 
-        PrioritizationResult::Processed(PrioritizedEvent {
-            event: event.clone(),
-            priority,
-        })
+        PrioritizationResult::Processed(PrioritizedEvent { event, priority })
     }
 
     /// Release a processed event (for rate limiting)
@@ -351,6 +371,7 @@ impl Default for AutoPrioritizer {
     fn default() -> Self {
         Self::new(
             Deduplicator::default(),
+            RuleEngine::default(),
             PriorityEvaluator::default(),
             RateLimiter::default(),
         )
@@ -364,6 +385,8 @@ pub enum PrioritizationResult {
     Processed(PrioritizedEvent),
     /// Event is a duplicate
     Duplicate,
+    /// Event was filtered out by the rule engine.
+    Filtered { rule_ids: Vec<String> },
     /// Event is rate limited
     RateLimited(u64),
 }
@@ -385,6 +408,7 @@ pub struct PrioritizerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::{IntakeRule, RuleAction, RuleConditions};
     use crate::source::{IntakeSourceType, IssueSeverity};
 
     #[test]
@@ -469,5 +493,42 @@ mod tests {
 
         let result = prioritizer.process(&event, &[]);
         assert!(matches!(result, PrioritizationResult::Processed(_)));
+    }
+
+    #[test]
+    fn test_auto_prioritizer_filters_event_via_rule_engine() {
+        let prioritizer =
+            AutoPrioritizer::default().with_rule_engine(RuleEngine::with_rules(vec![IntakeRule {
+                id: "skip_http".to_string(),
+                name: "Skip http events".to_string(),
+                description: "filter low-value http events".to_string(),
+                priority: 100,
+                enabled: true,
+                conditions: RuleConditions {
+                    source_types: vec!["http".to_string()],
+                    ..Default::default()
+                },
+                actions: vec![RuleAction::Skip],
+            }]));
+
+        let event = IntakeEvent {
+            event_id: "test-filter".to_string(),
+            source_type: IntakeSourceType::Http,
+            source_event_id: Some("webhook-1".to_string()),
+            title: "Noisy webhook".to_string(),
+            description: "ignore this".to_string(),
+            severity: IssueSeverity::Low,
+            signals: vec![],
+            raw_payload: None,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        };
+
+        let result = prioritizer.process(&event, &[]);
+        match result {
+            PrioritizationResult::Filtered { rule_ids } => {
+                assert_eq!(rule_ids, vec!["skip_http".to_string()]);
+            }
+            other => panic!("expected Filtered result, got {:?}", other),
+        }
     }
 }
