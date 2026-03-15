@@ -1,6 +1,6 @@
 [package]
 name = "oris-intake"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 publish = ["crates-io"]
@@ -9,7 +9,7 @@ description = "Automatic issue intake system for Oris self-evolution."
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-oris-evolution = { version = "0.3.0", path = "../oris-evolution" }
+oris-evolution = { version = "0.3.2", path = "../oris-evolution" }
 regex-lite = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

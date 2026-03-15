@@ -287,6 +287,167 @@ pub fn from_gitlab_pipeline(event: GitlabPipelineEvent) -> IntakeResult<IntakeEv
     })
 }
 
+/// GitHub check_run event payload (check_run failed / completed)
+#[derive(Clone, Debug, Deserialize)]
+pub struct GithubCheckRunEvent {
+    pub action: Option<String>,
+    pub check_run: Option<GithubCheckRun>,
+    pub repository: Option<GithubRepository>,
+}
+
+/// Details of a single check run
+#[derive(Clone, Debug, Deserialize)]
+pub struct GithubCheckRun {
+    pub id: i64,
+    pub name: String,
+    pub head_sha: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub html_url: Option<String>,
+    pub output: Option<GithubCheckRunOutput>,
+}
+
+/// Check run log output summary
+#[derive(Clone, Debug, Deserialize)]
+pub struct GithubCheckRunOutput {
+    pub title: Option<String>,
+    pub summary: Option<String>,
+}
+
+/// Convert a GitHub check_run event into an intake event.
+pub fn from_github_check_run(event: GithubCheckRunEvent) -> IntakeResult<IntakeEvent> {
+    let check = event.check_run.as_ref();
+    let check_name = check.map(|c| c.name.as_str()).unwrap_or("unknown");
+    let conclusion = check
+        .and_then(|c| c.conclusion.as_deref())
+        .unwrap_or("unknown");
+
+    let severity = match conclusion {
+        "failure" | "timed_out" => IssueSeverity::High,
+        "cancelled" | "action_required" => IssueSeverity::Medium,
+        "success" | "neutral" | "skipped" => IssueSeverity::Low,
+        _ => IssueSeverity::Info,
+    };
+
+    let output_title = check
+        .and_then(|c| c.output.as_ref())
+        .and_then(|o| o.title.as_deref())
+        .unwrap_or("");
+    let output_summary = check
+        .and_then(|c| c.output.as_ref())
+        .and_then(|o| o.summary.as_deref())
+        .unwrap_or("");
+
+    let title = format!("GitHub check_run '{}' {}", check_name, conclusion);
+    let description = format!(
+        "Check '{}' concluded '{}' on commit '{}' for repository '{}'. {}: {}",
+        check_name,
+        conclusion,
+        check.map(|c| c.head_sha.as_str()).unwrap_or(""),
+        event
+            .repository
+            .as_ref()
+            .map(|r| r.full_name.as_str())
+            .unwrap_or(""),
+        output_title,
+        output_summary
+    );
+
+    let mut signals = vec![format!("check_run_conclusion:{}", conclusion)];
+    if let Some(c) = check {
+        signals.push(format!("check_run_name:{}", c.name));
+        signals.push(format!("commit_sha:{}", c.head_sha));
+    }
+    if !output_title.is_empty() {
+        signals.push(format!("output_title:{}", output_title));
+    }
+    if !output_summary.is_empty() {
+        signals.push(format!("output_summary:{}", output_summary));
+    }
+
+    Ok(IntakeEvent {
+        event_id: uuid::Uuid::new_v4().to_string(),
+        source_type: IntakeSourceType::Github,
+        source_event_id: check.map(|c| c.id.to_string()),
+        title,
+        description,
+        severity,
+        signals,
+        raw_payload: None,
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+    })
+}
+
+/// GitHub intake source — handles `workflow_run` and `check_run` webhook payloads.
+///
+/// Dispatches on the `X-GitHub-Event` header. Because this source operates over
+/// raw bytes, it accepts an optional `event_type` hint at construction time that
+/// mirrors the `X-GitHub-Event` header value (`"workflow_run"` or `"check_run"`).
+#[derive(Clone, Debug)]
+pub struct GithubIntakeSource {
+    /// The expected GitHub event type (mirrors X-GitHub-Event header).
+    /// Defaults to dispatching by presence of known top-level keys when `None`.
+    pub event_type: Option<String>,
+}
+
+impl GithubIntakeSource {
+    /// Create a new source that processes the given GitHub event type.
+    pub fn new(event_type: impl Into<String>) -> Self {
+        Self {
+            event_type: Some(event_type.into()),
+        }
+    }
+
+    /// Create a source that auto-detects the event type from payload shape.
+    pub fn auto() -> Self {
+        Self { event_type: None }
+    }
+
+    fn dispatch(&self, payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
+        let value: serde_json::Value =
+            serde_json::from_slice(payload).map_err(|e| IntakeError::ParseError(e.to_string()))?;
+
+        let hint = self.event_type.as_deref().unwrap_or_else(|| {
+            // Auto-detect: check_run events have a `check_run` top-level key
+            if value.get("check_run").is_some() {
+                "check_run"
+            } else {
+                "workflow_run"
+            }
+        });
+
+        match hint {
+            "check_run" => {
+                let ev: GithubCheckRunEvent = serde_json::from_value(value)
+                    .map_err(|e| IntakeError::ParseError(e.to_string()))?;
+                from_github_check_run(ev).map(|e| vec![e])
+            }
+            _ => {
+                let ev: GithubWorkflowEvent = serde_json::from_value(value)
+                    .map_err(|e| IntakeError::ParseError(e.to_string()))?;
+                from_github_workflow(ev).map(|e| vec![e])
+            }
+        }
+    }
+}
+
+impl IntakeSource for GithubIntakeSource {
+    fn source_type(&self) -> IntakeSourceType {
+        IntakeSourceType::Github
+    }
+
+    fn process(&self, payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
+        self.dispatch(payload)
+    }
+
+    fn validate(&self, payload: &[u8]) -> IntakeResult<()> {
+        // Require valid UTF-8 JSON
+        let _: serde_json::Value = serde_json::from_slice(payload)
+            .map_err(|e| IntakeError::ParseError(format!("invalid JSON: {}", e)))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
