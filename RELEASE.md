@@ -1,5 +1,15 @@
 # Oris Runtime — Consolidated Release History
 
+## Current Capability Note
+
+As of March 15, 2026, the most accurate product statement for the checked-in self-evolution surface is:
+
+> Oris supports a supervised closed-loop self-evolution path with bounded acceptance gating.
+
+The repository currently supports replay-driven learning, auditable mutation proposal contracts, replay-assisted supervised execution with fail-closed safety, and bounded branch or pull-request artifact preparation. It does not yet claim a fully autonomous software-improvement loop that independently discovers issues, merges code, publishes packages, or performs releases.
+
+See [docs/evokernel/current-project-status.md](docs/evokernel/current-project-status.md) for the full current boundary statement.
+
 This document merges all release notes from **v0.1.0** through **v0.30.0**.
 The latest standalone release note remains in `RELEASE_v0.31.0.md`.
 

@@ -24,6 +24,8 @@ Current checked-in boundary:
 - Experience capture, replay reuse, and fail-closed policy enforcement.
 - No claim of fully autonomous issue discovery, merge, publish, or release.
 
+See [the current project status note](docs/evokernel/current-project-status.md) for a concise external-facing statement of the shipped boundary.
+
 ---
 
 ## Capability Boundary
