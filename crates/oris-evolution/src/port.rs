@@ -1,4 +1,4 @@
-//! Port traits for Detect and Execute stage integration.
+//! Port traits for Detect, Execute, Validate, and Evaluate stage integration.
 //!
 //! These traits let `StandardEvolutionPipeline` accept injected implementations
 //! without directly depending on `oris-evokernel` or `oris-sandbox` (which
@@ -7,11 +7,14 @@
 //! Canonical implementations live in `oris-evokernel`:
 //! - `RuntimeSignalExtractorAdapter` implements `SignalExtractorPort`
 //! - `LocalSandboxAdapter` implements `SandboxPort`
+//! - `SandboxOutputValidateAdapter` implements `ValidatePort`
+//! - `MutationEvaluatorAdapter` implements `EvaluatePort`
 
 use serde_json::Value;
 
 use crate::core::PreparedMutation;
 use crate::evolver::EvolutionSignal;
+use crate::pipeline::EvaluationResult;
 
 /// Input passed to the signal extractor during the Detect stage.
 #[derive(Clone, Debug, Default)]
@@ -136,4 +139,64 @@ pub trait GeneStorePersistPort: Send + Sync {
     ///
     /// Returns `true` on success.
     fn mark_reused(&self, gene_id: &str, capsule_ids: &[String]) -> bool;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ValidatePort
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Input for the Validate stage.
+#[derive(Clone, Debug)]
+pub struct ValidateInput {
+    /// Proposal ID being validated.
+    pub proposal_id: String,
+    /// Whether the sandbox execution succeeded.
+    pub execution_success: bool,
+    /// Stdout captured during sandbox execution.
+    pub stdout: String,
+    /// Stderr captured during sandbox execution.
+    pub stderr: String,
+}
+
+/// Trait for validators that can be injected into the Validate stage.
+///
+/// Implement this in `oris-evokernel` and pass an `Arc<dyn ValidatePort>`
+/// when constructing `StandardEvolutionPipeline`. The trait uses a
+/// synchronous contract so that `EvolutionPipeline::execute` remains
+/// synchronous at the pipeline level; async adapters should block internally.
+pub trait ValidatePort: Send + Sync {
+    /// Validate a mutation proposal based on its sandbox execution output.
+    ///
+    /// Returns a `ValidationResult` with `passed`, `score`, and any issues.
+    fn validate(&self, input: &ValidateInput) -> crate::evolver::ValidationResult;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EvaluatePort
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Input for the Evaluate stage.
+#[derive(Clone, Debug)]
+pub struct EvaluateInput {
+    /// Proposal ID being evaluated.
+    pub proposal_id: String,
+    /// Human-readable description of what the mutation is trying to achieve.
+    pub intent: String,
+    /// The original code/configuration being mutated.
+    pub original: String,
+    /// The proposed replacement.
+    pub proposed: String,
+    /// Signal descriptions extracted during the Detect stage.
+    pub signals: Vec<String>,
+}
+
+/// Trait for evaluators that can be injected into the Evaluate stage.
+///
+/// Implement this in `oris-evokernel` and pass an `Arc<dyn EvaluatePort>`
+/// when constructing `StandardEvolutionPipeline`. The trait uses a
+/// synchronous contract so that `EvolutionPipeline::execute` remains
+/// synchronous at the pipeline level; async adapters should block internally.
+pub trait EvaluatePort: Send + Sync {
+    /// Evaluate a mutation proposal and return an `EvaluationResult`.
+    fn evaluate(&self, input: &EvaluateInput) -> EvaluationResult;
 }
