@@ -22,6 +22,9 @@
 //! Every non-success path is fail-closed and captured in `LoopRunRecord`.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use oris_evolution::{EvolutionPipelinePort, EvolutionPipelineRequest, PipelineResult};
 
 use crate::acceptance_gate::{AcceptanceGate, PipelineOutcomeView};
 use crate::github_adapter::{CreatedPullRequest, PrPayload};
@@ -177,6 +180,8 @@ pub enum IssueOutcome {
     NoProposal,
     /// The acceptance gate rejected the proposal.
     GateRejected { reason: String },
+    /// The evolution pipeline rejected or failed the proposal before PR delivery.
+    PipelineFailed { reason: String },
     /// PR delivery failed (e.g. GitHub API error).
     PrDeliveryFailed { reason: String },
     /// PR was created; release gate was not evaluated.
@@ -225,6 +230,7 @@ pub struct AutonomousLoop {
     discovery: Box<dyn IssueDiscoveryPort>,
     generator: Box<dyn ProposalGeneratorPort>,
     pr_delivery: Box<dyn PrDeliveryPort>,
+    pipeline_port: Option<Arc<dyn EvolutionPipelinePort>>,
     config: AutonomousLoopConfig,
 }
 
@@ -240,8 +246,15 @@ impl AutonomousLoop {
             discovery,
             generator,
             pr_delivery,
+            pipeline_port: None,
             config,
         }
+    }
+
+    /// Attach an evolution pipeline gate that runs before PR delivery.
+    pub fn with_pipeline_port(mut self, pipeline_port: Arc<dyn EvolutionPipelinePort>) -> Self {
+        self.pipeline_port = Some(pipeline_port);
+        self
     }
 
     /// Execute one iteration of the autonomous loop.
@@ -312,7 +325,18 @@ impl AutonomousLoop {
         }
         *gate_passed += 1;
 
-        // Step 3 — deliver the PR.
+        // Step 3 — run execute/validate/evaluate before any external delivery.
+        if let Some(ref pipeline_port) = self.pipeline_port {
+            let pipeline_result =
+                pipeline_port.run_pipeline(&self.build_pipeline_request(issue, &proposal));
+            if !pipeline_result.success {
+                return IssueOutcome::PipelineFailed {
+                    reason: pipeline_failure_reason(&pipeline_result),
+                };
+            }
+        }
+
+        // Step 4 — deliver the PR.
         let payload = PrPayload::new(
             &issue.issue_id,
             &format!("self-evolution/{}", slugify(&issue.issue_id)),
@@ -331,7 +355,7 @@ impl AutonomousLoop {
         };
         *prs_created += 1;
 
-        // Step 4 — release gate.
+        // Step 5 — release gate.
         match self.config.release_mode {
             ReleaseMode::Disabled => IssueOutcome::PrCreated {
                 pr_number: pr.number,
@@ -385,6 +409,21 @@ impl AutonomousLoop {
             within_time_budget: true,
         }
     }
+
+    fn build_pipeline_request(
+        &self,
+        issue: &DiscoveredIssue,
+        proposal: &GeneratedProposal,
+    ) -> EvolutionPipelineRequest {
+        EvolutionPipelineRequest {
+            issue_id: issue.issue_id.clone(),
+            intent: proposal.intent.clone(),
+            signals: issue.signals.clone(),
+            files: proposal.files.clone(),
+            expected_effect: proposal.expected_effect.clone(),
+            diff_payload: proposal.diff_payload.clone(),
+        }
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -417,6 +456,21 @@ fn stable_evidence_id(proposal: &GeneratedProposal) -> String {
     format!("evidence-{:016x}", hasher.finish())
 }
 
+fn pipeline_failure_reason(result: &PipelineResult) -> String {
+    result.error.clone().unwrap_or_else(|| {
+        result
+            .stage_states
+            .iter()
+            .find_map(|stage| match &stage.state {
+                oris_evolution::PipelineStageState::Failed(reason) => {
+                    Some(format!("{}: {}", stage.stage_name, reason))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| "evolution pipeline failed".to_string())
+    })
+}
+
 // ── In-memory stubs for tests ──────────────────────────────────────────────
 
 /// A `IssueDiscoveryPort` stub that returns a canned list of issues.
@@ -444,6 +498,53 @@ impl ProposalGeneratorPort for FixedProposalGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    struct FixedPipelinePort {
+        result: PipelineResult,
+        requests: Mutex<Vec<EvolutionPipelineRequest>>,
+    }
+
+    impl FixedPipelinePort {
+        fn success() -> Self {
+            Self {
+                result: PipelineResult {
+                    success: true,
+                    stage_states: vec![],
+                    error: None,
+                },
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn failure(reason: &str) -> Self {
+            Self {
+                result: PipelineResult {
+                    success: false,
+                    stage_states: vec![],
+                    error: Some(reason.to_string()),
+                },
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn recorded_requests(&self) -> Vec<EvolutionPipelineRequest> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    impl EvolutionPipelinePort for FixedPipelinePort {
+        fn run_pipeline(&self, request: &EvolutionPipelineRequest) -> PipelineResult {
+            self.requests
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(request.clone());
+            self.result.clone()
+        }
+    }
 
     fn sample_issue(id: &str) -> DiscoveredIssue {
         DiscoveredIssue {
@@ -559,6 +660,62 @@ mod tests {
         let summary = loop_.run();
         assert_eq!(summary.gate_passed, 1);
         assert_eq!(summary.prs_created, 1);
+    }
+
+    #[test]
+    fn pipeline_success_runs_before_pr_delivery() {
+        let issue = sample_issue("issue-pipeline-ok");
+        let proposal = sample_proposal("issue-pipeline-ok");
+        let pipeline = Arc::new(FixedPipelinePort::success());
+
+        let loop_ = AutonomousLoop::new(
+            Box::new(FixedIssueDiscovery(vec![issue])),
+            Box::new(FixedProposalGenerator(Some(proposal))),
+            Box::new(make_delivery(true)),
+            AutonomousLoopConfig {
+                approval_mode: ApprovalMode::Automatic,
+                release_mode: ReleaseMode::GateOnly,
+                max_issues_per_run: 5,
+            },
+        )
+        .with_pipeline_port(pipeline.clone());
+
+        let summary = loop_.run();
+        assert_eq!(summary.prs_created, 1);
+        assert_eq!(pipeline.recorded_requests().len(), 1);
+        assert_eq!(
+            pipeline.recorded_requests()[0].issue_id,
+            "issue-pipeline-ok"
+        );
+    }
+
+    #[test]
+    fn pipeline_failure_blocks_pr_creation() {
+        let issue = sample_issue("issue-pipeline-fail");
+        let proposal = sample_proposal("issue-pipeline-fail");
+        let pipeline = Arc::new(FixedPipelinePort::failure("validation failed"));
+
+        let loop_ = AutonomousLoop::new(
+            Box::new(FixedIssueDiscovery(vec![issue])),
+            Box::new(FixedProposalGenerator(Some(proposal))),
+            Box::new(make_delivery(true)),
+            AutonomousLoopConfig {
+                approval_mode: ApprovalMode::Automatic,
+                release_mode: ReleaseMode::GateOnly,
+                max_issues_per_run: 5,
+            },
+        )
+        .with_pipeline_port(pipeline.clone());
+
+        let summary = loop_.run();
+        assert_eq!(summary.prs_created, 0);
+        assert_eq!(pipeline.recorded_requests().len(), 1);
+        match &summary.records[0].outcome {
+            IssueOutcome::PipelineFailed { reason } => {
+                assert!(reason.contains("validation failed"));
+            }
+            other => panic!("expected PipelineFailed, got {:?}", other),
+        }
     }
 
     // ── Fail-closed boundary tests ─────────────────────────────────────────

@@ -196,3 +196,36 @@ pub trait EvaluatePort: Send + Sync {
     /// evaluator is injected.
     fn evaluate(&self, input: &EvaluateInput) -> crate::pipeline::EvaluationResult;
 }
+
+// ── Orchestrator pipeline port ───────────────────────────────────────────────
+
+/// Request passed from higher-level orchestrators into the evolution pipeline.
+///
+/// This keeps `oris-evolution` decoupled from `oris-orchestrator` while still
+/// exposing a stable contract for running execute/validate/evaluate steps
+/// against a generated mutation proposal.
+#[derive(Clone, Debug, Default)]
+pub struct EvolutionPipelineRequest {
+    /// Upstream issue or run identifier.
+    pub issue_id: String,
+    /// Human-readable intent for the proposed mutation.
+    pub intent: String,
+    /// Input signal tokens that motivated the mutation.
+    pub signals: Vec<String>,
+    /// File paths targeted by the mutation.
+    pub files: Vec<String>,
+    /// Expected user-visible outcome after the mutation is applied.
+    pub expected_effect: String,
+    /// Unified diff payload or equivalent serialized mutation content.
+    pub diff_payload: String,
+}
+
+/// Port for orchestrators that want to run an evolution pipeline before taking
+/// an external side effect such as PR creation.
+pub trait EvolutionPipelinePort: Send + Sync {
+    /// Execute the relevant pipeline stages for the provided request.
+    ///
+    /// Implementations should fail closed and report that failure through the
+    /// returned `PipelineResult`.
+    fn run_pipeline(&self, request: &EvolutionPipelineRequest) -> crate::pipeline::PipelineResult;
+}
