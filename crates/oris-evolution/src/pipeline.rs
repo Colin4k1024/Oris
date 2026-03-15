@@ -11,11 +11,14 @@
 //! - Reuse: Mark capsule as reusable
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
-use crate::core::{GeneCandidate, Selector, SelectorInput};
+use crate::core::{GeneCandidate, PreparedMutation, Selector, SelectorInput};
 use crate::evolver::{EvolutionSignal, MutationProposal, MutationRiskLevel, ValidationResult};
+use crate::port::{SandboxPort, SignalExtractorInput, SignalExtractorPort};
 
 /// Pipeline configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,6 +94,10 @@ pub enum PipelineStageState {
 pub struct PipelineContext {
     /// Input task context
     pub task_input: serde_json::Value,
+    /// Optional extractor input for the Detect stage.
+    /// When set and a `SignalExtractorPort` is injected into the pipeline,
+    /// the Detect stage will call the extractor to populate `signals`.
+    pub extractor_input: Option<SignalExtractorInput>,
     /// Signals extracted in Detect phase
     pub signals: Vec<EvolutionSignal>,
     /// Gene candidates selected in Select phase
@@ -107,12 +114,15 @@ pub struct PipelineContext {
     pub solidified_genes: Vec<String>,
     /// Reused capsules
     pub reused_capsules: Vec<String>,
+    /// Wall-clock duration recorded for each stage that ran.
+    pub stage_timings: HashMap<String, Duration>,
 }
 
 impl Default for PipelineContext {
     fn default() -> Self {
         Self {
             task_input: serde_json::json!({}),
+            extractor_input: None,
             signals: Vec::new(),
             candidates: Vec::new(),
             proposals: Vec::new(),
@@ -121,6 +131,7 @@ impl Default for PipelineContext {
             evaluation_result: None,
             solidified_genes: Vec::new(),
             reused_capsules: Vec::new(),
+            stage_timings: HashMap::new(),
         }
     }
 }
@@ -267,15 +278,36 @@ pub struct StandardEvolutionPipeline {
     name: String,
     config: EvolutionPipelineConfig,
     selector: Arc<dyn Selector>,
+    /// Optional signal extractor for the Detect stage.
+    signal_extractor: Option<Arc<dyn SignalExtractorPort>>,
+    /// Optional sandbox for the Execute stage.
+    sandbox: Option<Arc<dyn SandboxPort>>,
 }
 
 impl StandardEvolutionPipeline {
+    /// Create a pipeline with a mandatory selector and no injected ports.
+    /// Detect will pass through pre-populated signals; Execute will use a
+    /// no-op stub that records a synthetic success result.
     pub fn new(config: EvolutionPipelineConfig, selector: Arc<dyn Selector>) -> Self {
         Self {
             name: "standard".to_string(),
             config,
             selector,
+            signal_extractor: None,
+            sandbox: None,
         }
+    }
+
+    /// Attach a `SignalExtractorPort` for the Detect stage.
+    pub fn with_signal_extractor(mut self, extractor: Arc<dyn SignalExtractorPort>) -> Self {
+        self.signal_extractor = Some(extractor);
+        self
+    }
+
+    /// Attach a `SandboxPort` for the Execute stage.
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn SandboxPort>) -> Self {
+        self.sandbox = Some(sandbox);
+        self
     }
 }
 
@@ -297,9 +329,24 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
-            // Signals are already in context from external extraction
-            // For now, we pass through existing signals
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let t0 = Instant::now();
+            if let Some(ref extractor) = self.signal_extractor {
+                // Use the injected extractor to populate signals from raw input.
+                let input = context.extractor_input.clone().unwrap_or_default();
+                let extracted = extractor.extract(&input);
+                // Merge: keep any pre-populated signals and append new ones.
+                context.signals.extend(extracted);
+            }
+            // When no extractor is injected, signals already in context are
+            // used as-is (pass-through, backward-compatible behaviour).
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Detect.as_str().to_string(), elapsed);
+            let d_ms = elapsed.as_millis() as u64;
+            let last = stage_states.last_mut().unwrap();
+            last.state = PipelineStageState::Completed;
+            last.duration_ms = Some(d_ms);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Detect.as_str().to_string(),
@@ -314,6 +361,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
+            let t0 = Instant::now();
             let input = SelectorInput {
                 signals: context
                     .signals
@@ -331,8 +379,13 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             };
 
             context.candidates = self.selector.select(&input);
-
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Select.as_str().to_string(), elapsed);
+            let last = stage_states.last_mut().unwrap();
+            last.state = PipelineStageState::Completed;
+            last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Select.as_str().to_string(),
@@ -347,6 +400,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
+            let t0 = Instant::now();
             context.proposals = context
                 .candidates
                 .iter()
@@ -361,8 +415,13 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                     proposed_changes: serde_json::json!({}),
                 })
                 .collect();
-
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Mutate.as_str().to_string(), elapsed);
+            let last = stage_states.last_mut().unwrap();
+            last.state = PipelineStageState::Completed;
+            last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Mutate.as_str().to_string(),
@@ -371,18 +430,41 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             });
         }
 
-        // Execute phase - placeholder for sandbox execution
+        // Execute phase
         if self.config.enable_execute {
             let mut stage = StageState::new(PipelineStage::Execute.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
-            context.execution_result = Some(serde_json::json!({
-                "status": "success",
-                "output": "Mutation executed successfully"
-            }));
-
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let t0 = Instant::now();
+            if let (Some(ref sb), Some(proposal)) = (&self.sandbox, context.proposals.first()) {
+                // Build a minimal PreparedMutation from the first proposal so
+                // the sandbox can apply the change in an isolated workspace.
+                let mutation = build_prepared_mutation(proposal);
+                let result = sb.execute(&mutation);
+                context.execution_result = Some(result.to_json());
+                let last = stage_states.last_mut().unwrap();
+                last.state = if result.success {
+                    PipelineStageState::Completed
+                } else {
+                    PipelineStageState::Failed(result.message.clone())
+                };
+            } else {
+                // No sandbox injected — fall back to stub (backward-compatible).
+                context.execution_result = Some(serde_json::json!({
+                    "success": true,
+                    "stdout": "",
+                    "stderr": "",
+                    "duration_ms": 0,
+                    "message": "Mutation executed successfully (stub)"
+                }));
+                stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            }
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Execute.as_str().to_string(), elapsed);
+            stage_states.last_mut().unwrap().duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Execute.as_str().to_string(),
@@ -397,6 +479,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
+            let t0 = Instant::now();
             // Create a validation result for each proposal
             if let Some(proposal) = context.proposals.first() {
                 context.validation_result = Some(ValidationResult {
@@ -407,8 +490,13 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                     simulation_results: None,
                 });
             }
-
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Validate.as_str().to_string(), elapsed);
+            let last = stage_states.last_mut().unwrap();
+            last.state = PipelineStageState::Completed;
+            last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Validate.as_str().to_string(),
@@ -423,14 +511,20 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
+            let t0 = Instant::now();
             context.evaluation_result = Some(EvaluationResult {
                 score: 0.8,
                 improvements: vec!["Mutation applied successfully".to_string()],
                 regressions: vec![],
                 recommendation: EvaluationRecommendation::Accept,
             });
-
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Evaluate.as_str().to_string(), elapsed);
+            let last = stage_states.last_mut().unwrap();
+            last.state = PipelineStageState::Completed;
+            last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Evaluate.as_str().to_string(),
@@ -445,13 +539,19 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
+            let t0 = Instant::now();
             context.solidified_genes = context
                 .candidates
                 .iter()
                 .map(|c| c.gene.id.clone())
                 .collect();
-
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Solidify.as_str().to_string(), elapsed);
+            let last = stage_states.last_mut().unwrap();
+            last.state = PipelineStageState::Completed;
+            last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Solidify.as_str().to_string(),
@@ -466,14 +566,20 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
+            let t0 = Instant::now();
             // Mark capsules as reusable
             context.reused_capsules = context
                 .candidates
                 .iter()
                 .flat_map(|c| c.capsules.iter().map(|cap| cap.id.clone()))
                 .collect();
-
-            stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+            let elapsed = t0.elapsed();
+            context
+                .stage_timings
+                .insert(PipelineStage::Reuse.as_str().to_string(), elapsed);
+            let last = stage_states.last_mut().unwrap();
+            last.state = PipelineStageState::Completed;
+            last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Reuse.as_str().to_string(),
@@ -579,6 +685,40 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                 Ok(PipelineStageState::Completed)
             }
         }
+    }
+}
+
+/// Build a minimal `PreparedMutation` from a `MutationProposal`.
+///
+/// Used by the Execute stage when a `SandboxPort` is injected. The resulting
+/// mutation carries the proposal identifier and an empty unified-diff payload;
+/// real mutation generation (LLM or rule-based) will replace this in a later
+/// phase of the evolution pipeline.
+fn build_prepared_mutation(proposal: &MutationProposal) -> PreparedMutation {
+    use crate::core::{
+        ArtifactEncoding, MutationArtifact, MutationIntent, MutationTarget, RiskLevel,
+    };
+
+    PreparedMutation {
+        intent: MutationIntent {
+            id: proposal.proposal_id.clone(),
+            intent: proposal.description.clone(),
+            target: MutationTarget::WorkspaceRoot,
+            expected_effect: format!("Apply mutation for gene {}", proposal.gene_id),
+            risk: match proposal.risk_level {
+                MutationRiskLevel::Low => RiskLevel::Low,
+                MutationRiskLevel::Medium => RiskLevel::Medium,
+                MutationRiskLevel::High | MutationRiskLevel::Critical => RiskLevel::High,
+            },
+            signals: proposal.signal_ids.clone(),
+            spec_id: None,
+        },
+        artifact: MutationArtifact {
+            encoding: ArtifactEncoding::UnifiedDiff,
+            payload: String::new(),
+            base_revision: None,
+            content_hash: String::new(),
+        },
     }
 }
 
