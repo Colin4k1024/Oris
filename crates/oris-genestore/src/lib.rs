@@ -10,8 +10,10 @@
 //! - Aggregate queries: confidence stats, success-rate histograms — free with SQL
 
 pub mod migrate;
+pub mod replay_hook;
 pub mod store;
 pub mod types;
 
+pub use replay_hook::{ReplayCandidate, ReplayConfig, ReplayFeedbackHook, ReplayMetrics};
 pub use store::{GeneStore, SqliteGeneStore};
 pub use types::{Capsule, Gene, GeneMatch, GeneQuery};
