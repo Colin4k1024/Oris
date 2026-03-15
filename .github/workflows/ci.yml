@@ -158,6 +158,11 @@ jobs:
         with:
           command: test
           args: -p oris-runtime --features "full-evolution-experimental execution-server sqlite-persistence" execution_server::api_handlers::tests::evolution_a2a_ -- --nocapture --test-threads=1
+      - name: Run evolution feature wiring gate (Stream A CI gate)
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
       - name: Run Test
         uses: actions-rs/cargo@v1
         with:
