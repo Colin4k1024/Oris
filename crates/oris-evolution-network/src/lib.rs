@@ -1,6 +1,9 @@
 //! Protocol contracts for the Oris Evolution Network (OEN).
 
 pub mod gossip;
+pub mod sync;
+
+pub use sync::{GossipSyncEngine, QuarantineEntry, QuarantineState, QuarantineStore, SyncStats};
 
 use std::collections::BTreeSet;
 
