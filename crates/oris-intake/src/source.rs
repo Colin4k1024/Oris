@@ -1,6 +1,7 @@
 //! Intake source definitions and implementations
 
 use crate::{IntakeError, IntakeResult, IntakeSourceConfig};
+use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 
 /// Supported intake source types
@@ -448,6 +449,142 @@ impl IntakeSource for GithubIntakeSource {
     }
 }
 
+/// Log-file intake source for structured application or CI logs.
+///
+/// The current implementation scans UTF-8 log lines and emits one `IntakeEvent`
+/// for each line matching common failure patterns such as `error`, `panic`,
+/// `fatal`, or `exception`.
+#[derive(Clone, Debug)]
+pub struct LogFileIntakeSource {
+    patterns: Vec<Regex>,
+}
+
+impl LogFileIntakeSource {
+    /// Create a log intake source with default error-oriented patterns.
+    pub fn new() -> Self {
+        Self {
+            patterns: vec![
+                Regex::new(r"(?i)\berror\b").unwrap(),
+                Regex::new(r"(?i)\bpanic\b").unwrap(),
+                Regex::new(r"(?i)\bfatal\b").unwrap(),
+                Regex::new(r"(?i)\bexception\b").unwrap(),
+                Regex::new(r"(?i)test\s+failed").unwrap(),
+            ],
+        }
+    }
+
+    fn severity_for_line(&self, line: &str) -> IssueSeverity {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("panic") || lower.contains("fatal") {
+            IssueSeverity::High
+        } else if lower.contains("error") || lower.contains("exception") {
+            IssueSeverity::Medium
+        } else {
+            IssueSeverity::Low
+        }
+    }
+
+    fn matches(&self, line: &str) -> bool {
+        self.patterns.iter().any(|pattern| pattern.is_match(line))
+    }
+}
+
+impl Default for LogFileIntakeSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IntakeSource for LogFileIntakeSource {
+    fn source_type(&self) -> IntakeSourceType {
+        IntakeSourceType::LogFile
+    }
+
+    fn process(&self, payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
+        let contents = std::str::from_utf8(payload)
+            .map_err(|e| IntakeError::ParseError(format!("invalid UTF-8 log payload: {}", e)))?;
+
+        let events = contents
+            .lines()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || !self.matches(trimmed) {
+                    return None;
+                }
+
+                Some(IntakeEvent {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    source_type: IntakeSourceType::LogFile,
+                    source_event_id: Some(format!("line:{}", index + 1)),
+                    title: format!("LogFile error at line {}", index + 1),
+                    description: trimmed.to_string(),
+                    severity: self.severity_for_line(trimmed),
+                    signals: vec![format!("log_match:{}", trimmed)],
+                    raw_payload: Some(trimmed.to_string()),
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                })
+            })
+            .collect();
+
+        Ok(events)
+    }
+
+    fn validate(&self, payload: &[u8]) -> IntakeResult<()> {
+        std::str::from_utf8(payload)
+            .map_err(|e| IntakeError::ParseError(format!("invalid UTF-8 log payload: {}", e)))?;
+        Ok(())
+    }
+}
+
+/// Prometheus/Alertmanager intake source stub.
+///
+/// This is intentionally a compile-safe placeholder so downstream callers can
+/// wire the source type today while the concrete alert payload mapping is
+/// implemented in a later issue.
+#[derive(Clone, Debug, Default)]
+pub struct PrometheusIntakeSource;
+
+impl IntakeSource for PrometheusIntakeSource {
+    fn source_type(&self) -> IntakeSourceType {
+        IntakeSourceType::Prometheus
+    }
+
+    fn process(&self, _payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
+        todo!("Prometheus alert payload mapping is not implemented yet")
+    }
+
+    fn validate(&self, payload: &[u8]) -> IntakeResult<()> {
+        let _: serde_json::Value = serde_json::from_slice(payload)
+            .map_err(|e| IntakeError::ParseError(format!("invalid JSON: {}", e)))?;
+        Ok(())
+    }
+}
+
+/// Sentry intake source stub.
+///
+/// This is intentionally a compile-safe placeholder so downstream callers can
+/// depend on the source type now while the concrete Sentry envelope/event
+/// translation is implemented in a later issue.
+#[derive(Clone, Debug, Default)]
+pub struct SentryIntakeSource;
+
+impl IntakeSource for SentryIntakeSource {
+    fn source_type(&self) -> IntakeSourceType {
+        IntakeSourceType::Sentry
+    }
+
+    fn process(&self, _payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
+        todo!("Sentry event payload mapping is not implemented yet")
+    }
+
+    fn validate(&self, payload: &[u8]) -> IntakeResult<()> {
+        let _: serde_json::Value = serde_json::from_slice(payload)
+            .map_err(|e| IntakeError::ParseError(format!("invalid JSON: {}", e)))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +619,26 @@ mod tests {
         let intake = from_github_workflow(event).unwrap();
         assert_eq!(intake.severity, IssueSeverity::High);
         assert!(intake.signals.iter().any(|s| s.contains("failure")));
+    }
+
+    #[test]
+    fn test_log_file_intake_source_extracts_matching_lines() {
+        let source = LogFileIntakeSource::new();
+        let payload = b"info startup complete\nERROR database unavailable\npanic: worker crashed\n";
+
+        let events = source.process(payload).expect("log file should parse");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].source_type, IntakeSourceType::LogFile);
+        assert!(events[0].description.contains("ERROR database unavailable"));
+        assert_eq!(events[1].severity, IssueSeverity::High);
+    }
+
+    #[test]
+    fn test_prometheus_and_sentry_stubs_validate_json() {
+        let prometheus = PrometheusIntakeSource;
+        let sentry = SentryIntakeSource;
+
+        assert!(prometheus.validate(br#"{"alerts":[]}"#).is_ok());
+        assert!(sentry.validate(br#"{"event_id":"abc"}"#).is_ok());
     }
 }
