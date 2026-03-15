@@ -9,6 +9,7 @@ pub mod mutation_backend;
 pub mod static_analysis;
 pub mod types;
 
+pub use critic::{LlmCritic, MockCritic};
 pub use evaluator::MutationEvaluator;
 pub use mutation_backend::{
     ContractViolation, EnvRoutedBackend, LlmMutationBackend, MockMutationBackend, MutationRequest,

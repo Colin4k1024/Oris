@@ -137,3 +137,62 @@ pub trait GeneStorePersistPort: Send + Sync {
     /// Returns `true` on success.
     fn mark_reused(&self, gene_id: &str, capsule_ids: &[String]) -> bool;
 }
+
+// ── Validate stage port ───────────────────────────────────────────────────────
+
+/// Input passed to a `ValidatePort` implementation during the Validate stage.
+#[derive(Clone, Debug, Default)]
+pub struct ValidateInput {
+    /// Opaque proposal identifier from `oris-evolution`.
+    pub proposal_id: String,
+    /// Whether the prior Execute (sandbox) stage succeeded.
+    pub execution_success: bool,
+    /// Captured standard output from the sandbox execution.
+    pub stdout: String,
+    /// Captured standard error from the sandbox execution.
+    pub stderr: String,
+}
+
+/// Trait for validators injected into the Validate stage.
+///
+/// Implement this in `oris-evokernel` (or another crate that does not form
+/// a circular dependency with `oris-evolution`) and pass an
+/// `Arc<dyn ValidatePort>` via `StandardEvolutionPipeline::with_validate_port`.
+/// The trait is synchronous; async implementations must block internally
+/// (same pattern as `SandboxPort`).
+pub trait ValidatePort: Send + Sync {
+    /// Validate the mutation result and return a `ValidationResult`.
+    ///
+    /// The pipeline falls back to a stub result when no validator is injected.
+    fn validate(&self, input: &ValidateInput) -> crate::evolver::ValidationResult;
+}
+
+// ── Evaluate stage port ───────────────────────────────────────────────────────
+
+/// Input passed to an `EvaluatePort` implementation during the Evaluate stage.
+#[derive(Clone, Debug, Default)]
+pub struct EvaluateInput {
+    /// Opaque proposal identifier from `oris-evolution`.
+    pub proposal_id: String,
+    /// Human-readable intent description of the mutation.
+    pub intent: String,
+    /// The original source content / context before the mutation.
+    pub original: String,
+    /// The proposed replacement (diff payload or full proposed content).
+    pub proposed: String,
+    /// Signal tokens extracted by `oris-evokernel` that drove this mutation.
+    pub signals: Vec<String>,
+}
+
+/// Trait for mutation evaluators injected into the Evaluate stage.
+///
+/// Implement this in `oris-evokernel` using `oris-mutation-evaluator` as the
+/// backend and inject via `StandardEvolutionPipeline::with_evaluate_port`.
+/// The trait is synchronous; async implementations must block internally.
+pub trait EvaluatePort: Send + Sync {
+    /// Score / evaluate the mutation and return an `EvaluationResult`.
+    ///
+    /// The pipeline falls back to a stub result (score 0.8, Accept) when no
+    /// evaluator is injected.
+    fn evaluate(&self, input: &EvaluateInput) -> crate::pipeline::EvaluationResult;
+}

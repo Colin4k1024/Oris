@@ -18,7 +18,10 @@ use thiserror::Error;
 
 use crate::core::{GeneCandidate, PreparedMutation, Selector, SelectorInput};
 use crate::evolver::{EvolutionSignal, MutationProposal, MutationRiskLevel, ValidationResult};
-use crate::port::{GeneStorePersistPort, SandboxPort, SignalExtractorInput, SignalExtractorPort};
+use crate::port::{
+    EvaluateInput, EvaluatePort, GeneStorePersistPort, SandboxPort, SignalExtractorInput,
+    SignalExtractorPort, ValidateInput, ValidatePort,
+};
 
 /// Pipeline configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -284,6 +287,10 @@ pub struct StandardEvolutionPipeline {
     sandbox: Option<Arc<dyn SandboxPort>>,
     /// Optional gene store for the Solidify/Reuse stages.
     gene_store: Option<Arc<dyn GeneStorePersistPort>>,
+    /// Optional validator for the Validate stage.
+    validate_port: Option<Arc<dyn ValidatePort>>,
+    /// Optional evaluator for the Evaluate stage.
+    evaluate_port: Option<Arc<dyn EvaluatePort>>,
 }
 
 impl StandardEvolutionPipeline {
@@ -298,6 +305,8 @@ impl StandardEvolutionPipeline {
             signal_extractor: None,
             sandbox: None,
             gene_store: None,
+            validate_port: None,
+            evaluate_port: None,
         }
     }
 
@@ -316,6 +325,18 @@ impl StandardEvolutionPipeline {
     /// Attach a `GeneStorePersistPort` for the Solidify/Reuse stages.
     pub fn with_gene_store(mut self, gene_store: Arc<dyn GeneStorePersistPort>) -> Self {
         self.gene_store = Some(gene_store);
+        self
+    }
+
+    /// Attach a `ValidatePort` for the Validate stage.
+    pub fn with_validate_port(mut self, validator: Arc<dyn ValidatePort>) -> Self {
+        self.validate_port = Some(validator);
+        self
+    }
+
+    /// Attach an `EvaluatePort` for the Evaluate stage.
+    pub fn with_evaluate_port(mut self, evaluator: Arc<dyn EvaluatePort>) -> Self {
+        self.evaluate_port = Some(evaluator);
         self
     }
 }
@@ -482,29 +503,60 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             });
         }
 
-        // Validate phase - placeholder
+        // Validate phase
         if self.config.enable_validate {
             let mut stage = StageState::new(PipelineStage::Validate.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
             let t0 = Instant::now();
-            // Create a validation result for each proposal
             if let Some(proposal) = context.proposals.first() {
-                context.validation_result = Some(ValidationResult {
-                    proposal_id: proposal.proposal_id.clone(),
-                    passed: true,
-                    score: 0.8,
-                    issues: vec![],
-                    simulation_results: None,
-                });
+                let vresult = if let Some(ref vp) = self.validate_port {
+                    // Build input from execution result stored in context.
+                    let exec = context.execution_result.as_ref();
+                    let exec_success = exec
+                        .and_then(|v| v.get("success"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let stdout = exec
+                        .and_then(|v| v.get("stdout"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let stderr = exec
+                        .and_then(|v| v.get("stderr"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let input = ValidateInput {
+                        proposal_id: proposal.proposal_id.clone(),
+                        execution_success: exec_success,
+                        stdout,
+                        stderr,
+                    };
+                    vp.validate(&input)
+                } else {
+                    // Backward-compatible stub when no validator is injected.
+                    ValidationResult {
+                        proposal_id: proposal.proposal_id.clone(),
+                        passed: true,
+                        score: 0.8,
+                        issues: vec![],
+                        simulation_results: None,
+                    }
+                };
+                context.validation_result = Some(vresult);
             }
             let elapsed = t0.elapsed();
             context
                 .stage_timings
                 .insert(PipelineStage::Validate.as_str().to_string(), elapsed);
             let last = stage_states.last_mut().unwrap();
-            last.state = PipelineStageState::Completed;
+            // Mark stage Failed when validation did not pass so callers can detect it.
+            last.state = match &context.validation_result {
+                Some(r) if !r.passed => PipelineStageState::Failed("validation failed".to_string()),
+                _ => PipelineStageState::Completed,
+            };
             last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
@@ -514,19 +566,39 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             });
         }
 
-        // Evaluate phase - placeholder
+        // Evaluate phase
         if self.config.enable_evaluate {
             let mut stage = StageState::new(PipelineStage::Evaluate.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
 
             let t0 = Instant::now();
-            context.evaluation_result = Some(EvaluationResult {
-                score: 0.8,
-                improvements: vec!["Mutation applied successfully".to_string()],
-                regressions: vec![],
-                recommendation: EvaluationRecommendation::Accept,
-            });
+            context.evaluation_result = if let Some(ref ep) = self.evaluate_port {
+                if let Some(proposal) = context.proposals.first() {
+                    let input = EvaluateInput {
+                        proposal_id: proposal.proposal_id.clone(),
+                        intent: proposal.description.clone(),
+                        original: String::new(),
+                        proposed: String::new(),
+                        signals: context
+                            .signals
+                            .iter()
+                            .map(|s| s.description.clone())
+                            .collect(),
+                    };
+                    Some(ep.evaluate(&input))
+                } else {
+                    None
+                }
+            } else {
+                // Backward-compatible stub when no evaluator is injected.
+                Some(EvaluationResult {
+                    score: 0.8,
+                    improvements: vec!["Mutation applied successfully".to_string()],
+                    regressions: vec![],
+                    recommendation: EvaluationRecommendation::Accept,
+                })
+            };
             let elapsed = t0.elapsed();
             context
                 .stage_timings
@@ -606,10 +678,21 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             });
         }
 
+        // Propagate validation failure to the overall pipeline result.
+        let validation_passed = context
+            .validation_result
+            .as_ref()
+            .map(|r| r.passed)
+            .unwrap_or(true);
+
         Ok(PipelineResult {
-            success: true,
+            success: validation_passed,
             stage_states,
-            error: None,
+            error: if validation_passed {
+                None
+            } else {
+                Some("Validation stage did not pass".to_string())
+            },
         })
     }
 

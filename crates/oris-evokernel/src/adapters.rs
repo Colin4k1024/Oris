@@ -25,8 +25,10 @@
 use std::path::PathBuf;
 
 use oris_evolution::{
-    EvolutionSignal, GeneStorePersistPort, PreparedMutation, SandboxExecutionResult, SandboxPort,
-    SignalExtractorInput, SignalExtractorPort, SignalType,
+    EvaluateInput, EvaluatePort, EvaluationRecommendation, EvaluationResult, EvolutionSignal,
+    GeneStorePersistPort, IssueSeverity, PreparedMutation, SandboxExecutionResult, SandboxPort,
+    SignalExtractorInput, SignalExtractorPort, SignalType, ValidateInput, ValidatePort,
+    ValidationIssue, ValidationResult,
 };
 use oris_sandbox::{LocalProcessSandbox, Sandbox, SandboxError, SandboxPolicy};
 
@@ -314,5 +316,194 @@ impl GeneStorePersistPort for SqliteGeneStorePersistAdapter {
             eprintln!("[SqliteGeneStorePersistAdapter] mark_reused error: {e}");
         }
         result.is_ok()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SandboxOutputValidateAdapter
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Implements `ValidatePort` by interpreting sandbox execution output.
+///
+/// **Logic** (fully synchronous, no I/O):
+/// * `execution_success = true`  → `passed: true, score: 0.9`
+/// * `execution_success = false` and stderr matches known failure tokens
+///   (e.g. `FAILED`, `error[E`, `panicked at`) → `passed: false, score: 0.0, issues = [...]`
+/// * Otherwise failure → `passed: false, score: 0.2` (generic I/O error)
+pub struct SandboxOutputValidateAdapter;
+
+impl SandboxOutputValidateAdapter {
+    /// Keywords that identify hard test/compile failures in stderr.
+    const FAIL_TOKENS: &'static [&'static str] = &[
+        "FAILED",
+        "error[E",
+        "error:",
+        "panicked at",
+        "thread '",
+        "COMPILATION FAILED",
+        "test result: FAILED",
+    ];
+
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SandboxOutputValidateAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ValidatePort for SandboxOutputValidateAdapter {
+    fn validate(&self, input: &ValidateInput) -> ValidationResult {
+        if input.execution_success {
+            return ValidationResult {
+                proposal_id: input.proposal_id.clone(),
+                passed: true,
+                score: 0.9,
+                issues: vec![],
+                simulation_results: None,
+            };
+        }
+
+        // Execution failed — classify the failure.
+        let matching_tokens: Vec<&str> = Self::FAIL_TOKENS
+            .iter()
+            .copied()
+            .filter(|&tok| input.stderr.contains(tok) || input.stdout.contains(tok))
+            .collect();
+
+        let (score, description) = if !matching_tokens.is_empty() {
+            (
+                0.0_f32,
+                format!(
+                    "Sandbox execution failed (matched tokens: {}). stderr snippet: {}",
+                    matching_tokens.join(", "),
+                    &input.stderr[..input.stderr.len().min(200)],
+                ),
+            )
+        } else {
+            (
+                0.2_f32,
+                format!(
+                    "Sandbox execution failed without a recognised pattern. stderr snippet: {}",
+                    &input.stderr[..input.stderr.len().min(200)],
+                ),
+            )
+        };
+
+        ValidationResult {
+            proposal_id: input.proposal_id.clone(),
+            passed: false,
+            score,
+            issues: vec![ValidationIssue {
+                severity: IssueSeverity::Error,
+                description,
+                location: None,
+            }],
+            simulation_results: None,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MutationEvaluatorAdapter
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Implements `EvaluatePort` by delegating to `oris_mutation_evaluator::MutationEvaluator`.
+///
+/// The evaluator is async; this adapter bridges to the synchronous `EvaluatePort` contract
+/// using a dedicated thread (same pattern as `LocalSandboxAdapter`), avoiding runtime nesting.
+pub struct MutationEvaluatorAdapter {
+    evaluator: oris_mutation_evaluator::MutationEvaluator,
+}
+
+impl MutationEvaluatorAdapter {
+    /// Construct the adapter with the given evaluator.
+    /// Use `MockMutationBackend` for tests or `EnvRoutedBackend` for production.
+    pub fn new(evaluator: oris_mutation_evaluator::MutationEvaluator) -> Self {
+        Self { evaluator }
+    }
+
+    /// Convenience constructor using a mock critic (offline / no API key).
+    /// For a production evaluator with a real LLM, construct `MutationEvaluator`
+    /// manually with the desired `LlmCritic` implementation.
+    pub fn from_mock() -> Self {
+        let backend = oris_mutation_evaluator::MockCritic::passing();
+        Self::new(oris_mutation_evaluator::MutationEvaluator::new(backend))
+    }
+}
+
+impl EvaluatePort for MutationEvaluatorAdapter {
+    fn evaluate(&self, input: &EvaluateInput) -> EvaluationResult {
+        use oris_mutation_evaluator::types::{
+            EvoSignal, MutationProposal, SignalKind as EvalSignalKind,
+        };
+        use uuid::Uuid;
+
+        // Map signal strings → EvoSignal (use generic CompilerError as kind).
+        let signals: Vec<EvoSignal> = input
+            .signals
+            .iter()
+            .map(|s| EvoSignal {
+                kind: EvalSignalKind::CompilerError,
+                message: s.clone(),
+                location: None,
+            })
+            .collect();
+
+        let id = Uuid::parse_str(&input.proposal_id).unwrap_or_else(|_| Uuid::new_v4());
+        let proposal = MutationProposal {
+            id,
+            intent: input.intent.clone(),
+            original: input.original.clone(),
+            proposed: input.proposed.clone(),
+            signals,
+            source_gene_id: None,
+        };
+
+        // Bridge async → sync using a dedicated thread so we never nest runtimes.
+        let evaluator = &self.evaluator;
+        let report_result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => std::thread::scope(|s| {
+                s.spawn(|| handle.block_on(evaluator.evaluate(&proposal)))
+                    .join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("evaluator thread panicked")))
+            }),
+            Err(_) => tokio::runtime::Runtime::new()
+                .map_err(|e| anyhow::anyhow!(e))
+                .and_then(|rt| rt.block_on(evaluator.evaluate(&proposal))),
+        };
+
+        match report_result {
+            Ok(report) => {
+                let recommendation = match report.verdict {
+                    oris_mutation_evaluator::Verdict::Reject => EvaluationRecommendation::Reject,
+                    oris_mutation_evaluator::Verdict::Promote => EvaluationRecommendation::Accept,
+                    oris_mutation_evaluator::Verdict::ApplyOnly => EvaluationRecommendation::Accept,
+                };
+                EvaluationResult {
+                    score: report.composite_score as f32,
+                    improvements: vec![report.rationale.clone()],
+                    regressions: report
+                        .anti_patterns
+                        .iter()
+                        .map(|ap| ap.description.clone())
+                        .collect(),
+                    recommendation,
+                }
+            }
+            Err(e) => {
+                eprintln!("[MutationEvaluatorAdapter] evaluate error: {e}");
+                // Fail-closed: return a neutral score and require human review.
+                EvaluationResult {
+                    score: 0.0,
+                    improvements: vec![],
+                    regressions: vec![format!("Evaluator error: {e}")],
+                    recommendation: EvaluationRecommendation::RequiresHumanReview,
+                }
+            }
+        }
     }
 }
