@@ -84,6 +84,7 @@ What this already covers:
 | [network.md](network.md) | A2A protocol alignment |
 | [intake.md](intake.md) | Issue intake system |
 | [examples.md](examples.md) | Runnable examples |
+| [current-project-status.md](current-project-status.md) | External-facing current capability statement |
 
 See [evokernel-v0.1.md](../evokernel-v0.1.md) for architecture overview.
 
