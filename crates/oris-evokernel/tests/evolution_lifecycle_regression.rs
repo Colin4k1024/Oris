@@ -10,16 +10,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
-    AgentTask, AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeReasonCode,
-    AutonomousPlanReasonCode, AutonomousRiskTier, BoundedTaskClass, HumanApproval,
-    MutationNeededFailureReasonCode, MutationProposal, MutationProposalContractReasonCode,
-    MutationProposalEvidence, ReplayFallbackNextAction, ReplayFallbackReasonCode,
-    ReplayPlannerDirective, SelfEvolutionAcceptanceGateInput,
-    SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionAuditConsistencyResult,
-    SelfEvolutionCandidateIntakeRequest, SelfEvolutionSelectionReasonCode,
-    SupervisedDeliveryApprovalState, SupervisedDeliveryReasonCode, SupervisedDeliveryStatus,
-    SupervisedDevloopOutcome, SupervisedDevloopRequest, SupervisedDevloopStatus,
-    SupervisedExecutionDecision, SupervisedExecutionReasonCode, SupervisedValidationOutcome,
+    AgentTask, AutonomousApprovalMode, AutonomousCandidateSource, AutonomousIntakeInput,
+    AutonomousIntakeReasonCode, AutonomousPlanReasonCode, AutonomousProposalReasonCode,
+    AutonomousRiskTier, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode,
+    MutationProposal, MutationProposalContractReasonCode, MutationProposalEvidence,
+    ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayPlannerDirective,
+    SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
+    SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
+    SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState,
+    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
+    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
+    SupervisedExecutionReasonCode, SupervisedValidationOutcome,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -3777,4 +3778,168 @@ fn autonomous_planning_reason_codes_are_stable() {
     );
     assert!(AutonomousRiskTier::Low < AutonomousRiskTier::Medium);
     assert!(AutonomousRiskTier::Medium < AutonomousRiskTier::High);
+}
+
+// ── AUTO-03: Autonomous mutation proposal contracts ───────────────────────────
+
+#[test]
+fn autonomous_proposal_approves_lint_fix_plan() {
+    let kernel = make_evo_kernel_for_autonomous_intake("autonomous_proposal_approves_lint_fix");
+    let intake = AutonomousIntakeInput {
+        source_id: "ci-prop-001".to_string(),
+        candidate_source: AutonomousCandidateSource::LintRegression,
+        raw_signals: vec!["error[E0308]: mismatched types".to_string()],
+    };
+    let candidate = &kernel.discover_autonomous_candidates(&intake).candidates[0];
+    let plan = kernel.plan_autonomous_candidate(candidate);
+    assert!(plan.approved, "precondition: plan must be approved");
+
+    let proposal = kernel.propose_autonomous_mutation(&plan);
+    assert!(
+        proposal.proposed,
+        "LintFix plan must produce an approved proposal"
+    );
+    assert_eq!(proposal.reason_code, AutonomousProposalReasonCode::Proposed);
+    assert!(proposal.scope.is_some(), "scope must be set");
+    let scope = proposal.scope.unwrap();
+    assert!(
+        !scope.target_paths.is_empty(),
+        "target_paths must not be empty"
+    );
+    assert!(scope.max_files >= 1, "max_files must be at least 1");
+    assert!(
+        !proposal.expected_evidence.is_empty(),
+        "expected_evidence must not be empty"
+    );
+    assert!(
+        !proposal.rollback_conditions.is_empty(),
+        "rollback_conditions must not be empty"
+    );
+    assert_eq!(proposal.approval_mode, AutonomousApprovalMode::AutoApproved);
+    assert!(
+        !proposal.fail_closed,
+        "approved proposal must not be fail_closed"
+    );
+    assert!(!proposal.proposal_id.is_empty());
+    assert_eq!(proposal.plan_id, plan.plan_id);
+    assert_eq!(proposal.dedupe_key, plan.dedupe_key);
+}
+
+#[test]
+fn autonomous_proposal_denies_unapproved_plan_fail_closed() {
+    use oris_agent_contract::{deny_autonomous_task_plan, AutonomousPlanReasonCode};
+
+    let kernel = make_evo_kernel_for_autonomous_intake("autonomous_proposal_denies_unapproved");
+    let denied_plan = deny_autonomous_task_plan(
+        "plan-id-denied".to_string(),
+        "dedupe-denied".to_string(),
+        AutonomousRiskTier::High,
+        AutonomousPlanReasonCode::DeniedHighRisk,
+    );
+    assert!(!denied_plan.approved, "precondition: plan must be denied");
+
+    let proposal = kernel.propose_autonomous_mutation(&denied_plan);
+    assert!(
+        !proposal.proposed,
+        "unapproved plan must yield denied proposal"
+    );
+    assert_eq!(
+        proposal.reason_code,
+        AutonomousProposalReasonCode::DeniedPlanNotApproved
+    );
+    assert!(proposal.fail_closed, "denied proposal must be fail_closed");
+    assert!(
+        proposal.scope.is_none(),
+        "denied proposal must have no scope"
+    );
+    assert!(
+        proposal.denial_condition.is_some(),
+        "denial_condition must be set"
+    );
+}
+
+#[test]
+fn autonomous_proposal_approves_docs_single_file_plan() {
+    use oris_agent_contract::{approve_autonomous_task_plan, AutonomousRiskTier};
+
+    let kernel = make_evo_kernel_for_autonomous_intake("autonomous_proposal_approves_docs");
+    let plan = approve_autonomous_task_plan(
+        "plan-docs-001".to_string(),
+        "dedupe-docs-001".to_string(),
+        BoundedTaskClass::DocsSingleFile,
+        AutonomousRiskTier::Low,
+        90u8,
+        1u8,
+        vec!["docs review diff".to_string()],
+        Some("docs single-file plan"),
+    );
+
+    let proposal = kernel.propose_autonomous_mutation(&plan);
+    assert!(proposal.proposed, "DocsSingleFile plan must be approved");
+    assert_eq!(proposal.reason_code, AutonomousProposalReasonCode::Proposed);
+    assert_eq!(proposal.approval_mode, AutonomousApprovalMode::AutoApproved);
+    let scope = proposal.scope.expect("scope must be set");
+    assert_eq!(scope.max_files, 1, "DocsSingleFile must allow max 1 file");
+}
+
+#[test]
+fn autonomous_proposal_medium_risk_requires_human_review() {
+    use oris_agent_contract::{approve_autonomous_task_plan, AutonomousRiskTier};
+
+    let kernel = make_evo_kernel_for_autonomous_intake("autonomous_proposal_medium_risk_review");
+    let plan = approve_autonomous_task_plan(
+        "plan-dep-001".to_string(),
+        "dedupe-dep-001".to_string(),
+        BoundedTaskClass::CargoDepUpgrade,
+        AutonomousRiskTier::Medium,
+        70u8,
+        3u8,
+        vec!["cargo audit".to_string(), "cargo test".to_string()],
+        None,
+    );
+
+    let proposal = kernel.propose_autonomous_mutation(&plan);
+    assert!(
+        proposal.proposed,
+        "CargoDepUpgrade plan must produce a proposal"
+    );
+    assert_eq!(
+        proposal.approval_mode,
+        AutonomousApprovalMode::RequiresHumanReview,
+        "medium-risk proposals must require human review"
+    );
+    let scope = proposal.scope.expect("scope must be set");
+    assert_eq!(scope.max_files, 2, "CargoDepUpgrade must allow max 2 files");
+}
+
+#[test]
+fn autonomous_proposal_reason_codes_are_stable() {
+    assert_eq!(
+        format!("{:?}", AutonomousProposalReasonCode::Proposed),
+        "Proposed"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousProposalReasonCode::DeniedPlanNotApproved),
+        "DeniedPlanNotApproved"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousProposalReasonCode::DeniedNoTargetScope),
+        "DeniedNoTargetScope"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousProposalReasonCode::DeniedWeakEvidence),
+        "DeniedWeakEvidence"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousProposalReasonCode::DeniedOutOfBounds),
+        "DeniedOutOfBounds"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousApprovalMode::AutoApproved),
+        "AutoApproved"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousApprovalMode::RequiresHumanReview),
+        "RequiresHumanReview"
+    );
 }

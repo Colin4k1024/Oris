@@ -958,6 +958,163 @@ pub fn deny_autonomous_task_plan(
     }
 }
 
+// ── AUTO-03: Autonomous mutation proposal contracts ───────────────────────────
+
+/// Approval mode for an autonomous mutation proposal.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousApprovalMode {
+    /// Proposal is self-approved within bounded policy; no human gate required.
+    AutoApproved,
+    /// Proposal requires explicit human review before execution.
+    RequiresHumanReview,
+}
+
+/// Stable reason code for an autonomous mutation proposal outcome.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousProposalReasonCode {
+    Proposed,
+    DeniedPlanNotApproved,
+    DeniedNoTargetScope,
+    DeniedWeakEvidence,
+    DeniedOutOfBounds,
+    UnknownFailClosed,
+}
+
+/// Bounded file scope for an autonomous mutation proposal.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousProposalScope {
+    /// Target files or paths that may be mutated.
+    pub target_paths: Vec<String>,
+    /// Human-readable rationale for why these targets are in scope.
+    pub scope_rationale: String,
+    /// Maximum number of files that may be changed in this proposal.
+    pub max_files: u8,
+}
+
+/// A machine-readable mutation proposal generated from an approved autonomous plan.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousMutationProposal {
+    /// Stable proposal identity hash.
+    pub proposal_id: String,
+    /// Matches `AutonomousTaskPlan.plan_id`.
+    pub plan_id: String,
+    /// Matches `AutonomousTaskPlan.dedupe_key`.
+    pub dedupe_key: String,
+    /// Bounded file scope for this mutation.
+    pub scope: Option<AutonomousProposalScope>,
+    /// Expected evidence templates (cargo commands, lint, tests, etc.).
+    pub expected_evidence: Vec<String>,
+    /// Conditions under which the mutation must be rolled back.
+    pub rollback_conditions: Vec<String>,
+    /// Approval mode for this proposal.
+    pub approval_mode: AutonomousApprovalMode,
+    /// Whether this proposal was successfully generated.
+    pub proposed: bool,
+    /// Stable outcome reason code.
+    pub reason_code: AutonomousProposalReasonCode,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Structured denial information, populated when `proposed` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denial_condition: Option<AutonomousDenialCondition>,
+    /// True on any non-proposed outcome — enforces fail-closed semantics.
+    pub fail_closed: bool,
+}
+
+/// Construct an approved `AutonomousMutationProposal` from a valid plan.
+pub fn approve_autonomous_mutation_proposal(
+    proposal_id: impl Into<String>,
+    plan_id: impl Into<String>,
+    dedupe_key: impl Into<String>,
+    scope: AutonomousProposalScope,
+    expected_evidence: Vec<String>,
+    rollback_conditions: Vec<String>,
+    approval_mode: AutonomousApprovalMode,
+    summary: Option<&str>,
+) -> AutonomousMutationProposal {
+    let dedupe_key = dedupe_key.into();
+    let summary = summary
+        .and_then(|s| {
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        })
+        .unwrap_or_else(|| format!("autonomous mutation proposal approved for {dedupe_key}"));
+    AutonomousMutationProposal {
+        proposal_id: proposal_id.into(),
+        plan_id: plan_id.into(),
+        dedupe_key,
+        scope: Some(scope),
+        expected_evidence,
+        rollback_conditions,
+        approval_mode,
+        proposed: true,
+        reason_code: AutonomousProposalReasonCode::Proposed,
+        summary,
+        denial_condition: None,
+        fail_closed: false,
+    }
+}
+
+/// Construct a denied fail-closed `AutonomousMutationProposal`.
+pub fn deny_autonomous_mutation_proposal(
+    proposal_id: impl Into<String>,
+    plan_id: impl Into<String>,
+    dedupe_key: impl Into<String>,
+    reason_code: AutonomousProposalReasonCode,
+) -> AutonomousMutationProposal {
+    let (description, recovery_hint) = match reason_code {
+        AutonomousProposalReasonCode::DeniedPlanNotApproved => (
+            "source plan was not approved; cannot generate proposal",
+            "ensure the autonomous task plan is approved before proposing a mutation",
+        ),
+        AutonomousProposalReasonCode::DeniedNoTargetScope => (
+            "no bounded target scope could be determined for this task class",
+            "verify that the task class maps to a known set of target paths",
+        ),
+        AutonomousProposalReasonCode::DeniedWeakEvidence => (
+            "the expected evidence set is empty or insufficient",
+            "strengthen evidence requirements before reattempting proposal",
+        ),
+        AutonomousProposalReasonCode::DeniedOutOfBounds => (
+            "proposal would mutate files outside of bounded policy scope",
+            "restrict targets to explicitly allowed paths and retry",
+        ),
+        AutonomousProposalReasonCode::UnknownFailClosed => (
+            "proposal generation failed with an unmapped reason; fail closed",
+            "require explicit maintainer triage before retry",
+        ),
+        AutonomousProposalReasonCode::Proposed => (
+            "unexpected proposed reason on deny path",
+            "use approve_autonomous_mutation_proposal for proposed outcomes",
+        ),
+    };
+    let dedupe_key = dedupe_key.into();
+    let summary = format!("autonomous mutation proposal denied [{reason_code:?}]: {description}");
+    AutonomousMutationProposal {
+        proposal_id: proposal_id.into(),
+        plan_id: plan_id.into(),
+        dedupe_key,
+        scope: None,
+        expected_evidence: Vec::new(),
+        rollback_conditions: Vec::new(),
+        approval_mode: AutonomousApprovalMode::RequiresHumanReview,
+        proposed: false,
+        reason_code,
+        summary,
+        denial_condition: Some(AutonomousDenialCondition {
+            reason_code: AutonomousPlanReasonCode::UnknownFailClosed,
+            description: description.to_string(),
+            recovery_hint: recovery_hint.to_string(),
+        }),
+        fail_closed: true,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfEvolutionSelectionReasonCode {

@@ -292,3 +292,41 @@ fn autonomous_task_planning_types_resolve() {
             < oris_runtime::agent_contract::AutonomousRiskTier::High
     );
 }
+
+/// Issue #266 — EVO26-AUTO-03: Autonomous mutation proposal types resolve via facade
+#[test]
+fn autonomous_mutation_proposal_types_resolve() {
+    assert_type::<oris_runtime::agent_contract::AutonomousApprovalMode>();
+    assert_type::<oris_runtime::agent_contract::AutonomousProposalReasonCode>();
+    assert_type::<oris_runtime::agent_contract::AutonomousProposalScope>();
+    assert_type::<oris_runtime::agent_contract::AutonomousMutationProposal>();
+
+    // Constructor helpers resolve
+    let scope = oris_runtime::agent_contract::AutonomousProposalScope {
+        target_paths: vec!["crates/**/*.rs".to_string()],
+        scope_rationale: "test scope".to_string(),
+        max_files: 3,
+    };
+    let _approved: oris_runtime::agent_contract::AutonomousMutationProposal =
+        oris_runtime::agent_contract::approve_autonomous_mutation_proposal(
+            "prop-id-1".to_string(),
+            "plan-id-1".to_string(),
+            "dedupe-key-1".to_string(),
+            scope,
+            vec!["cargo fmt".to_string()],
+            vec!["revert on failure".to_string()],
+            oris_runtime::agent_contract::AutonomousApprovalMode::AutoApproved,
+            Some("test proposal"),
+        );
+    let _denied: oris_runtime::agent_contract::AutonomousMutationProposal =
+        oris_runtime::agent_contract::deny_autonomous_mutation_proposal(
+            "prop-id-2".to_string(),
+            "plan-id-2".to_string(),
+            "dedupe-key-2".to_string(),
+            oris_runtime::agent_contract::AutonomousProposalReasonCode::DeniedPlanNotApproved,
+        );
+
+    // Variants accessible
+    let _mode = oris_runtime::agent_contract::AutonomousApprovalMode::AutoApproved;
+    let _code = oris_runtime::agent_contract::AutonomousProposalReasonCode::Proposed;
+}
