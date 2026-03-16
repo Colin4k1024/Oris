@@ -1,6 +1,7 @@
 //! EvoKernel orchestration: mutation capture, validation, capsule construction, and replay-first reuse.
 
 pub mod adapters;
+pub mod confidence_daemon;
 mod core;
 pub mod signal_extractor;
 
