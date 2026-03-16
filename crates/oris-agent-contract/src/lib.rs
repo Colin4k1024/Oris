@@ -812,6 +812,152 @@ pub struct AutonomousIntakeOutput {
     pub denied_count: usize,
 }
 
+// ── AUTO-02: Bounded Task Planning and Risk Scoring ──────────────────────────
+
+/// Risk tier assigned to an autonomous task plan.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousRiskTier {
+    /// Minimal blast radius, fully reversible, single-file scope.
+    Low,
+    /// Multi-file scope or non-trivial dependency changes.
+    Medium,
+    /// High blast radius, wide impact, or unknown effect on public API.
+    High,
+}
+
+/// Reason code for the outcome of autonomous task planning.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousPlanReasonCode {
+    Approved,
+    DeniedHighRisk,
+    DeniedLowFeasibility,
+    DeniedUnsupportedClass,
+    DeniedNoEvidence,
+    UnknownFailClosed,
+}
+
+/// A denial condition attached to a rejected autonomous task plan.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousDenialCondition {
+    pub reason_code: AutonomousPlanReasonCode,
+    pub description: String,
+    pub recovery_hint: String,
+}
+
+/// An approved or denied autonomous task plan produced from a discovered candidate.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousTaskPlan {
+    /// Stable identity derived from the originating `DiscoveredCandidate.dedupe_key`.
+    pub plan_id: String,
+    /// The input candidate this plan was derived from.
+    pub dedupe_key: String,
+    /// Normalised task class (same as candidate class when approved).
+    pub task_class: Option<BoundedTaskClass>,
+    /// Assigned risk tier.
+    pub risk_tier: AutonomousRiskTier,
+    /// Feasibility score in [0, 100]; 0 means not feasible.
+    pub feasibility_score: u8,
+    /// Estimated validation budget (number of validation stages required).
+    pub validation_budget: u8,
+    /// Evidence templates required for this plan class.
+    pub expected_evidence: Vec<String>,
+    /// Whether the plan was approved for proposal generation.
+    pub approved: bool,
+    /// Planning outcome reason code.
+    pub reason_code: AutonomousPlanReasonCode,
+    /// Short human-readable summary of the planning outcome.
+    pub summary: String,
+    /// Present when the plan was denied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denial_condition: Option<AutonomousDenialCondition>,
+    /// Fail-closed flag: true on any non-approved outcome.
+    pub fail_closed: bool,
+}
+
+pub fn approve_autonomous_task_plan(
+    plan_id: impl Into<String>,
+    dedupe_key: impl Into<String>,
+    task_class: BoundedTaskClass,
+    risk_tier: AutonomousRiskTier,
+    feasibility_score: u8,
+    validation_budget: u8,
+    expected_evidence: Vec<String>,
+    summary: Option<&str>,
+) -> AutonomousTaskPlan {
+    let summary = normalize_optional_text(summary).unwrap_or_else(|| {
+        format!("autonomous task plan approved for {task_class:?} at {risk_tier:?} risk")
+    });
+    AutonomousTaskPlan {
+        plan_id: plan_id.into(),
+        dedupe_key: dedupe_key.into(),
+        task_class: Some(task_class),
+        risk_tier,
+        feasibility_score,
+        validation_budget,
+        expected_evidence,
+        approved: true,
+        reason_code: AutonomousPlanReasonCode::Approved,
+        summary,
+        denial_condition: None,
+        fail_closed: false,
+    }
+}
+
+pub fn deny_autonomous_task_plan(
+    plan_id: impl Into<String>,
+    dedupe_key: impl Into<String>,
+    risk_tier: AutonomousRiskTier,
+    reason_code: AutonomousPlanReasonCode,
+) -> AutonomousTaskPlan {
+    let (description, recovery_hint) = match reason_code {
+        AutonomousPlanReasonCode::DeniedHighRisk => (
+            "task plan denied because risk tier is too high for autonomous execution",
+            "reduce blast radius by scoping the change to a single bounded file before retrying",
+        ),
+        AutonomousPlanReasonCode::DeniedLowFeasibility => (
+            "task plan denied because feasibility score is below the policy threshold",
+            "provide stronger evidence or narrow the task scope before retrying",
+        ),
+        AutonomousPlanReasonCode::DeniedUnsupportedClass => (
+            "task plan denied because task class is not supported for autonomous planning",
+            "route this task class through the supervised planning path instead",
+        ),
+        AutonomousPlanReasonCode::DeniedNoEvidence => (
+            "task plan denied because no evidence was available to assess feasibility",
+            "ensure signals and candidate class are populated before planning",
+        ),
+        AutonomousPlanReasonCode::UnknownFailClosed => (
+            "task plan failed with an unmapped reason; fail closed",
+            "require explicit maintainer triage before retry",
+        ),
+        AutonomousPlanReasonCode::Approved => (
+            "unexpected approved reason on deny path",
+            "use approve_autonomous_task_plan for approved outcomes",
+        ),
+    };
+    let summary = format!("autonomous task plan denied [{reason_code:?}]: {description}");
+    AutonomousTaskPlan {
+        plan_id: plan_id.into(),
+        dedupe_key: dedupe_key.into(),
+        task_class: None,
+        risk_tier,
+        feasibility_score: 0,
+        validation_budget: 0,
+        expected_evidence: Vec::new(),
+        approved: false,
+        reason_code,
+        summary,
+        denial_condition: Some(AutonomousDenialCondition {
+            reason_code,
+            description: description.to_string(),
+            recovery_hint: recovery_hint.to_string(),
+        }),
+        fail_closed: true,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfEvolutionSelectionReasonCode {
