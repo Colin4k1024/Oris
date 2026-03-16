@@ -9,15 +9,18 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
-    accept_self_evolution_selection_decision, infer_mutation_needed_failure_reason_code,
+    accept_discovered_candidate, accept_self_evolution_selection_decision,
+    deny_discovered_candidate, infer_mutation_needed_failure_reason_code,
     infer_replay_fallback_reason_code, normalize_mutation_needed_failure_contract,
     normalize_replay_fallback_contract, reject_self_evolution_selection_decision, AgentRole,
-    BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
-    CoordinationResult, CoordinationTask, ExecutionFeedback, MutationNeededFailureContract,
-    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
-    MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
-    MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
-    ReplayPlannerDirective, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
+    AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeOutput,
+    AutonomousIntakeReasonCode, BoundedTaskClass, CoordinationMessage, CoordinationPlan,
+    CoordinationPrimitive, CoordinationResult, CoordinationTask, ExecutionFeedback,
+    MutationNeededFailureContract, MutationNeededFailureReasonCode,
+    MutationProposal as AgentMutationProposal, MutationProposalContractReasonCode,
+    MutationProposalEvidence, MutationProposalScope, MutationProposalValidationBudget,
+    ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
+    SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
     SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
     SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
     SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
@@ -3417,6 +3420,85 @@ impl<S: KernelState> EvoKernel<S> {
         )))
     }
 
+    /// Autonomous candidate intake: classify raw diagnostic signals without a
+    /// caller‐supplied issue number, deduplicate across the batch, and return
+    /// an [`AutonomousIntakeOutput`] with accepted and denied candidates.
+    ///
+    /// This is the entry point for `EVO26-AUTO-01` — it does **not** generate
+    /// mutation proposals or trigger any task planning.
+    pub fn discover_autonomous_candidates(
+        &self,
+        input: &AutonomousIntakeInput,
+    ) -> AutonomousIntakeOutput {
+        if input.raw_signals.is_empty() {
+            let deny = deny_discovered_candidate(
+                autonomous_dedupe_key(input.candidate_source, &input.raw_signals),
+                input.candidate_source,
+                Vec::new(),
+                AutonomousIntakeReasonCode::UnknownFailClosed,
+            );
+            return AutonomousIntakeOutput {
+                candidates: vec![deny],
+                accepted_count: 0,
+                denied_count: 1,
+            };
+        }
+
+        let normalized = normalize_autonomous_signals(&input.raw_signals);
+        let dedupe_key = autonomous_dedupe_key(input.candidate_source, &normalized);
+
+        // Check for a duplicate inside the active evolution store window.
+        if autonomous_is_duplicate_in_store(&self.store, &dedupe_key) {
+            let deny = deny_discovered_candidate(
+                dedupe_key,
+                input.candidate_source,
+                normalized,
+                AutonomousIntakeReasonCode::DuplicateCandidate,
+            );
+            return AutonomousIntakeOutput {
+                candidates: vec![deny],
+                accepted_count: 0,
+                denied_count: 1,
+            };
+        }
+
+        let Some(candidate_class) =
+            classify_autonomous_signals(input.candidate_source, &normalized)
+        else {
+            let reason = if normalized.is_empty() {
+                AutonomousIntakeReasonCode::UnknownFailClosed
+            } else {
+                AutonomousIntakeReasonCode::AmbiguousSignal
+            };
+            let deny =
+                deny_discovered_candidate(dedupe_key, input.candidate_source, normalized, reason);
+            return AutonomousIntakeOutput {
+                candidates: vec![deny],
+                accepted_count: 0,
+                denied_count: 1,
+            };
+        };
+
+        let summary = format!(
+            "autonomous candidate from {:?} ({:?}): {} signal(s)",
+            input.candidate_source,
+            candidate_class,
+            normalized.len()
+        );
+        let candidate = accept_discovered_candidate(
+            dedupe_key,
+            input.candidate_source,
+            candidate_class,
+            normalized,
+            Some(&summary),
+        );
+        AutonomousIntakeOutput {
+            accepted_count: 1,
+            denied_count: 0,
+            candidates: vec![candidate],
+        }
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -5165,6 +5247,67 @@ fn normalized_selection_labels(labels: &[String]) -> BTreeSet<String> {
         .map(|label| label.trim().to_ascii_lowercase())
         .filter(|label| !label.is_empty())
         .collect()
+}
+
+/// Normalise raw signal tokens: trim, lowercase, remove empties, sort, dedup.
+fn normalize_autonomous_signals(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = raw
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Compute a deterministic dedupe key from the signal source + normalised signal tokens.
+fn autonomous_dedupe_key(source: AutonomousCandidateSource, signals: &[String]) -> String {
+    stable_hash_json(&(source, signals))
+        .unwrap_or_else(|_| compute_artifact_hash(&format!("{source:?}{}", signals.join("|"))))
+}
+
+/// Map signal source + tokens to a `BoundedTaskClass`, or `None` when ambiguous / unsupported.
+fn classify_autonomous_signals(
+    source: AutonomousCandidateSource,
+    signals: &[String],
+) -> Option<BoundedTaskClass> {
+    use AutonomousCandidateSource::*;
+    match source {
+        CompileRegression | TestRegression | CiFailure => {
+            // A non‑empty normalised signal set from a compile/test CI source maps to LintFix
+            // (the narrowest bounded class that covers both lint and compile‑error remediation).
+            if signals.is_empty() {
+                None
+            } else {
+                Some(BoundedTaskClass::LintFix)
+            }
+        }
+        LintRegression => {
+            if signals.is_empty() {
+                None
+            } else {
+                Some(BoundedTaskClass::LintFix)
+            }
+        }
+        RuntimeIncident => None, // Incidents are not yet mapped to a bounded class.
+    }
+}
+
+/// Return `true` if an equivalent candidate (same dedupe key) already exists in the store
+/// by matching against previously extracted signal hashes.
+fn autonomous_is_duplicate_in_store(store: &Arc<dyn EvolutionStore>, dedupe_key: &str) -> bool {
+    let Ok(events) = store.scan(0) else {
+        return false;
+    };
+    for stored in events {
+        if let EvolutionEvent::SignalsExtracted { hash, .. } = &stored.event {
+            if hash == dedupe_key {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn find_declared_mutation(
