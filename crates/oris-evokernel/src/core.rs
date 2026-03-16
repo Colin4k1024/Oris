@@ -10,29 +10,30 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
     accept_discovered_candidate, accept_self_evolution_selection_decision,
-    approve_autonomous_mutation_proposal, approve_autonomous_task_plan,
+    approve_autonomous_mutation_proposal, approve_autonomous_task_plan, approve_semantic_replay,
     deny_autonomous_mutation_proposal, deny_autonomous_task_plan, deny_discovered_candidate,
-    infer_mutation_needed_failure_reason_code, infer_replay_fallback_reason_code,
-    normalize_mutation_needed_failure_contract, normalize_replay_fallback_contract,
-    reject_self_evolution_selection_decision, AgentRole, AutonomousApprovalMode,
-    AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeOutput,
-    AutonomousIntakeReasonCode, AutonomousMutationProposal, AutonomousPlanReasonCode,
-    AutonomousProposalReasonCode, AutonomousProposalScope, AutonomousRiskTier, AutonomousTaskPlan,
-    BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
-    CoordinationResult, CoordinationTask, DiscoveredCandidate, ExecutionFeedback,
-    MutationNeededFailureContract, MutationNeededFailureReasonCode,
-    MutationProposal as AgentMutationProposal, MutationProposalContractReasonCode,
-    MutationProposalEvidence, MutationProposalScope, MutationProposalValidationBudget,
-    ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
-    SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
+    deny_semantic_replay, infer_mutation_needed_failure_reason_code,
+    infer_replay_fallback_reason_code, normalize_mutation_needed_failure_contract,
+    normalize_replay_fallback_contract, reject_self_evolution_selection_decision, AgentRole,
+    AutonomousApprovalMode, AutonomousCandidateSource, AutonomousIntakeInput,
+    AutonomousIntakeOutput, AutonomousIntakeReasonCode, AutonomousMutationProposal,
+    AutonomousPlanReasonCode, AutonomousProposalReasonCode, AutonomousProposalScope,
+    AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass, CoordinationMessage,
+    CoordinationPlan, CoordinationPrimitive, CoordinationResult, CoordinationTask,
+    DiscoveredCandidate, EquivalenceExplanation, ExecutionFeedback, MutationNeededFailureContract,
+    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
+    MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
+    MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
+    ReplayPlannerDirective, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
     SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
     SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
     SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
     SelfEvolutionReasonCodeMatrix, SelfEvolutionSelectionDecision,
-    SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState, SupervisedDeliveryContract,
-    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
-    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
-    SupervisedExecutionReasonCode, SupervisedValidationOutcome,
+    SelfEvolutionSelectionReasonCode, SemanticReplayDecision, SemanticReplayReasonCode,
+    SupervisedDeliveryApprovalState, SupervisedDeliveryContract, SupervisedDeliveryReasonCode,
+    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
+    SupervisedDevloopStatus, SupervisedExecutionDecision, SupervisedExecutionReasonCode,
+    SupervisedValidationOutcome, TaskEquivalenceClass,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -3527,6 +3528,22 @@ impl<S: KernelState> EvoKernel<S> {
         autonomous_proposal_for_plan(plan)
     }
 
+    /// Semantic task-class generalization evaluation for replay selection.
+    ///
+    /// Determines whether a task described by `task_id` and `task_class` can
+    /// participate in broad-family replay beyond exact signal matching.
+    /// Returns a `SemanticReplayDecision` with an audit-ready
+    /// `EquivalenceExplanation` when replay is approved.
+    ///
+    /// This is the `EVO26-AUTO-04` entry point. It does **not** execute replay.
+    pub fn evaluate_semantic_replay(
+        &self,
+        task_id: impl Into<String>,
+        task_class: &BoundedTaskClass,
+    ) -> SemanticReplayDecision {
+        semantic_replay_for_class(task_id, task_class)
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -5550,6 +5567,85 @@ fn autonomous_proposal_scope_for_class(
                 "revert if cargo build all features fails".to_string(),
             ],
         ),
+    }
+}
+
+/// Semantic replay evaluation for a given `BoundedTaskClass`.
+///
+/// Maps each bounded class to its semantic equivalence family and returns
+/// an approved or denied `SemanticReplayDecision` with a full
+/// `EquivalenceExplanation` for audit.  Only `Low`-risk classes are
+/// auto-approved; `Medium`/`High`-risk classes require human review (denied).
+fn semantic_replay_for_class(
+    task_id: impl Into<String>,
+    task_class: &BoundedTaskClass,
+) -> SemanticReplayDecision {
+    let task_id: String = task_id.into();
+    let evaluation_id = next_id("srd");
+
+    let (equiv_class, rationale, confidence, features, approved) = match task_class {
+        BoundedTaskClass::LintFix => (
+            TaskEquivalenceClass::StaticAnalysisFix,
+            "lint and compile fixes share static-analysis signal family".to_string(),
+            95u8,
+            vec![
+                "compiler-diagnostic signal present".to_string(),
+                "no logic change — style or lint only".to_string(),
+                "bounded to source files".to_string(),
+            ],
+            true,
+        ),
+        BoundedTaskClass::DocsSingleFile => (
+            TaskEquivalenceClass::DocumentationEdit,
+            "single-file doc edits belong to the documentation edit equivalence family".to_string(),
+            90u8,
+            vec![
+                "change confined to one documentation or source file".to_string(),
+                "no runtime behaviour change".to_string(),
+            ],
+            true,
+        ),
+        BoundedTaskClass::DocsMultiFile => (
+            TaskEquivalenceClass::DocumentationEdit,
+            "multi-file doc edits belong to the documentation edit equivalence family; medium risk requires human review".to_string(),
+            75u8,
+            vec![
+                "change spans multiple documentation files".to_string(),
+                "medium risk tier — human review required".to_string(),
+            ],
+            false,
+        ),
+        BoundedTaskClass::CargoDepUpgrade => (
+            TaskEquivalenceClass::DependencyManifestUpdate,
+            "dependency upgrades belong to manifest-update equivalence family; medium risk requires human review".to_string(),
+            72u8,
+            vec![
+                "manifest-only change (Cargo.toml / Cargo.lock)".to_string(),
+                "medium risk tier — human review required".to_string(),
+            ],
+            false,
+        ),
+    };
+
+    let explanation = EquivalenceExplanation {
+        task_equivalence_class: equiv_class,
+        rationale,
+        matching_features: features,
+        replay_match_confidence: confidence,
+    };
+
+    if approved {
+        approve_semantic_replay(evaluation_id, task_id, explanation)
+    } else {
+        deny_semantic_replay(
+            evaluation_id,
+            task_id,
+            SemanticReplayReasonCode::EquivalenceClassNotAllowed,
+            format!(
+                "equivalence class {:?} is not auto-approved for semantic replay",
+                explanation.task_equivalence_class
+            ),
+        )
     }
 }
 
