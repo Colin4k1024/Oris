@@ -21,12 +21,14 @@
 //! MutationBuilder -> Evolution Store
 //! ```
 
+mod continuous;
 mod mutation;
 mod prioritize;
 mod rules;
 mod signal;
 mod source;
 
+pub use continuous::*;
 pub use mutation::*;
 pub use prioritize::*;
 pub use rules::*;
