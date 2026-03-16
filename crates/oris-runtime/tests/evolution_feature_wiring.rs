@@ -435,3 +435,40 @@ fn autonomous_pr_lane_decision_types_resolve() {
     let _approval = oris_runtime::agent_contract::PrLaneApprovalState::ClassNotApproved;
     let _reason = oris_runtime::agent_contract::AutonomousPrLaneReasonCode::UnknownFailClosed;
 }
+
+/// Wiring gate: AUTO-07 types and constructors resolve through oris-runtime.
+#[test]
+#[cfg(feature = "full-evolution-experimental")]
+fn autonomous_release_gate_decision_types_resolve() {
+    // approve_autonomous_release_gate and deny_autonomous_release_gate are
+    // reachable via oris_runtime::agent_contract.
+
+    let _approved: oris_runtime::agent_contract::AutonomousReleaseGateDecision =
+        oris_runtime::agent_contract::approve_autonomous_release_gate(
+            "gate-id-1".to_string(),
+            "task-id-1".to_string(),
+        );
+
+    let rollback = oris_runtime::agent_contract::RollbackPlan {
+        rollback_id: "rbk-1".to_string(),
+        description: "halt release".to_string(),
+        actionable: true,
+    };
+
+    let _denied: oris_runtime::agent_contract::AutonomousReleaseGateDecision =
+        oris_runtime::agent_contract::deny_autonomous_release_gate(
+            "gate-id-2".to_string(),
+            "task-id-2".to_string(),
+            oris_runtime::agent_contract::AutonomousReleaseReasonCode::KillSwitchActive,
+            oris_runtime::agent_contract::KillSwitchState::Active,
+            "kill switch is active",
+            Some(rollback),
+        );
+
+    // Variants accessible
+    let _merge = oris_runtime::agent_contract::AutonomousMergeGateStatus::MergeBlocked;
+    let _release = oris_runtime::agent_contract::AutonomousReleaseGateStatus::ReleaseBlocked;
+    let _publish = oris_runtime::agent_contract::AutonomousPublishGateStatus::PublishBlocked;
+    let _kill = oris_runtime::agent_contract::KillSwitchState::Inactive;
+    let _reason = oris_runtime::agent_contract::AutonomousReleaseReasonCode::UnknownFailClosed;
+}

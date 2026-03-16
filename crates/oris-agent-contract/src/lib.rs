@@ -1235,6 +1235,153 @@ pub fn deny_semantic_replay(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// AUTO-07: Fail-Closed Autonomous Merge and Release Gate For Narrow Safe Lanes
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Status of the autonomous merge gate.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousMergeGateStatus {
+    /// All merge gate checks passed; merge may proceed.
+    MergeApproved,
+    /// A merge gate check failed or evidence was missing; merge must not
+    /// proceed.
+    MergeBlocked,
+}
+
+/// Status of the autonomous release gate.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousReleaseGateStatus {
+    /// All release gate checks passed; release may proceed.
+    ReleaseApproved,
+    /// A release gate check failed; release must not proceed.
+    ReleaseBlocked,
+}
+
+/// Status of the autonomous publish gate.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousPublishGateStatus {
+    /// All publish gate checks passed; publish may proceed.
+    PublishApproved,
+    /// A publish gate check failed; publish must not proceed.
+    PublishBlocked,
+}
+
+/// Kill-switch state for the autonomous release lane.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KillSwitchState {
+    /// Kill switch is not active; lane may continue.
+    Inactive,
+    /// Kill switch is active; lane must halt immediately.
+    Active,
+}
+
+/// Reason codes for the autonomous release gate.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousReleaseReasonCode {
+    /// All gates passed; autonomous release is approved.
+    ApprovedForAutonomousRelease,
+    /// Task class is not in the approved narrow safe set.
+    TaskClassNotApproved,
+    /// Evidence is incomplete or missing from a prior stage.
+    IncompleteStageEvidence,
+    /// Kill switch is active; lane must halt.
+    KillSwitchActive,
+    /// Risk tier exceeds policy boundary.
+    RiskTierTooHigh,
+    /// Post-gate drift detected; rollback required.
+    PostGateDriftDetected,
+    /// Fail-closed fallback when reason cannot be determined.
+    UnknownFailClosed,
+}
+
+/// Rollback plan attached to a blocked or drifted autonomous release.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RollbackPlan {
+    /// Identifier for the rollback action.
+    pub rollback_id: String,
+    /// Human-readable description of the rollback steps.
+    pub description: String,
+    /// Whether the rollback is immediately actionable.
+    pub actionable: bool,
+}
+
+/// Combined gate decision record for the autonomous merge and release lane.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousReleaseGateDecision {
+    /// Unique identifier for this gate evaluation.
+    pub gate_id: String,
+    /// Human-readable summary of the gate decision.
+    pub gate_summary: String,
+    /// Result of the merge gate check.
+    pub merge_gate_result: AutonomousMergeGateStatus,
+    /// Result of the release gate check.
+    pub release_gate_result: AutonomousReleaseGateStatus,
+    /// Result of the publish gate check.
+    pub publish_gate_result: AutonomousPublishGateStatus,
+    /// Current kill-switch state at evaluation time.
+    pub kill_switch_state: KillSwitchState,
+    /// Rollback plan; populated when any gate is blocked or drift detected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_plan: Option<RollbackPlan>,
+    /// Machine-readable reason code.
+    pub reason_code: AutonomousReleaseReasonCode,
+    /// Safety gate: when `true` the lane must not proceed under any
+    /// circumstance.
+    pub fail_closed: bool,
+}
+
+/// Construct an approved `AutonomousReleaseGateDecision`.
+pub fn approve_autonomous_release_gate(
+    gate_id: impl Into<String>,
+    task_id: impl Into<String>,
+) -> AutonomousReleaseGateDecision {
+    let task_id: String = task_id.into();
+    let gate_summary =
+        format!("autonomous release gate approved for task {task_id}: all gates passed");
+    AutonomousReleaseGateDecision {
+        gate_id: gate_id.into(),
+        gate_summary,
+        merge_gate_result: AutonomousMergeGateStatus::MergeApproved,
+        release_gate_result: AutonomousReleaseGateStatus::ReleaseApproved,
+        publish_gate_result: AutonomousPublishGateStatus::PublishApproved,
+        kill_switch_state: KillSwitchState::Inactive,
+        rollback_plan: None,
+        reason_code: AutonomousReleaseReasonCode::ApprovedForAutonomousRelease,
+        fail_closed: false,
+    }
+}
+
+/// Construct a denied `AutonomousReleaseGateDecision`.
+pub fn deny_autonomous_release_gate(
+    gate_id: impl Into<String>,
+    task_id: impl Into<String>,
+    reason_code: AutonomousReleaseReasonCode,
+    kill_switch_state: KillSwitchState,
+    detail: impl Into<String>,
+    rollback_plan: Option<RollbackPlan>,
+) -> AutonomousReleaseGateDecision {
+    let task_id: String = task_id.into();
+    let detail: String = detail.into();
+    let gate_summary = format!("autonomous release gate denied for task {task_id}: {detail}");
+    AutonomousReleaseGateDecision {
+        gate_id: gate_id.into(),
+        gate_summary,
+        merge_gate_result: AutonomousMergeGateStatus::MergeBlocked,
+        release_gate_result: AutonomousReleaseGateStatus::ReleaseBlocked,
+        publish_gate_result: AutonomousPublishGateStatus::PublishBlocked,
+        kill_switch_state,
+        rollback_plan,
+        reason_code,
+        fail_closed: true,
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // AUTO-06: Bounded Autonomous PR Lane For Low-Risk Task Classes
 // ──────────────────────────────────────────────────────────────────────────────
 
