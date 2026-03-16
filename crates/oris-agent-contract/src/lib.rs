@@ -1115,6 +1115,125 @@ pub fn deny_autonomous_mutation_proposal(
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// AUTO-04: Semantic Task-Class Generalization Beyond Normalized Signals
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Broader semantic equivalence families for replay generalization.
+///
+/// A `TaskEquivalenceClass` groups bounded task classes that share enough
+/// semantic properties to allow cross-task replay within the family while
+/// keeping false-positive replay rates at zero for unrelated work.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskEquivalenceClass {
+    /// Any documentation edit — single-file or multi-file docs changes are
+    /// in the same semantic family.
+    DocumentationEdit,
+    /// Pure static-analysis or compiler-driven code fixes (lints, clippy, fmt).
+    StaticAnalysisFix,
+    /// Dependency manifest updates (Cargo.toml, Cargo.lock upgrades).
+    DependencyManifestUpdate,
+    /// Catch-all: task does not belong to any recognized equivalence family.
+    Unclassified,
+}
+
+/// Human-readable and machine-auditable explanation for why two tasks are
+/// considered semantically equivalent for replay selection purposes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EquivalenceExplanation {
+    /// The equivalence class that was matched.
+    pub task_equivalence_class: TaskEquivalenceClass,
+    /// Short human-readable rationale for the equivalence match.
+    pub rationale: String,
+    /// Specific features that were used to determine equivalence.
+    pub matching_features: Vec<String>,
+    /// Confidence score in [0, 100] that this is a true equivalence match.
+    pub replay_match_confidence: u8,
+}
+
+/// Reason code explaining the outcome of a semantic replay evaluation.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticReplayReasonCode {
+    /// Task matched a known equivalence class and replay is permitted.
+    EquivalenceMatchApproved,
+    /// Task is in an approved class but confidence is below the minimum threshold.
+    LowConfidenceDenied,
+    /// Task did not match any approved semantic equivalence class.
+    NoEquivalenceClassMatch,
+    /// Replay was not permitted because the equivalence class is not on the
+    /// allowed list for the current risk tier.
+    EquivalenceClassNotAllowed,
+    /// Semantic evaluation failed with an unexpected state; fail closed.
+    UnknownFailClosed,
+}
+
+/// Decision produced by semantic replay evaluation.
+///
+/// Consumers must check `replay_decision` and `fail_closed` before attempting
+/// any replay operation. When `fail_closed` is `true`, replay must not proceed
+/// regardless of `replay_decision`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SemanticReplayDecision {
+    /// Unique identifier for this evaluation.
+    pub evaluation_id: String,
+    /// The task identifier being evaluated.
+    pub task_id: String,
+    /// Whether semantic replay is permitted for this task.
+    pub replay_decision: bool,
+    /// The equivalence explanation that drove the decision, if any.
+    pub equivalence_explanation: Option<EquivalenceExplanation>,
+    /// The reason code for this decision.
+    pub reason_code: SemanticReplayReasonCode,
+    /// Human-readable decision summary.
+    pub summary: String,
+    /// Safety gate. When `true`, replay must be blocked regardless of
+    /// `replay_decision`.
+    pub fail_closed: bool,
+}
+
+/// Construct an approved `SemanticReplayDecision`.
+pub fn approve_semantic_replay(
+    evaluation_id: impl Into<String>,
+    task_id: impl Into<String>,
+    explanation: EquivalenceExplanation,
+) -> SemanticReplayDecision {
+    let summary = format!(
+        "semantic replay approved [equivalence_class={:?}, confidence={}]",
+        explanation.task_equivalence_class, explanation.replay_match_confidence
+    );
+    SemanticReplayDecision {
+        evaluation_id: evaluation_id.into(),
+        task_id: task_id.into(),
+        replay_decision: true,
+        reason_code: SemanticReplayReasonCode::EquivalenceMatchApproved,
+        equivalence_explanation: Some(explanation),
+        summary,
+        fail_closed: false,
+    }
+}
+
+/// Construct a denied `SemanticReplayDecision`.
+pub fn deny_semantic_replay(
+    evaluation_id: impl Into<String>,
+    task_id: impl Into<String>,
+    reason_code: SemanticReplayReasonCode,
+    context: impl Into<String>,
+) -> SemanticReplayDecision {
+    let context: String = context.into();
+    let summary = format!("semantic replay denied [{reason_code:?}]: {context}");
+    SemanticReplayDecision {
+        evaluation_id: evaluation_id.into(),
+        task_id: task_id.into(),
+        replay_decision: false,
+        equivalence_explanation: None,
+        reason_code,
+        summary,
+        fail_closed: true,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfEvolutionSelectionReasonCode {

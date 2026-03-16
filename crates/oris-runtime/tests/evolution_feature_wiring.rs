@@ -330,3 +330,35 @@ fn autonomous_mutation_proposal_types_resolve() {
     let _mode = oris_runtime::agent_contract::AutonomousApprovalMode::AutoApproved;
     let _code = oris_runtime::agent_contract::AutonomousProposalReasonCode::Proposed;
 }
+
+#[test]
+fn semantic_replay_decision_types_resolve() {
+    // AUTO-04 wiring gate: ensure TaskEquivalenceClass, EquivalenceExplanation,
+    // SemanticReplayDecision, SemanticReplayReasonCode, approve_semantic_replay,
+    // deny_semantic_replay are reachable via oris_runtime::agent_contract.
+
+    let explanation = oris_runtime::agent_contract::EquivalenceExplanation {
+        task_equivalence_class:
+            oris_runtime::agent_contract::TaskEquivalenceClass::StaticAnalysisFix,
+        rationale: "lint task semantic equivalence".to_string(),
+        matching_features: vec!["compiler-diagnostic signal".to_string()],
+        replay_match_confidence: 95,
+    };
+    let _approved: oris_runtime::agent_contract::SemanticReplayDecision =
+        oris_runtime::agent_contract::approve_semantic_replay(
+            "eval-id-1".to_string(),
+            "task-id-1".to_string(),
+            explanation,
+        );
+    let _denied: oris_runtime::agent_contract::SemanticReplayDecision =
+        oris_runtime::agent_contract::deny_semantic_replay(
+            "eval-id-2".to_string(),
+            "task-id-2".to_string(),
+            oris_runtime::agent_contract::SemanticReplayReasonCode::NoEquivalenceClassMatch,
+            "no matching class",
+        );
+
+    // Variants accessible
+    let _class = oris_runtime::agent_contract::TaskEquivalenceClass::Unclassified;
+    let _code = oris_runtime::agent_contract::SemanticReplayReasonCode::UnknownFailClosed;
+}

@@ -17,10 +17,10 @@ use oris_agent_contract::{
     ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayPlannerDirective,
     SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
     SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
-    SelfEvolutionSelectionReasonCode, SupervisedDeliveryApprovalState,
+    SelfEvolutionSelectionReasonCode, SemanticReplayReasonCode, SupervisedDeliveryApprovalState,
     SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
     SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
-    SupervisedExecutionReasonCode, SupervisedValidationOutcome,
+    SupervisedExecutionReasonCode, SupervisedValidationOutcome, TaskEquivalenceClass,
 };
 use oris_evokernel::{
     extract_deterministic_signals, prepare_mutation, CommandValidator, EvoAssetState,
@@ -3941,5 +3941,135 @@ fn autonomous_proposal_reason_codes_are_stable() {
     assert_eq!(
         format!("{:?}", AutonomousApprovalMode::RequiresHumanReview),
         "RequiresHumanReview"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTO-04 regression tests: semantic task-class generalization
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn semantic_replay_lint_fix_is_approved_with_static_analysis_class() {
+    let kernel = make_evo_kernel_for_autonomous_intake("semantic_replay_lint_fix");
+    let decision = kernel.evaluate_semantic_replay("task-lint-001", &BoundedTaskClass::LintFix);
+    assert!(decision.replay_decision, "LintFix should be auto-approved");
+    assert!(
+        !decision.fail_closed,
+        "approved decision must not be fail-closed"
+    );
+    let expl = decision
+        .equivalence_explanation
+        .expect("explanation must be present for approved decision");
+    assert_eq!(
+        expl.task_equivalence_class,
+        TaskEquivalenceClass::StaticAnalysisFix
+    );
+    assert!(
+        expl.replay_match_confidence >= 90,
+        "LintFix confidence should be >= 90"
+    );
+    assert_eq!(
+        decision.reason_code,
+        SemanticReplayReasonCode::EquivalenceMatchApproved
+    );
+}
+
+#[test]
+fn semantic_replay_docs_single_file_is_approved_with_documentation_edit_class() {
+    let kernel = make_evo_kernel_for_autonomous_intake("semantic_replay_docs_single");
+    let decision =
+        kernel.evaluate_semantic_replay("task-docs-001", &BoundedTaskClass::DocsSingleFile);
+    assert!(
+        decision.replay_decision,
+        "DocsSingleFile should be auto-approved"
+    );
+    assert!(!decision.fail_closed);
+    let expl = decision
+        .equivalence_explanation
+        .expect("explanation must be present");
+    assert_eq!(
+        expl.task_equivalence_class,
+        TaskEquivalenceClass::DocumentationEdit
+    );
+    assert_eq!(
+        decision.reason_code,
+        SemanticReplayReasonCode::EquivalenceMatchApproved
+    );
+}
+
+#[test]
+fn semantic_replay_docs_multi_file_is_denied_requires_human_review() {
+    let kernel = make_evo_kernel_for_autonomous_intake("semantic_replay_docs_multi");
+    let decision =
+        kernel.evaluate_semantic_replay("task-docs-multi-001", &BoundedTaskClass::DocsMultiFile);
+    assert!(
+        !decision.replay_decision,
+        "DocsMultiFile medium-risk should be denied"
+    );
+    assert!(decision.fail_closed, "denied decision must be fail-closed");
+    assert!(
+        decision.equivalence_explanation.is_none(),
+        "denied decision has no equivalence explanation"
+    );
+    assert_eq!(
+        decision.reason_code,
+        SemanticReplayReasonCode::EquivalenceClassNotAllowed
+    );
+}
+
+#[test]
+fn semantic_replay_cargo_dep_upgrade_is_denied_requires_human_review() {
+    let kernel = make_evo_kernel_for_autonomous_intake("semantic_replay_cargo_dep");
+    let decision =
+        kernel.evaluate_semantic_replay("task-dep-001", &BoundedTaskClass::CargoDepUpgrade);
+    assert!(
+        !decision.replay_decision,
+        "CargoDepUpgrade medium-risk should be denied"
+    );
+    assert!(decision.fail_closed);
+    assert_eq!(
+        decision.reason_code,
+        SemanticReplayReasonCode::EquivalenceClassNotAllowed
+    );
+}
+
+#[test]
+fn semantic_replay_reason_codes_and_equivalence_classes_are_stable() {
+    // discriminant stability regression — names must not silently change
+    assert_eq!(
+        format!("{:?}", SemanticReplayReasonCode::EquivalenceMatchApproved),
+        "EquivalenceMatchApproved"
+    );
+    assert_eq!(
+        format!("{:?}", SemanticReplayReasonCode::LowConfidenceDenied),
+        "LowConfidenceDenied"
+    );
+    assert_eq!(
+        format!("{:?}", SemanticReplayReasonCode::NoEquivalenceClassMatch),
+        "NoEquivalenceClassMatch"
+    );
+    assert_eq!(
+        format!("{:?}", SemanticReplayReasonCode::EquivalenceClassNotAllowed),
+        "EquivalenceClassNotAllowed"
+    );
+    assert_eq!(
+        format!("{:?}", SemanticReplayReasonCode::UnknownFailClosed),
+        "UnknownFailClosed"
+    );
+    assert_eq!(
+        format!("{:?}", TaskEquivalenceClass::DocumentationEdit),
+        "DocumentationEdit"
+    );
+    assert_eq!(
+        format!("{:?}", TaskEquivalenceClass::StaticAnalysisFix),
+        "StaticAnalysisFix"
+    );
+    assert_eq!(
+        format!("{:?}", TaskEquivalenceClass::DependencyManifestUpdate),
+        "DependencyManifestUpdate"
+    );
+    assert_eq!(
+        format!("{:?}", TaskEquivalenceClass::Unclassified),
+        "Unclassified"
     );
 }
