@@ -69,9 +69,12 @@ Keep the repository state, the issue scope, and the released crate version align
 
 - Finish with the `release finalization` command group in [command-checklist.md](references/command-checklist.md).
 - Push the branch and any release tag needed by the chosen workflow.
-- Record the `released` state before final closeout so the issue timeline shows that the crate version shipped.
-- Leave a short issue comment summarizing the shipped behavior, validation performed, and released version.
-- Close the issue only after the release step succeeded, unless the user explicitly wants a different closeout rule.
+- Determine the repository default branch dynamically with `gh repo view --json defaultBranchRef -q .defaultBranchRef.name`.
+- Open a PR targeting the default branch using `gh pr create`. The PR body must include `Closes #<number>`, a one-line behavior summary, the validation commands run, and the released crate version.
+- Enable auto-merge with `gh pr merge --auto --squash` so the PR merges automatically once required checks pass. If auto-merge is not enabled on the repository, merge manually after review instead.
+- Record the `released` state comment on the issue before the PR merges so the issue timeline shows the crate version shipped.
+- Close the issue only after the PR has successfully merged. If auto-merge is pending, leave the issue open until merge is confirmed.
+- Leave a short closeout comment on the issue with the PR number that completed the merge.
 - Return to `gh issue list --state open` and continue with the next issue.
 
 ## Operating Rules

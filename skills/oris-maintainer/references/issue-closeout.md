@@ -2,9 +2,10 @@
 
 ## Closeout Policy
 
-- Close an issue only after the code is merged or pushed to the intended branch and the crate publish succeeded.
+- Close an issue only after the PR targeting the default branch has successfully merged and the crate publish succeeded.
+- Do not close an issue when auto-merge is still pending. Wait for the merge event, then close.
 - Use one released crate version per completed issue by default.
-- Keep the issue comment short and factual: shipped change, validation run, and released version.
+- Keep the issue comment short and factual: shipped change, validation run, released version, and merged PR number.
 
 ## Comment Template
 
@@ -25,10 +26,10 @@ Validation:
 
 ## Close Template
 
-Use this pattern when the issue is ready to close immediately:
+Use this pattern after the PR has merged:
 
 ```bash
-gh issue close <issue_number> --comment "Completed and released in oris-runtime v<version>.
+gh issue close <issue_number> --comment "Completed and released in oris-runtime v<version>. Merged via PR #<pr_number>.
 
 Validation:
 - cargo fmt --all -- --check

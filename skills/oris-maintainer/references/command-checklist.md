@@ -83,11 +83,52 @@ Run these after a successful publish:
 
 ```bash
 git push
-gh issue comment <issue_number> --body "<released status or shipped summary>"
-gh issue close <issue_number> --comment "<final release closeout>"
 ```
 
-If the workflow uses a tag, create and push `v<version>` before closing the issue.
+If the workflow uses a tag, create and push `v<version>` before opening the PR.
+
+Post the `released` status comment while the PR is pending review/merge:
+
+```bash
+gh issue comment <issue_number> --body "Status: released
+
+Released version:
+- oris-runtime v<version>"
+```
+
+Determine the repository default branch, then open a PR targeting it:
+
+```bash
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+
+gh pr create \
+  --base "$DEFAULT_BRANCH" \
+  --title "fix: <one-line issue title> (#<issue_number>)" \
+  --body "Closes #<issue_number>
+
+## Summary
+<one-line behavior change>
+
+## Validation
+- \`cargo fmt --all -- --check\`
+- \`<targeted test command>\`
+- \`cargo publish -p oris-runtime --all-features --dry-run\` passed
+- Released as oris-runtime v<version>"
+```
+
+Enable auto-merge so the PR merges automatically once branch-protection checks pass:
+
+```bash
+gh pr merge --auto --squash
+```
+
+> **Note:** `--auto` requires the repository to have auto-merge enabled and any required status checks configured. If the command fails with "auto-merge is not allowed", run `gh pr merge --squash` manually after review instead.
+
+Close the issue only **after** the PR has merged:
+
+```bash
+gh issue close <issue_number> --comment "Completed and released in oris-runtime v<version>. Merged via PR #<pr_number>."
+```
 
 ## 8. Failure Path
 
