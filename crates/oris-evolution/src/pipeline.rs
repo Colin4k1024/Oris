@@ -1259,9 +1259,7 @@ mod tests {
                 validate_calls.clone(),
                 true,
             )))
-            .with_evaluate_port(Arc::new(CountingEvaluatePort::new(
-                evaluate_calls.clone(),
-            )));
+            .with_evaluate_port(Arc::new(CountingEvaluatePort::new(evaluate_calls.clone())));
 
         let result = pipeline
             .execute(PipelineContext::default())
@@ -1302,9 +1300,7 @@ mod tests {
                 validate_calls.clone(),
                 false,
             )))
-            .with_evaluate_port(Arc::new(CountingEvaluatePort::new(
-                evaluate_calls.clone(),
-            )));
+            .with_evaluate_port(Arc::new(CountingEvaluatePort::new(evaluate_calls.clone())));
 
         let result = pipeline
             .execute(PipelineContext::default())

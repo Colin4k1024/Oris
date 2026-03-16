@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
-    AgentTask, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
+    AgentTask, AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeReasonCode,
+    BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
     MutationProposalContractReasonCode, MutationProposalEvidence, ReplayFallbackNextAction,
     ReplayFallbackReasonCode, ReplayPlannerDirective, SelfEvolutionAcceptanceGateInput,
     SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionAuditConsistencyResult,
@@ -3489,4 +3490,140 @@ fn builtin_evomap_replay_path_has_declared_mutation() {
             )
         }));
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EVO26-AUTO-01: autonomous candidate intake regression tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn make_evo_kernel_for_autonomous_intake(label: &str) -> EvoKernel<TestState> {
+    let (_, _, evo) = test_evo(label);
+    evo
+}
+
+#[test]
+fn autonomous_intake_accepts_compile_regression_signal() {
+    let kernel = make_evo_kernel_for_autonomous_intake(
+        "autonomous_intake_accepts_compile_regression_signal",
+    );
+    let input = AutonomousIntakeInput {
+        source_id: "ci-run-001".to_string(),
+        candidate_source: AutonomousCandidateSource::CompileRegression,
+        raw_signals: vec![
+            "error[E0308]: mismatched types".to_string(),
+            "  --> crates/oris-runtime/src/lib.rs:42:5".to_string(),
+        ],
+    };
+
+    let output = kernel.discover_autonomous_candidates(&input);
+    assert_eq!(output.accepted_count, 1, "expected one accepted candidate");
+    assert_eq!(output.denied_count, 0);
+    let candidate = &output.candidates[0];
+    assert!(candidate.accepted, "candidate should be accepted");
+    assert_eq!(candidate.reason_code, AutonomousIntakeReasonCode::Accepted);
+    assert!(!candidate.fail_closed);
+    assert_eq!(candidate.candidate_class, Some(BoundedTaskClass::LintFix));
+    assert!(!candidate.dedupe_key.is_empty());
+}
+
+#[test]
+fn autonomous_intake_accepts_test_failure_signal() {
+    let kernel =
+        make_evo_kernel_for_autonomous_intake("autonomous_intake_accepts_test_failure_signal");
+    let input = AutonomousIntakeInput {
+        source_id: "ci-run-002".to_string(),
+        candidate_source: AutonomousCandidateSource::TestRegression,
+        raw_signals: vec![
+            "test evolution_lifecycle_regression::some_test ... FAILED".to_string(),
+            "failures: evolution_lifecycle_regression::some_test".to_string(),
+        ],
+    };
+
+    let output = kernel.discover_autonomous_candidates(&input);
+    assert_eq!(output.accepted_count, 1);
+    let candidate = &output.candidates[0];
+    assert!(candidate.accepted);
+    assert_eq!(candidate.candidate_class, Some(BoundedTaskClass::LintFix));
+}
+
+#[test]
+fn autonomous_intake_deduplicates_equivalent_signals() {
+    let kernel =
+        make_evo_kernel_for_autonomous_intake("autonomous_intake_deduplicates_equivalent_signals");
+    let signals = vec![
+        "  error[E0308]: mismatched types  ".to_string(), // extra whitespace
+        "error[E0308]: mismatched types".to_string(),     // duplicate after trim
+    ];
+    let input = AutonomousIntakeInput {
+        source_id: "ci-run-003".to_string(),
+        candidate_source: AutonomousCandidateSource::LintRegression,
+        raw_signals: signals,
+    };
+
+    let output = kernel.discover_autonomous_candidates(&input);
+    // After normalisation the two tokens collapse into one; still accepted.
+    assert_eq!(
+        output.accepted_count, 1,
+        "deduplicated signals still accepted"
+    );
+    assert_eq!(output.candidates.len(), 1);
+    // Normalised signals should have no duplicates.
+    let cand = &output.candidates[0];
+    let mut seen = std::collections::BTreeSet::new();
+    for s in &cand.signals {
+        assert!(
+            seen.insert(s.clone()),
+            "signal {s:?} appears twice after dedupe"
+        );
+    }
+}
+
+#[test]
+fn autonomous_intake_denies_empty_signals_fail_closed() {
+    let kernel =
+        make_evo_kernel_for_autonomous_intake("autonomous_intake_denies_empty_signals_fail_closed");
+    let input = AutonomousIntakeInput {
+        source_id: "ci-run-empty".to_string(),
+        candidate_source: AutonomousCandidateSource::CiFailure,
+        raw_signals: vec![],
+    };
+
+    let output = kernel.discover_autonomous_candidates(&input);
+    assert_eq!(output.accepted_count, 0);
+    assert_eq!(output.denied_count, 1);
+    let candidate = &output.candidates[0];
+    assert!(!candidate.accepted);
+    assert!(candidate.fail_closed, "empty signals must fail closed");
+    assert_eq!(
+        candidate.reason_code,
+        AutonomousIntakeReasonCode::UnknownFailClosed
+    );
+}
+
+#[test]
+fn autonomous_intake_denies_ambiguous_signals_fail_closed() {
+    let kernel = make_evo_kernel_for_autonomous_intake(
+        "autonomous_intake_denies_ambiguous_signals_fail_closed",
+    );
+    // RuntimeIncident is currently unsupported / maps to None in classify_autonomous_signals.
+    let input = AutonomousIntakeInput {
+        source_id: "incident-001".to_string(),
+        candidate_source: AutonomousCandidateSource::RuntimeIncident,
+        raw_signals: vec![
+            "PANIC: index out of bounds".to_string(),
+            "thread 'tokio-worker' panicked".to_string(),
+        ],
+    };
+
+    let output = kernel.discover_autonomous_candidates(&input);
+    assert_eq!(output.accepted_count, 0);
+    assert_eq!(output.denied_count, 1);
+    let candidate = &output.candidates[0];
+    assert!(!candidate.accepted);
+    assert!(candidate.fail_closed, "unsupported source must fail closed");
+    assert_eq!(
+        candidate.reason_code,
+        AutonomousIntakeReasonCode::AmbiguousSignal
+    );
+    assert!(candidate.candidate_class.is_none());
 }

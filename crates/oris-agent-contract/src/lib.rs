@@ -744,6 +744,74 @@ pub struct SelfEvolutionCandidateIntakeRequest {
     pub candidate_hint_paths: Vec<String>,
 }
 
+/// Signal source for an autonomously discovered candidate.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousCandidateSource {
+    CiFailure,
+    TestRegression,
+    CompileRegression,
+    LintRegression,
+    RuntimeIncident,
+}
+
+/// Reason code for the outcome of autonomous candidate classification.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousIntakeReasonCode {
+    Accepted,
+    UnsupportedSignalClass,
+    AmbiguousSignal,
+    DuplicateCandidate,
+    UnknownFailClosed,
+}
+
+/// A candidate discovered autonomously from CI or runtime signals without
+/// a caller-supplied issue number.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveredCandidate {
+    /// Stable identity hash, deterministic for the same raw signals.
+    pub dedupe_key: String,
+    /// Classified signal source.
+    pub candidate_source: AutonomousCandidateSource,
+    /// Normalised candidate class (reuses `BoundedTaskClass`).
+    pub candidate_class: Option<BoundedTaskClass>,
+    /// Normalised signal tokens used as the discovered work description.
+    pub signals: Vec<String>,
+    /// Whether this candidate was accepted for further work.
+    pub accepted: bool,
+    /// Outcome reason code.
+    pub reason_code: AutonomousIntakeReasonCode,
+    /// Human-readable summary.
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
+    /// Fail-closed flag: true on any non-accepted outcome.
+    pub fail_closed: bool,
+}
+
+/// Input for autonomous candidate discovery from raw diagnostic output.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousIntakeInput {
+    /// Raw source identifier (e.g. CI run ID, log stream name).
+    pub source_id: String,
+    /// Classified origin of the raw signals.
+    pub candidate_source: AutonomousCandidateSource,
+    /// Raw text lines from diagnostics, test output, or incident logs.
+    pub raw_signals: Vec<String>,
+}
+
+/// Output of autonomous candidate intake: one or more discovered candidates
+/// (deduplicated) plus any that were denied with fail-closed reason codes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousIntakeOutput {
+    pub candidates: Vec<DiscoveredCandidate>,
+    pub accepted_count: usize,
+    pub denied_count: usize,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfEvolutionSelectionReasonCode {
@@ -880,6 +948,73 @@ pub fn reject_self_evolution_selection_decision(
         reason_code: Some(reason_code),
         failure_reason: Some(failure_reason),
         recovery_hint: Some(defaults.recovery_hint.to_string()),
+        fail_closed: true,
+    }
+}
+
+pub fn accept_discovered_candidate(
+    dedupe_key: impl Into<String>,
+    candidate_source: AutonomousCandidateSource,
+    candidate_class: BoundedTaskClass,
+    signals: Vec<String>,
+    summary: Option<&str>,
+) -> DiscoveredCandidate {
+    let summary = normalize_optional_text(summary)
+        .unwrap_or_else(|| format!("accepted autonomous candidate from {candidate_source:?}"));
+    DiscoveredCandidate {
+        dedupe_key: dedupe_key.into(),
+        candidate_source,
+        candidate_class: Some(candidate_class),
+        signals,
+        accepted: true,
+        reason_code: AutonomousIntakeReasonCode::Accepted,
+        summary,
+        failure_reason: None,
+        recovery_hint: None,
+        fail_closed: false,
+    }
+}
+
+pub fn deny_discovered_candidate(
+    dedupe_key: impl Into<String>,
+    candidate_source: AutonomousCandidateSource,
+    signals: Vec<String>,
+    reason_code: AutonomousIntakeReasonCode,
+) -> DiscoveredCandidate {
+    let (failure_reason, recovery_hint) = match reason_code {
+        AutonomousIntakeReasonCode::UnsupportedSignalClass => (
+            "signal class is not supported by the bounded evolution policy",
+            "review supported candidate signal classes and filter input before retry",
+        ),
+        AutonomousIntakeReasonCode::AmbiguousSignal => (
+            "signals do not map to a unique bounded candidate class",
+            "provide more specific signal tokens or triage manually before resubmitting",
+        ),
+        AutonomousIntakeReasonCode::DuplicateCandidate => (
+            "an equivalent candidate has already been discovered in this intake window",
+            "deduplicate signals before resubmitting or check the existing candidate queue",
+        ),
+        AutonomousIntakeReasonCode::UnknownFailClosed => (
+            "candidate intake failed with an unmapped reason; fail closed",
+            "require explicit maintainer triage before retry",
+        ),
+        AutonomousIntakeReasonCode::Accepted => (
+            "unexpected accepted reason on deny path",
+            "use accept_discovered_candidate for accepted outcomes",
+        ),
+    };
+    let summary =
+        format!("denied autonomous candidate from {candidate_source:?}: {failure_reason}");
+    DiscoveredCandidate {
+        dedupe_key: dedupe_key.into(),
+        candidate_source,
+        candidate_class: None,
+        signals,
+        accepted: false,
+        reason_code,
+        summary,
+        failure_reason: Some(failure_reason.to_string()),
+        recovery_hint: Some(recovery_hint.to_string()),
         fail_closed: true,
     }
 }

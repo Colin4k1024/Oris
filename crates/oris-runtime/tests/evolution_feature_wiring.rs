@@ -218,3 +218,34 @@ fn task_class_resolver_paths_resolve() {
         &classes
     ));
 }
+
+/// Issue #264 — EVO26-AUTO-01: Autonomous candidate intake types resolve via facade
+#[test]
+fn autonomous_candidate_intake_types_resolve() {
+    assert_type::<oris_runtime::agent_contract::AutonomousCandidateSource>();
+    assert_type::<oris_runtime::agent_contract::AutonomousIntakeReasonCode>();
+    assert_type::<oris_runtime::agent_contract::DiscoveredCandidate>();
+    assert_type::<oris_runtime::agent_contract::AutonomousIntakeInput>();
+    assert_type::<oris_runtime::agent_contract::AutonomousIntakeOutput>();
+
+    // Constructor helpers resolve and produce correct types
+    let _c: oris_runtime::agent_contract::DiscoveredCandidate =
+        oris_runtime::agent_contract::accept_discovered_candidate(
+            "key1".to_string(),
+            oris_runtime::agent_contract::AutonomousCandidateSource::CiFailure,
+            oris_runtime::agent_contract::BoundedTaskClass::LintFix,
+            vec![],
+            None,
+        );
+    let _d: oris_runtime::agent_contract::DiscoveredCandidate =
+        oris_runtime::agent_contract::deny_discovered_candidate(
+            "key2".to_string(),
+            oris_runtime::agent_contract::AutonomousCandidateSource::CiFailure,
+            vec![],
+            oris_runtime::agent_contract::AutonomousIntakeReasonCode::UnknownFailClosed,
+        );
+
+    // Variants accessible
+    let _src = oris_runtime::agent_contract::AutonomousCandidateSource::CiFailure;
+    let _code = oris_runtime::agent_contract::AutonomousIntakeReasonCode::Accepted;
+}
