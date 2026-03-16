@@ -11,29 +11,31 @@ use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
     accept_discovered_candidate, accept_self_evolution_selection_decision,
     approve_autonomous_mutation_proposal, approve_autonomous_task_plan, approve_semantic_replay,
-    deny_autonomous_mutation_proposal, deny_autonomous_task_plan, deny_discovered_candidate,
-    deny_semantic_replay, infer_mutation_needed_failure_reason_code,
-    infer_replay_fallback_reason_code, normalize_mutation_needed_failure_contract,
-    normalize_replay_fallback_contract, reject_self_evolution_selection_decision, AgentRole,
+    demote_asset, deny_autonomous_mutation_proposal, deny_autonomous_task_plan,
+    deny_discovered_candidate, deny_semantic_replay, fail_confidence_revalidation,
+    infer_mutation_needed_failure_reason_code, infer_replay_fallback_reason_code,
+    normalize_mutation_needed_failure_contract, normalize_replay_fallback_contract,
+    pass_confidence_revalidation, reject_self_evolution_selection_decision, AgentRole,
     AutonomousApprovalMode, AutonomousCandidateSource, AutonomousIntakeInput,
     AutonomousIntakeOutput, AutonomousIntakeReasonCode, AutonomousMutationProposal,
     AutonomousPlanReasonCode, AutonomousProposalReasonCode, AutonomousProposalScope,
-    AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass, CoordinationMessage,
-    CoordinationPlan, CoordinationPrimitive, CoordinationResult, CoordinationTask,
+    AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass, ConfidenceDemotionReasonCode,
+    ConfidenceRevalidationResult, ConfidenceState, CoordinationMessage, CoordinationPlan,
+    CoordinationPrimitive, CoordinationResult, CoordinationTask, DemotionDecision,
     DiscoveredCandidate, EquivalenceExplanation, ExecutionFeedback, MutationNeededFailureContract,
     MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
     MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
     MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
-    ReplayPlannerDirective, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
-    SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
-    SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
-    SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
-    SelfEvolutionReasonCodeMatrix, SelfEvolutionSelectionDecision,
-    SelfEvolutionSelectionReasonCode, SemanticReplayDecision, SemanticReplayReasonCode,
-    SupervisedDeliveryApprovalState, SupervisedDeliveryContract, SupervisedDeliveryReasonCode,
-    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
-    SupervisedDevloopStatus, SupervisedExecutionDecision, SupervisedExecutionReasonCode,
-    SupervisedValidationOutcome, TaskEquivalenceClass,
+    ReplayPlannerDirective, RevalidationOutcome, SelfEvolutionAcceptanceGateContract,
+    SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
+    SelfEvolutionApprovalEvidence, SelfEvolutionAuditConsistencyResult,
+    SelfEvolutionCandidateIntakeRequest, SelfEvolutionDeliveryOutcome,
+    SelfEvolutionMutationProposalContract, SelfEvolutionReasonCodeMatrix,
+    SelfEvolutionSelectionDecision, SelfEvolutionSelectionReasonCode, SemanticReplayDecision,
+    SemanticReplayReasonCode, SupervisedDeliveryApprovalState, SupervisedDeliveryContract,
+    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
+    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
+    SupervisedExecutionReasonCode, SupervisedValidationOutcome, TaskEquivalenceClass,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -3544,6 +3546,39 @@ impl<S: KernelState> EvoKernel<S> {
         semantic_replay_for_class(task_id, task_class)
     }
 
+    /// Continuous confidence revalidation evaluation for a given asset.
+    ///
+    /// Given the asset's `current_state` and its recent `failure_count`,
+    /// produces a `ConfidenceRevalidationResult` determining whether the asset
+    /// remains replay-eligible. Assets with three or more failures are
+    /// revalidated as failed; otherwise they pass.
+    ///
+    /// This is the `EVO26-AUTO-05` confidence revalidation entry point.
+    pub fn evaluate_confidence_revalidation(
+        &self,
+        asset_id: impl Into<String>,
+        current_state: ConfidenceState,
+        failure_count: u32,
+    ) -> ConfidenceRevalidationResult {
+        confidence_revalidation_for_asset(asset_id, current_state, failure_count)
+    }
+
+    /// Asset demotion decision for an asset that has exceeded failure policy.
+    ///
+    /// Promotes the decision from `Demoted` to `Quarantined` when
+    /// `failure_count >= 5`; `Demoted` otherwise.
+    ///
+    /// This is the `EVO26-AUTO-05` asset demotion entry point.
+    pub fn evaluate_asset_demotion(
+        &self,
+        asset_id: impl Into<String>,
+        prior_state: ConfidenceState,
+        failure_count: u32,
+        reason_code: ConfidenceDemotionReasonCode,
+    ) -> DemotionDecision {
+        asset_demotion_decision(asset_id, prior_state, failure_count, reason_code)
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -5647,6 +5682,48 @@ fn semantic_replay_for_class(
             ),
         )
     }
+}
+
+/// Confidence revalidation logic for a single asset.
+///
+/// If `failure_count >= 3`, revalidation fails and replay is suspended.
+/// Otherwise the asset passes revalidation and confidence is restored.
+fn confidence_revalidation_for_asset(
+    asset_id: impl Into<String>,
+    current_state: ConfidenceState,
+    failure_count: u32,
+) -> ConfidenceRevalidationResult {
+    let asset_id: String = asset_id.into();
+    let revalidation_id = next_id("crv");
+
+    if failure_count >= 3 {
+        fail_confidence_revalidation(
+            revalidation_id,
+            asset_id,
+            current_state,
+            RevalidationOutcome::Failed,
+        )
+    } else {
+        pass_confidence_revalidation(revalidation_id, asset_id, current_state)
+    }
+}
+
+/// Asset demotion/quarantine decision.
+///
+/// Quarantines the asset when `failure_count >= 5`; demotes otherwise.
+fn asset_demotion_decision(
+    asset_id: impl Into<String>,
+    prior_state: ConfidenceState,
+    failure_count: u32,
+    reason_code: ConfidenceDemotionReasonCode,
+) -> DemotionDecision {
+    let demotion_id = next_id("dem");
+    let new_state = if failure_count >= 5 {
+        ConfidenceState::Quarantined
+    } else {
+        ConfidenceState::Demoted
+    };
+    demote_asset(demotion_id, asset_id, prior_state, new_state, reason_code)
 }
 
 fn find_declared_mutation(

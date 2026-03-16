@@ -362,3 +362,41 @@ fn semantic_replay_decision_types_resolve() {
     let _class = oris_runtime::agent_contract::TaskEquivalenceClass::Unclassified;
     let _code = oris_runtime::agent_contract::SemanticReplayReasonCode::UnknownFailClosed;
 }
+
+#[test]
+fn confidence_revalidation_decision_types_resolve() {
+    // AUTO-05 wiring gate: ensure ConfidenceState, RevalidationOutcome,
+    // ConfidenceDemotionReasonCode, ReplayEligibility, ConfidenceRevalidationResult,
+    // DemotionDecision, pass_confidence_revalidation, fail_confidence_revalidation,
+    // and demote_asset are reachable via oris_runtime::agent_contract.
+
+    let _passing: oris_runtime::agent_contract::ConfidenceRevalidationResult =
+        oris_runtime::agent_contract::pass_confidence_revalidation(
+            "crv-id-1".to_string(),
+            "asset-id-1".to_string(),
+            oris_runtime::agent_contract::ConfidenceState::Active,
+        );
+
+    let _failing: oris_runtime::agent_contract::ConfidenceRevalidationResult =
+        oris_runtime::agent_contract::fail_confidence_revalidation(
+            "crv-id-2".to_string(),
+            "asset-id-2".to_string(),
+            oris_runtime::agent_contract::ConfidenceState::Decaying,
+            oris_runtime::agent_contract::RevalidationOutcome::Failed,
+        );
+
+    let _demotion: oris_runtime::agent_contract::DemotionDecision =
+        oris_runtime::agent_contract::demote_asset(
+            "dem-id-1".to_string(),
+            "asset-id-3".to_string(),
+            oris_runtime::agent_contract::ConfidenceState::Active,
+            oris_runtime::agent_contract::ConfidenceState::Demoted,
+            oris_runtime::agent_contract::ConfidenceDemotionReasonCode::ConfidenceDecayThreshold,
+        );
+
+    // Variants accessible
+    let _state = oris_runtime::agent_contract::ConfidenceState::Quarantined;
+    let _outcome = oris_runtime::agent_contract::RevalidationOutcome::ErrorFailClosed;
+    let _reason = oris_runtime::agent_contract::ConfidenceDemotionReasonCode::UnknownFailClosed;
+    let _eligibility = oris_runtime::agent_contract::ReplayEligibility::Ineligible;
+}

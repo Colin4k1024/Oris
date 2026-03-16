@@ -1234,6 +1234,180 @@ pub fn deny_semantic_replay(
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// AUTO-05: Continuous Confidence Revalidation and Asset Demotion
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Current confidence lifecycle state of a reusable asset.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceState {
+    /// Asset is healthy and eligible for replay.
+    Active,
+    /// Asset confidence has decayed below the warning threshold; still eligible
+    /// but flagged for revalidation.
+    Decaying,
+    /// Asset is undergoing shadow-mode replay revalidation; normal reuse
+    /// continues but evidence is accumulated.
+    Revalidating,
+    /// Asset has been demoted after failed reuse; replay is suspended pending
+    /// explicit re-promotion.
+    Demoted,
+    /// Asset is quarantined after repeated failures; replay is blocked until
+    /// explicit triage clears it.
+    Quarantined,
+}
+
+/// Outcome of a single confidence revalidation round.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RevalidationOutcome {
+    /// Revalidation completed and confidence was restored above threshold.
+    Passed,
+    /// Revalidation completed but confidence remains below threshold.
+    Failed,
+    /// Revalidation is still running (shadow phase not yet complete).
+    Pending,
+    /// Revalidation encountered an error; treat as failed for safety.
+    ErrorFailClosed,
+}
+
+/// Reason code for a demotion or quarantine transition.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceDemotionReasonCode {
+    /// Asset was demoted because confidence decayed below the demotion threshold.
+    ConfidenceDecayThreshold,
+    /// Asset was demoted due to repeated failed reuse (replay failures).
+    RepeatedReplayFailure,
+    /// Asset was quarantined after surpassing the maximum failure count.
+    MaxFailureCountExceeded,
+    /// Asset was revoked by explicit maintainer action.
+    ExplicitRevocation,
+    /// Demotion failed with an unmapped state; fail closed.
+    UnknownFailClosed,
+}
+
+/// Whether an asset is currently eligible for replay selection.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayEligibility {
+    /// Asset is eligible; replay may proceed.
+    Eligible,
+    /// Asset is not eligible; replay must not proceed.
+    Ineligible,
+}
+
+/// Full revalidation decision produced after a confidence evaluation round.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConfidenceRevalidationResult {
+    /// Unique identifier for this revalidation run.
+    pub revalidation_id: String,
+    /// The asset being revalidated (gene id or capsule id).
+    pub asset_id: String,
+    /// Current confidence state before this revalidation.
+    pub confidence_state: ConfidenceState,
+    /// Outcome of this revalidation round.
+    pub revalidation_result: RevalidationOutcome,
+    /// Whether replay is eligible after this evaluation.
+    pub replay_eligibility: ReplayEligibility,
+    /// Human-readable summary of the revalidation outcome.
+    pub summary: String,
+    /// Safety gate. When `true`, replay must not proceed regardless of
+    /// `replay_eligibility`.
+    pub fail_closed: bool,
+}
+
+/// Demotion or quarantine transition event.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DemotionDecision {
+    /// Unique identifier for this demotion event.
+    pub demotion_id: String,
+    /// The asset being demoted or quarantined.
+    pub asset_id: String,
+    /// Prior state before this transition.
+    pub prior_state: ConfidenceState,
+    /// New state after this transition.
+    pub new_state: ConfidenceState,
+    /// Reason for the demotion.
+    pub reason_code: ConfidenceDemotionReasonCode,
+    /// Replay eligibility after this transition.
+    pub replay_eligibility: ReplayEligibility,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Whether this demotion resulted in a quarantine transition.
+    pub quarantine_transition: bool,
+    /// Safety gate. Always `true` for any demotion event.
+    pub fail_closed: bool,
+}
+
+/// Construct a passing `ConfidenceRevalidationResult`.
+pub fn pass_confidence_revalidation(
+    revalidation_id: impl Into<String>,
+    asset_id: impl Into<String>,
+    prior_state: ConfidenceState,
+) -> ConfidenceRevalidationResult {
+    let asset_id: String = asset_id.into();
+    let summary =
+        format!("confidence revalidation passed for asset {asset_id}: restoring to Active");
+    ConfidenceRevalidationResult {
+        revalidation_id: revalidation_id.into(),
+        asset_id,
+        confidence_state: ConfidenceState::Active,
+        revalidation_result: RevalidationOutcome::Passed,
+        replay_eligibility: ReplayEligibility::Eligible,
+        summary,
+        fail_closed: false,
+    }
+}
+
+/// Construct a failing `ConfidenceRevalidationResult`.
+pub fn fail_confidence_revalidation(
+    revalidation_id: impl Into<String>,
+    asset_id: impl Into<String>,
+    prior_state: ConfidenceState,
+    outcome: RevalidationOutcome,
+) -> ConfidenceRevalidationResult {
+    let asset_id: String = asset_id.into();
+    let summary = format!(
+        "confidence revalidation failed for asset {asset_id} [{outcome:?}]: replay suspended"
+    );
+    ConfidenceRevalidationResult {
+        revalidation_id: revalidation_id.into(),
+        asset_id,
+        confidence_state: prior_state,
+        revalidation_result: outcome,
+        replay_eligibility: ReplayEligibility::Ineligible,
+        summary,
+        fail_closed: true,
+    }
+}
+
+/// Construct a `DemotionDecision`.
+pub fn demote_asset(
+    demotion_id: impl Into<String>,
+    asset_id: impl Into<String>,
+    prior_state: ConfidenceState,
+    new_state: ConfidenceState,
+    reason_code: ConfidenceDemotionReasonCode,
+) -> DemotionDecision {
+    let asset_id: String = asset_id.into();
+    let quarantine_transition = new_state == ConfidenceState::Quarantined;
+    let summary =
+        format!("asset {asset_id} demoted from {prior_state:?} to {new_state:?} [{reason_code:?}]");
+    DemotionDecision {
+        demotion_id: demotion_id.into(),
+        asset_id,
+        prior_state,
+        new_state,
+        reason_code,
+        replay_eligibility: ReplayEligibility::Ineligible,
+        summary,
+        quarantine_transition,
+        fail_closed: true,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfEvolutionSelectionReasonCode {

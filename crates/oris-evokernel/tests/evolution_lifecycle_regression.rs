@@ -12,10 +12,11 @@ use chrono::{Duration, Utc};
 use oris_agent_contract::{
     AgentTask, AutonomousApprovalMode, AutonomousCandidateSource, AutonomousIntakeInput,
     AutonomousIntakeReasonCode, AutonomousPlanReasonCode, AutonomousProposalReasonCode,
-    AutonomousRiskTier, BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode,
-    MutationProposal, MutationProposalContractReasonCode, MutationProposalEvidence,
+    AutonomousRiskTier, BoundedTaskClass, ConfidenceDemotionReasonCode, ConfidenceState,
+    HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
+    MutationProposalContractReasonCode, MutationProposalEvidence, ReplayEligibility,
     ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayPlannerDirective,
-    SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
+    RevalidationOutcome, SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
     SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
     SelfEvolutionSelectionReasonCode, SemanticReplayReasonCode, SupervisedDeliveryApprovalState,
     SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
@@ -4072,4 +4073,133 @@ fn semantic_replay_reason_codes_and_equivalence_classes_are_stable() {
         format!("{:?}", TaskEquivalenceClass::Unclassified),
         "Unclassified"
     );
+}
+
+// ─── AUTO-05: Continuous Confidence Revalidation ────────────────────────────
+
+#[test]
+fn confidence_revalidation_passes_for_active_asset_with_no_failures() {
+    let kernel = make_evo_kernel_for_autonomous_intake("crv_active_no_failures");
+    let result = kernel.evaluate_confidence_revalidation("asset-001", ConfidenceState::Active, 0);
+    assert_eq!(
+        result.replay_eligibility,
+        ReplayEligibility::Eligible,
+        "active asset with 0 failures should pass"
+    );
+    assert!(
+        !result.fail_closed,
+        "passing result must not be fail-closed"
+    );
+    assert_eq!(result.revalidation_result, RevalidationOutcome::Passed);
+}
+
+#[test]
+fn confidence_revalidation_passes_for_decaying_asset_below_threshold() {
+    let kernel = make_evo_kernel_for_autonomous_intake("crv_decaying_below");
+    let result = kernel.evaluate_confidence_revalidation("asset-002", ConfidenceState::Decaying, 2);
+    assert_eq!(
+        result.replay_eligibility,
+        ReplayEligibility::Eligible,
+        "2 failures is below threshold — should pass"
+    );
+    assert!(!result.fail_closed);
+    assert_eq!(result.revalidation_result, RevalidationOutcome::Passed);
+}
+
+#[test]
+fn confidence_revalidation_fails_for_asset_with_three_or_more_failures() {
+    let kernel = make_evo_kernel_for_autonomous_intake("crv_three_failures");
+    let result =
+        kernel.evaluate_confidence_revalidation("asset-003", ConfidenceState::Revalidating, 3);
+    assert_eq!(
+        result.replay_eligibility,
+        ReplayEligibility::Ineligible,
+        "3 failures should fail revalidation"
+    );
+    assert!(
+        result.fail_closed,
+        "failed revalidation must be fail-closed"
+    );
+    assert_eq!(result.revalidation_result, RevalidationOutcome::Failed);
+}
+
+#[test]
+fn confidence_revalidation_demotion_escalates_to_quarantine_at_five_failures() {
+    let kernel = make_evo_kernel_for_autonomous_intake("crv_quarantine");
+    // 4 failures → Demoted
+    let d4 = kernel.evaluate_asset_demotion(
+        "asset-004",
+        ConfidenceState::Decaying,
+        4,
+        ConfidenceDemotionReasonCode::ConfidenceDecayThreshold,
+    );
+    assert_eq!(
+        format!("{:?}", d4.new_state),
+        "Demoted",
+        "4 failures should demote, not quarantine"
+    );
+    assert_eq!(d4.replay_eligibility, ReplayEligibility::Ineligible);
+
+    // 5 failures → Quarantined
+    let d5 = kernel.evaluate_asset_demotion(
+        "asset-005",
+        ConfidenceState::Active,
+        5,
+        ConfidenceDemotionReasonCode::MaxFailureCountExceeded,
+    );
+    assert_eq!(
+        format!("{:?}", d5.new_state),
+        "Quarantined",
+        "5 failures should escalate to quarantine"
+    );
+    assert!(d5.quarantine_transition);
+    assert!(d5.fail_closed);
+}
+
+#[test]
+fn confidence_revalidation_reason_codes_and_states_are_stable() {
+    // discriminant stability regression — names must not silently change
+    assert_eq!(format!("{:?}", ConfidenceState::Active), "Active");
+    assert_eq!(format!("{:?}", ConfidenceState::Decaying), "Decaying");
+    assert_eq!(
+        format!("{:?}", ConfidenceState::Revalidating),
+        "Revalidating"
+    );
+    assert_eq!(format!("{:?}", ConfidenceState::Demoted), "Demoted");
+    assert_eq!(format!("{:?}", ConfidenceState::Quarantined), "Quarantined");
+    assert_eq!(format!("{:?}", RevalidationOutcome::Passed), "Passed");
+    assert_eq!(format!("{:?}", RevalidationOutcome::Failed), "Failed");
+    assert_eq!(format!("{:?}", RevalidationOutcome::Pending), "Pending");
+    assert_eq!(
+        format!("{:?}", RevalidationOutcome::ErrorFailClosed),
+        "ErrorFailClosed"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            ConfidenceDemotionReasonCode::ConfidenceDecayThreshold
+        ),
+        "ConfidenceDecayThreshold"
+    );
+    assert_eq!(
+        format!("{:?}", ConfidenceDemotionReasonCode::RepeatedReplayFailure),
+        "RepeatedReplayFailure"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            ConfidenceDemotionReasonCode::MaxFailureCountExceeded
+        ),
+        "MaxFailureCountExceeded"
+    );
+    assert_eq!(
+        format!("{:?}", ConfidenceDemotionReasonCode::ExplicitRevocation),
+        "ExplicitRevocation"
+    );
+    assert_eq!(
+        format!("{:?}", ConfidenceDemotionReasonCode::UnknownFailClosed),
+        "UnknownFailClosed"
+    );
+    assert_eq!(format!("{:?}", ReplayEligibility::Eligible), "Eligible");
+    assert_eq!(format!("{:?}", ReplayEligibility::Ineligible), "Ineligible");
 }
