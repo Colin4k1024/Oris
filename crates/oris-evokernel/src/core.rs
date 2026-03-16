@@ -10,9 +10,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
     accept_discovered_candidate, accept_self_evolution_selection_decision,
-    approve_autonomous_mutation_proposal, approve_autonomous_pr_lane, approve_autonomous_task_plan,
-    approve_semantic_replay, demote_asset, deny_autonomous_mutation_proposal,
-    deny_autonomous_pr_lane, deny_autonomous_task_plan, deny_discovered_candidate,
+    approve_autonomous_mutation_proposal, approve_autonomous_pr_lane,
+    approve_autonomous_release_gate, approve_autonomous_task_plan, approve_semantic_replay,
+    demote_asset, deny_autonomous_mutation_proposal, deny_autonomous_pr_lane,
+    deny_autonomous_release_gate, deny_autonomous_task_plan, deny_discovered_candidate,
     deny_semantic_replay, fail_confidence_revalidation, infer_mutation_needed_failure_reason_code,
     infer_replay_fallback_reason_code, normalize_mutation_needed_failure_contract,
     normalize_replay_fallback_contract, pass_confidence_revalidation,
@@ -20,24 +21,25 @@ use oris_agent_contract::{
     AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeOutput,
     AutonomousIntakeReasonCode, AutonomousMutationProposal, AutonomousPlanReasonCode,
     AutonomousPrLaneDecision, AutonomousPrLaneReasonCode, AutonomousProposalReasonCode,
-    AutonomousProposalScope, AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass,
-    ConfidenceDemotionReasonCode, ConfidenceRevalidationResult, ConfidenceState,
-    CoordinationMessage, CoordinationPlan, CoordinationPrimitive, CoordinationResult,
-    CoordinationTask, DemotionDecision, DiscoveredCandidate, EquivalenceExplanation,
-    ExecutionFeedback, MutationNeededFailureContract, MutationNeededFailureReasonCode,
+    AutonomousProposalScope, AutonomousReleaseGateDecision, AutonomousReleaseReasonCode,
+    AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass, ConfidenceDemotionReasonCode,
+    ConfidenceRevalidationResult, ConfidenceState, CoordinationMessage, CoordinationPlan,
+    CoordinationPrimitive, CoordinationResult, CoordinationTask, DemotionDecision,
+    DiscoveredCandidate, EquivalenceExplanation, ExecutionFeedback, KillSwitchState,
+    MutationNeededFailureContract, MutationNeededFailureReasonCode,
     MutationProposal as AgentMutationProposal, MutationProposalContractReasonCode,
     MutationProposalEvidence, MutationProposalScope, MutationProposalValidationBudget,
     PrEvidenceBundle, ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
-    RevalidationOutcome, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
-    SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
-    SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
-    SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
-    SelfEvolutionReasonCodeMatrix, SelfEvolutionSelectionDecision,
-    SelfEvolutionSelectionReasonCode, SemanticReplayDecision, SemanticReplayReasonCode,
-    SupervisedDeliveryApprovalState, SupervisedDeliveryContract, SupervisedDeliveryReasonCode,
-    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
-    SupervisedDevloopStatus, SupervisedExecutionDecision, SupervisedExecutionReasonCode,
-    SupervisedValidationOutcome, TaskEquivalenceClass,
+    RevalidationOutcome, RollbackPlan, SelfEvolutionAcceptanceGateContract,
+    SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
+    SelfEvolutionApprovalEvidence, SelfEvolutionAuditConsistencyResult,
+    SelfEvolutionCandidateIntakeRequest, SelfEvolutionDeliveryOutcome,
+    SelfEvolutionMutationProposalContract, SelfEvolutionReasonCodeMatrix,
+    SelfEvolutionSelectionDecision, SelfEvolutionSelectionReasonCode, SemanticReplayDecision,
+    SemanticReplayReasonCode, SupervisedDeliveryApprovalState, SupervisedDeliveryContract,
+    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
+    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
+    SupervisedExecutionReasonCode, SupervisedValidationOutcome, TaskEquivalenceClass,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -3598,6 +3600,31 @@ impl<S: KernelState> EvoKernel<S> {
         autonomous_pr_lane_decision(task_id, task_class, risk_tier, evidence_bundle)
     }
 
+    /// Evaluate whether a task is eligible for the fail-closed autonomous merge
+    /// and release gate.
+    ///
+    /// This is the `EVO26-AUTO-07` autonomous release gate entry point.
+    ///
+    /// Only low-risk bounded classes (`DocsSingleFile`, `LintFix`) with a
+    /// complete evidence chain, an inactive kill switch, and a `Low` risk tier
+    /// are approved.  All other configurations are denied fail-closed.
+    pub fn evaluate_autonomous_release_gate(
+        &self,
+        task_id: impl Into<String>,
+        task_class: &BoundedTaskClass,
+        risk_tier: AutonomousRiskTier,
+        kill_switch_state: KillSwitchState,
+        evidence_complete: bool,
+    ) -> AutonomousReleaseGateDecision {
+        autonomous_release_gate_decision(
+            task_id,
+            task_class,
+            risk_tier,
+            kill_switch_state,
+            evidence_complete,
+        )
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -5708,6 +5735,88 @@ fn semantic_replay_for_class(
 /// Approves (`DocFix`, `StaticAnalysisFix`, `FormattingFix`) tasks at low risk
 /// that carry a validated evidence bundle.  All other configurations are denied
 /// fail-closed.
+fn autonomous_release_gate_decision(
+    task_id: impl Into<String>,
+    task_class: &BoundedTaskClass,
+    risk_tier: AutonomousRiskTier,
+    kill_switch_state: KillSwitchState,
+    evidence_complete: bool,
+) -> AutonomousReleaseGateDecision {
+    let task_id: String = task_id.into();
+    let gate_id = next_id("rgl");
+
+    // Kill switch must be inactive before any other check.
+    if matches!(kill_switch_state, KillSwitchState::Active) {
+        let rollback = RollbackPlan {
+            rollback_id: next_id("rbk"),
+            description: format!("kill switch active: halt release for task {task_id}"),
+            actionable: true,
+        };
+        return deny_autonomous_release_gate(
+            gate_id,
+            task_id,
+            AutonomousReleaseReasonCode::KillSwitchActive,
+            kill_switch_state,
+            "kill switch is active",
+            Some(rollback),
+        );
+    }
+
+    // Only low-risk bounded classes are approved for the autonomous release gate.
+    let class_approved = matches!(
+        task_class,
+        BoundedTaskClass::DocsSingleFile | BoundedTaskClass::LintFix
+    );
+
+    if !class_approved {
+        return deny_autonomous_release_gate(
+            gate_id,
+            task_id,
+            AutonomousReleaseReasonCode::TaskClassNotApproved,
+            KillSwitchState::Inactive,
+            format!(
+                "task class {:?} is not approved for autonomous release",
+                task_class
+            ),
+            None,
+        );
+    }
+
+    // Risk tier must be low.
+    if !matches!(risk_tier, AutonomousRiskTier::Low) {
+        return deny_autonomous_release_gate(
+            gate_id,
+            task_id,
+            AutonomousReleaseReasonCode::RiskTierTooHigh,
+            KillSwitchState::Inactive,
+            format!(
+                "risk tier {:?} exceeds policy boundary for autonomous release",
+                risk_tier
+            ),
+            None,
+        );
+    }
+
+    // All prior stage evidence must be present and complete.
+    if !evidence_complete {
+        let rollback = RollbackPlan {
+            rollback_id: next_id("rbk"),
+            description: format!("incomplete evidence: cannot release task {task_id}"),
+            actionable: false,
+        };
+        return deny_autonomous_release_gate(
+            gate_id,
+            task_id,
+            AutonomousReleaseReasonCode::IncompleteStageEvidence,
+            KillSwitchState::Inactive,
+            "evidence from a prior stage is incomplete or missing",
+            Some(rollback),
+        );
+    }
+
+    approve_autonomous_release_gate(gate_id, task_id)
+}
+
 fn autonomous_pr_lane_decision(
     task_id: impl Into<String>,
     task_class: &BoundedTaskClass,

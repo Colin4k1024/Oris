@@ -1,6 +1,6 @@
 [package]
 name = "oris-orchestrator"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -8,7 +8,7 @@ description = "Oris orchestration contracts and control flow primitives."
 
 [dependencies]
 async-trait = "0.1"
-oris-agent-contract = { version = "0.5.0", path = "../oris-agent-contract" }
+oris-agent-contract = { version = "0.5.5", path = "../oris-agent-contract" }
 oris-evolution = { version = "0.3.4", path = "../oris-evolution" }
 oris-intake = { version = "0.2.0", path = "../oris-intake" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
