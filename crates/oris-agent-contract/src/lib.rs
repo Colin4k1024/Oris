@@ -1235,6 +1235,139 @@ pub fn deny_semantic_replay(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// AUTO-06: Bounded Autonomous PR Lane For Low-Risk Task Classes
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Status of an autonomous PR lane decision.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousPrLaneStatus {
+    /// All gates passed; PR can be opened autonomously.
+    PrReady,
+    /// A gate failed or evidence was missing; PR must not be opened.
+    Denied,
+}
+
+/// Approval state for the autonomous PR lane.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrLaneApprovalState {
+    /// The task class is explicitly approved for autonomous PR creation.
+    ClassApproved,
+    /// The task class is not approved for autonomous PR creation.
+    ClassNotApproved,
+}
+
+/// Reason codes for the autonomous PR lane gate.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutonomousPrLaneReasonCode {
+    /// All gates passed; task class is explicitly approved.
+    ApprovedForAutonomousPr,
+    /// Task class is not in the approved low-risk set.
+    TaskClassNotApproved,
+    /// Required patch evidence is absent.
+    PatchEvidenceMissing,
+    /// Validation evidence is missing or incomplete.
+    ValidationEvidenceMissing,
+    /// Risk tier is too high for autonomous PR.
+    RiskTierTooHigh,
+    /// Fail-closed fallback when the reason cannot be determined.
+    UnknownFailClosed,
+}
+
+/// Evidence bundle required before autonomous PR creation.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrEvidenceBundle {
+    /// Human-readable summary of the patch.
+    pub patch_summary: String,
+    /// Whether the validation gate has passed for this patch.
+    pub validation_passed: bool,
+    /// Abbreviated audit trail or evidence key list for reviewer inspection.
+    pub audit_trail: Vec<String>,
+}
+
+/// Decision record for the autonomous PR lane.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutonomousPrLaneDecision {
+    /// Unique identifier for this PR lane evaluation.
+    pub pr_lane_id: String,
+    /// Human-readable summary of the delivery decision.
+    pub delivery_summary: String,
+    /// Branch name that would be created; populated only when `pr_ready` is
+    /// `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    /// Structured PR payload (title + body sketch) for the autonomous PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_payload: Option<String>,
+    /// Combined evidence bundle governing PR creation eligibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_bundle: Option<PrEvidenceBundle>,
+    /// Whether the PR is ready to be opened.
+    pub pr_ready: bool,
+    /// Gate status.
+    pub delivery_status: AutonomousPrLaneStatus,
+    /// Approval state for the task class.
+    pub approval_state: PrLaneApprovalState,
+    /// Machine-readable reason code.
+    pub reason_code: AutonomousPrLaneReasonCode,
+    /// Safety gate: when `true` the lane must not proceed under any
+    /// circumstance.
+    pub fail_closed: bool,
+}
+
+/// Construct an approved `AutonomousPrLaneDecision`.
+pub fn approve_autonomous_pr_lane(
+    pr_lane_id: impl Into<String>,
+    task_id: impl Into<String>,
+    branch_name: impl Into<String>,
+    evidence_bundle: PrEvidenceBundle,
+) -> AutonomousPrLaneDecision {
+    let task_id: String = task_id.into();
+    let branch = branch_name.into();
+    let pr_payload = format!("Autonomous PR for task {task_id} on branch {branch}");
+    let delivery_summary =
+        format!("autonomous PR lane approved for task {task_id}: branch {branch} ready");
+    AutonomousPrLaneDecision {
+        pr_lane_id: pr_lane_id.into(),
+        delivery_summary,
+        branch_name: Some(branch),
+        pr_payload: Some(pr_payload),
+        evidence_bundle: Some(evidence_bundle),
+        pr_ready: true,
+        delivery_status: AutonomousPrLaneStatus::PrReady,
+        approval_state: PrLaneApprovalState::ClassApproved,
+        reason_code: AutonomousPrLaneReasonCode::ApprovedForAutonomousPr,
+        fail_closed: false,
+    }
+}
+
+/// Construct a denied `AutonomousPrLaneDecision`.
+pub fn deny_autonomous_pr_lane(
+    pr_lane_id: impl Into<String>,
+    task_id: impl Into<String>,
+    reason_code: AutonomousPrLaneReasonCode,
+    detail: impl Into<String>,
+) -> AutonomousPrLaneDecision {
+    let task_id: String = task_id.into();
+    let detail: String = detail.into();
+    let delivery_summary = format!("autonomous PR lane denied for task {task_id}: {detail}");
+    AutonomousPrLaneDecision {
+        pr_lane_id: pr_lane_id.into(),
+        delivery_summary,
+        branch_name: None,
+        pr_payload: None,
+        evidence_bundle: None,
+        pr_ready: false,
+        delivery_status: AutonomousPrLaneStatus::Denied,
+        approval_state: PrLaneApprovalState::ClassNotApproved,
+        reason_code,
+        fail_closed: true,
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // AUTO-05: Continuous Confidence Revalidation and Asset Demotion
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1345,7 +1478,7 @@ pub struct DemotionDecision {
 pub fn pass_confidence_revalidation(
     revalidation_id: impl Into<String>,
     asset_id: impl Into<String>,
-    prior_state: ConfidenceState,
+    _prior_state: ConfidenceState,
 ) -> ConfidenceRevalidationResult {
     let asset_id: String = asset_id.into();
     let summary =

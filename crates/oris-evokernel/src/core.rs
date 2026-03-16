@@ -10,32 +10,34 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
     accept_discovered_candidate, accept_self_evolution_selection_decision,
-    approve_autonomous_mutation_proposal, approve_autonomous_task_plan, approve_semantic_replay,
-    demote_asset, deny_autonomous_mutation_proposal, deny_autonomous_task_plan,
-    deny_discovered_candidate, deny_semantic_replay, fail_confidence_revalidation,
-    infer_mutation_needed_failure_reason_code, infer_replay_fallback_reason_code,
-    normalize_mutation_needed_failure_contract, normalize_replay_fallback_contract,
-    pass_confidence_revalidation, reject_self_evolution_selection_decision, AgentRole,
-    AutonomousApprovalMode, AutonomousCandidateSource, AutonomousIntakeInput,
-    AutonomousIntakeOutput, AutonomousIntakeReasonCode, AutonomousMutationProposal,
-    AutonomousPlanReasonCode, AutonomousProposalReasonCode, AutonomousProposalScope,
-    AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass, ConfidenceDemotionReasonCode,
-    ConfidenceRevalidationResult, ConfidenceState, CoordinationMessage, CoordinationPlan,
-    CoordinationPrimitive, CoordinationResult, CoordinationTask, DemotionDecision,
-    DiscoveredCandidate, EquivalenceExplanation, ExecutionFeedback, MutationNeededFailureContract,
-    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
-    MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
-    MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
-    ReplayPlannerDirective, RevalidationOutcome, SelfEvolutionAcceptanceGateContract,
-    SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
-    SelfEvolutionApprovalEvidence, SelfEvolutionAuditConsistencyResult,
-    SelfEvolutionCandidateIntakeRequest, SelfEvolutionDeliveryOutcome,
-    SelfEvolutionMutationProposalContract, SelfEvolutionReasonCodeMatrix,
-    SelfEvolutionSelectionDecision, SelfEvolutionSelectionReasonCode, SemanticReplayDecision,
-    SemanticReplayReasonCode, SupervisedDeliveryApprovalState, SupervisedDeliveryContract,
-    SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
-    SupervisedDevloopRequest, SupervisedDevloopStatus, SupervisedExecutionDecision,
-    SupervisedExecutionReasonCode, SupervisedValidationOutcome, TaskEquivalenceClass,
+    approve_autonomous_mutation_proposal, approve_autonomous_pr_lane, approve_autonomous_task_plan,
+    approve_semantic_replay, demote_asset, deny_autonomous_mutation_proposal,
+    deny_autonomous_pr_lane, deny_autonomous_task_plan, deny_discovered_candidate,
+    deny_semantic_replay, fail_confidence_revalidation, infer_mutation_needed_failure_reason_code,
+    infer_replay_fallback_reason_code, normalize_mutation_needed_failure_contract,
+    normalize_replay_fallback_contract, pass_confidence_revalidation,
+    reject_self_evolution_selection_decision, AgentRole, AutonomousApprovalMode,
+    AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeOutput,
+    AutonomousIntakeReasonCode, AutonomousMutationProposal, AutonomousPlanReasonCode,
+    AutonomousPrLaneDecision, AutonomousPrLaneReasonCode, AutonomousProposalReasonCode,
+    AutonomousProposalScope, AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass,
+    ConfidenceDemotionReasonCode, ConfidenceRevalidationResult, ConfidenceState,
+    CoordinationMessage, CoordinationPlan, CoordinationPrimitive, CoordinationResult,
+    CoordinationTask, DemotionDecision, DiscoveredCandidate, EquivalenceExplanation,
+    ExecutionFeedback, MutationNeededFailureContract, MutationNeededFailureReasonCode,
+    MutationProposal as AgentMutationProposal, MutationProposalContractReasonCode,
+    MutationProposalEvidence, MutationProposalScope, MutationProposalValidationBudget,
+    PrEvidenceBundle, ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
+    RevalidationOutcome, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
+    SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
+    SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
+    SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
+    SelfEvolutionReasonCodeMatrix, SelfEvolutionSelectionDecision,
+    SelfEvolutionSelectionReasonCode, SemanticReplayDecision, SemanticReplayReasonCode,
+    SupervisedDeliveryApprovalState, SupervisedDeliveryContract, SupervisedDeliveryReasonCode,
+    SupervisedDeliveryStatus, SupervisedDevloopOutcome, SupervisedDevloopRequest,
+    SupervisedDevloopStatus, SupervisedExecutionDecision, SupervisedExecutionReasonCode,
+    SupervisedValidationOutcome, TaskEquivalenceClass,
 };
 use oris_economics::{EconomicsSignal, EvuLedger, StakePolicy};
 use oris_evolution::{
@@ -3579,6 +3581,23 @@ impl<S: KernelState> EvoKernel<S> {
         asset_demotion_decision(asset_id, prior_state, failure_count, reason_code)
     }
 
+    /// Evaluate whether a task is eligible for the bounded autonomous PR lane.
+    ///
+    /// This is the `EVO26-AUTO-06` autonomous PR lane entry point.
+    ///
+    /// Low-risk classes (`DocFix`, `StaticAnalysisFix`, `FormattingFix`) with
+    /// validated evidence are approved.  All other classes, or tasks that are
+    /// missing evidence, are denied fail-closed.
+    pub fn evaluate_autonomous_pr_lane(
+        &self,
+        task_id: impl Into<String>,
+        task_class: &BoundedTaskClass,
+        risk_tier: AutonomousRiskTier,
+        evidence_bundle: Option<PrEvidenceBundle>,
+    ) -> AutonomousPrLaneDecision {
+        autonomous_pr_lane_decision(task_id, task_class, risk_tier, evidence_bundle)
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -5681,6 +5700,74 @@ fn semantic_replay_for_class(
                 explanation.task_equivalence_class
             ),
         )
+    }
+}
+
+/// Autonomous PR lane gate logic.
+///
+/// Approves (`DocFix`, `StaticAnalysisFix`, `FormattingFix`) tasks at low risk
+/// that carry a validated evidence bundle.  All other configurations are denied
+/// fail-closed.
+fn autonomous_pr_lane_decision(
+    task_id: impl Into<String>,
+    task_class: &BoundedTaskClass,
+    risk_tier: AutonomousRiskTier,
+    evidence_bundle: Option<PrEvidenceBundle>,
+) -> AutonomousPrLaneDecision {
+    let task_id: String = task_id.into();
+    let pr_lane_id = next_id("prl");
+
+    // Only low-risk bounded classes are approved for the autonomous PR lane:
+    // single-file docs and lint/formatting fixes.
+    let class_approved = matches!(
+        task_class,
+        BoundedTaskClass::DocsSingleFile | BoundedTaskClass::LintFix
+    );
+
+    // Risk tier must be low.
+    let risk_ok = matches!(risk_tier, AutonomousRiskTier::Low);
+
+    if !class_approved {
+        return deny_autonomous_pr_lane(
+            pr_lane_id,
+            task_id,
+            AutonomousPrLaneReasonCode::TaskClassNotApproved,
+            format!(
+                "task class {:?} is not approved for autonomous PR lane",
+                task_class
+            ),
+        );
+    }
+
+    if !risk_ok {
+        return deny_autonomous_pr_lane(
+            pr_lane_id,
+            task_id,
+            AutonomousPrLaneReasonCode::RiskTierTooHigh,
+            format!(
+                "risk tier {:?} exceeds the autonomous PR lane limit",
+                risk_tier
+            ),
+        );
+    }
+
+    match evidence_bundle {
+        Some(bundle) if bundle.validation_passed => {
+            let branch = format!("auto/{task_id}");
+            approve_autonomous_pr_lane(pr_lane_id, task_id, branch, bundle)
+        }
+        Some(_) => deny_autonomous_pr_lane(
+            pr_lane_id,
+            task_id,
+            AutonomousPrLaneReasonCode::ValidationEvidenceMissing,
+            "validation did not pass for the provided evidence bundle",
+        ),
+        None => deny_autonomous_pr_lane(
+            pr_lane_id,
+            task_id,
+            AutonomousPrLaneReasonCode::PatchEvidenceMissing,
+            "no evidence bundle was provided",
+        ),
     }
 }
 

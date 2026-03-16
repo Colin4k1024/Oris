@@ -400,3 +400,38 @@ fn confidence_revalidation_decision_types_resolve() {
     let _reason = oris_runtime::agent_contract::ConfidenceDemotionReasonCode::UnknownFailClosed;
     let _eligibility = oris_runtime::agent_contract::ReplayEligibility::Ineligible;
 }
+
+#[test]
+fn autonomous_pr_lane_decision_types_resolve() {
+    // AUTO-06 wiring gate: ensure AutonomousPrLaneStatus, PrLaneApprovalState,
+    // AutonomousPrLaneReasonCode, PrEvidenceBundle, AutonomousPrLaneDecision,
+    // approve_autonomous_pr_lane, and deny_autonomous_pr_lane are reachable
+    // via oris_runtime::agent_contract.
+
+    let bundle = oris_runtime::agent_contract::PrEvidenceBundle {
+        patch_summary: "fix lint warnings".to_string(),
+        validation_passed: true,
+        audit_trail: vec!["audit-key-1".to_string()],
+    };
+
+    let _approved: oris_runtime::agent_contract::AutonomousPrLaneDecision =
+        oris_runtime::agent_contract::approve_autonomous_pr_lane(
+            "prl-id-1".to_string(),
+            "task-id-1".to_string(),
+            "auto/task-id-1".to_string(),
+            bundle,
+        );
+
+    let _denied: oris_runtime::agent_contract::AutonomousPrLaneDecision =
+        oris_runtime::agent_contract::deny_autonomous_pr_lane(
+            "prl-id-2".to_string(),
+            "task-id-2".to_string(),
+            oris_runtime::agent_contract::AutonomousPrLaneReasonCode::TaskClassNotApproved,
+            "task class not in approved set",
+        );
+
+    // Variants accessible
+    let _status = oris_runtime::agent_contract::AutonomousPrLaneStatus::Denied;
+    let _approval = oris_runtime::agent_contract::PrLaneApprovalState::ClassNotApproved;
+    let _reason = oris_runtime::agent_contract::AutonomousPrLaneReasonCode::UnknownFailClosed;
+}
