@@ -11,9 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
     AgentTask, AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeReasonCode,
-    BoundedTaskClass, HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
-    MutationProposalContractReasonCode, MutationProposalEvidence, ReplayFallbackNextAction,
-    ReplayFallbackReasonCode, ReplayPlannerDirective, SelfEvolutionAcceptanceGateInput,
+    AutonomousPlanReasonCode, AutonomousRiskTier, BoundedTaskClass, HumanApproval,
+    MutationNeededFailureReasonCode, MutationProposal, MutationProposalContractReasonCode,
+    MutationProposalEvidence, ReplayFallbackNextAction, ReplayFallbackReasonCode,
+    ReplayPlannerDirective, SelfEvolutionAcceptanceGateInput,
     SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionAuditConsistencyResult,
     SelfEvolutionCandidateIntakeRequest, SelfEvolutionSelectionReasonCode,
     SupervisedDeliveryApprovalState, SupervisedDeliveryReasonCode, SupervisedDeliveryStatus,
@@ -3626,4 +3627,154 @@ fn autonomous_intake_denies_ambiguous_signals_fail_closed() {
         AutonomousIntakeReasonCode::AmbiguousSignal
     );
     assert!(candidate.candidate_class.is_none());
+}
+
+// ── AUTO-02: Bounded task planning and risk scoring ───────────────────────────
+
+#[test]
+fn autonomous_planning_approves_lint_fix_candidate() {
+    let kernel = make_evo_kernel_for_autonomous_intake("autonomous_planning_approves_lint_fix");
+    let intake_input = AutonomousIntakeInput {
+        source_id: "ci-run-plan-001".to_string(),
+        candidate_source: AutonomousCandidateSource::LintRegression,
+        raw_signals: vec!["error[E0308]: mismatched types".to_string()],
+    };
+    let output = kernel.discover_autonomous_candidates(&intake_input);
+    assert_eq!(output.accepted_count, 1, "precondition: intake accepted");
+    let candidate = &output.candidates[0];
+
+    let plan = kernel.plan_autonomous_candidate(candidate);
+    assert!(plan.approved, "LintFix candidate must be approved");
+    assert_eq!(plan.reason_code, AutonomousPlanReasonCode::Approved);
+    assert_eq!(plan.task_class, Some(BoundedTaskClass::LintFix));
+    assert!(
+        plan.risk_tier <= AutonomousRiskTier::Medium,
+        "LintFix must be low/medium risk"
+    );
+    assert!(
+        plan.feasibility_score >= 40,
+        "feasibility must meet policy floor"
+    );
+    assert!(!plan.plan_id.is_empty(), "plan_id must be set");
+    assert!(!plan.dedupe_key.is_empty(), "dedupe_key must be set");
+    assert!(!plan.fail_closed, "approved plan must not be fail_closed");
+    assert!(
+        !plan.expected_evidence.is_empty(),
+        "must list expected evidence"
+    );
+}
+
+#[test]
+fn autonomous_planning_denies_denied_candidate_fail_closed() {
+    let kernel =
+        make_evo_kernel_for_autonomous_intake("autonomous_planning_denies_denied_candidate");
+    let intake_input = AutonomousIntakeInput {
+        source_id: "ci-run-plan-002".to_string(),
+        candidate_source: AutonomousCandidateSource::CiFailure,
+        raw_signals: vec![],
+    };
+    let output = kernel.discover_autonomous_candidates(&intake_input);
+    assert_eq!(output.denied_count, 1, "precondition: intake denied");
+    let candidate = &output.candidates[0];
+
+    let plan = kernel.plan_autonomous_candidate(candidate);
+    assert!(!plan.approved, "denied intake must yield denied plan");
+    assert_eq!(plan.reason_code, AutonomousPlanReasonCode::DeniedNoEvidence);
+    assert!(plan.fail_closed, "denied plan must be fail_closed");
+    assert!(
+        plan.denial_condition.is_some(),
+        "denial_condition must be populated"
+    );
+}
+
+#[test]
+fn autonomous_planning_approves_docs_single_file_candidate() {
+    use oris_agent_contract::accept_discovered_candidate;
+
+    let kernel = make_evo_kernel_for_autonomous_intake("autonomous_planning_approves_docs");
+    let candidate = accept_discovered_candidate(
+        "docs-key-001",
+        AutonomousCandidateSource::LintRegression,
+        BoundedTaskClass::DocsSingleFile,
+        vec!["doc comment outdated in src/lib.rs".to_string()],
+        None,
+    );
+
+    let plan = kernel.plan_autonomous_candidate(&candidate);
+    assert!(plan.approved, "DocsSingleFile candidate must be approved");
+    assert_eq!(plan.reason_code, AutonomousPlanReasonCode::Approved);
+    assert_eq!(plan.task_class, Some(BoundedTaskClass::DocsSingleFile));
+    assert!(
+        plan.risk_tier <= AutonomousRiskTier::Medium,
+        "DocsSingleFile must be low/medium risk"
+    );
+    assert!(
+        plan.feasibility_score >= 40,
+        "feasibility must meet policy floor"
+    );
+    assert!(!plan.fail_closed, "approved plan must not be fail_closed");
+    assert!(
+        !plan.expected_evidence.is_empty(),
+        "must list expected evidence"
+    );
+}
+
+#[test]
+fn autonomous_planning_denies_missing_class_fail_closed() {
+    use oris_agent_contract::DiscoveredCandidate;
+
+    // Craft a candidate that is accepted but has no class.
+    let candidate = DiscoveredCandidate {
+        dedupe_key: "test-no-class-key".to_string(),
+        candidate_source: AutonomousCandidateSource::LintRegression,
+        signals: vec!["some signal".to_string()],
+        candidate_class: None,
+        accepted: true,
+        reason_code: AutonomousIntakeReasonCode::Accepted,
+        summary: "test candidate".to_string(),
+        failure_reason: None,
+        recovery_hint: None,
+        fail_closed: false,
+    };
+    let kernel = make_evo_kernel_for_autonomous_intake("autonomous_planning_denies_no_class");
+    let plan = kernel.plan_autonomous_candidate(&candidate);
+
+    assert!(!plan.approved, "missing class must be denied");
+    assert_eq!(
+        plan.reason_code,
+        AutonomousPlanReasonCode::DeniedUnsupportedClass
+    );
+    assert!(plan.fail_closed, "must be fail_closed");
+    assert!(plan.denial_condition.is_some());
+}
+
+#[test]
+fn autonomous_planning_reason_codes_are_stable() {
+    // Verify discriminant stability so wire format never silently shifts.
+    assert_eq!(
+        format!("{:?}", AutonomousPlanReasonCode::Approved),
+        "Approved"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPlanReasonCode::DeniedHighRisk),
+        "DeniedHighRisk"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPlanReasonCode::DeniedLowFeasibility),
+        "DeniedLowFeasibility"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPlanReasonCode::DeniedUnsupportedClass),
+        "DeniedUnsupportedClass"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPlanReasonCode::DeniedNoEvidence),
+        "DeniedNoEvidence"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPlanReasonCode::UnknownFailClosed),
+        "UnknownFailClosed"
+    );
+    assert!(AutonomousRiskTier::Low < AutonomousRiskTier::Medium);
+    assert!(AutonomousRiskTier::Medium < AutonomousRiskTier::High);
 }

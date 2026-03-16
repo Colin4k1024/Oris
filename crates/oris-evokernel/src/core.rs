@@ -10,17 +10,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
     accept_discovered_candidate, accept_self_evolution_selection_decision,
-    deny_discovered_candidate, infer_mutation_needed_failure_reason_code,
-    infer_replay_fallback_reason_code, normalize_mutation_needed_failure_contract,
-    normalize_replay_fallback_contract, reject_self_evolution_selection_decision, AgentRole,
-    AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeOutput,
-    AutonomousIntakeReasonCode, BoundedTaskClass, CoordinationMessage, CoordinationPlan,
-    CoordinationPrimitive, CoordinationResult, CoordinationTask, ExecutionFeedback,
-    MutationNeededFailureContract, MutationNeededFailureReasonCode,
-    MutationProposal as AgentMutationProposal, MutationProposalContractReasonCode,
-    MutationProposalEvidence, MutationProposalScope, MutationProposalValidationBudget,
-    ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
-    SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
+    approve_autonomous_task_plan, deny_autonomous_task_plan, deny_discovered_candidate,
+    infer_mutation_needed_failure_reason_code, infer_replay_fallback_reason_code,
+    normalize_mutation_needed_failure_contract, normalize_replay_fallback_contract,
+    reject_self_evolution_selection_decision, AgentRole, AutonomousCandidateSource,
+    AutonomousIntakeInput, AutonomousIntakeOutput, AutonomousIntakeReasonCode,
+    AutonomousPlanReasonCode, AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass,
+    CoordinationMessage, CoordinationPlan, CoordinationPrimitive, CoordinationResult,
+    CoordinationTask, DiscoveredCandidate, ExecutionFeedback, MutationNeededFailureContract,
+    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
+    MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
+    MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
+    ReplayPlannerDirective, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
     SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
     SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
     SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
@@ -3499,6 +3500,16 @@ impl<S: KernelState> EvoKernel<S> {
         }
     }
 
+    /// Bounded task planning for an autonomous candidate: assigns risk tier,
+    /// feasibility score, validation budget, and expected evidence, then
+    /// approves or denies the candidate for proposal generation.
+    ///
+    /// This is the `EVO26-AUTO-02` entry point. It does **not** generate a
+    /// mutation proposal — it only produces an auditable `AutonomousTaskPlan`.
+    pub fn plan_autonomous_candidate(&self, candidate: &DiscoveredCandidate) -> AutonomousTaskPlan {
+        autonomous_plan_for_candidate(candidate)
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -5308,6 +5319,111 @@ fn autonomous_is_duplicate_in_store(store: &Arc<dyn EvolutionStore>, dedupe_key:
         }
     }
     false
+}
+
+/// Produce an `AutonomousTaskPlan` from an accepted `DiscoveredCandidate`.
+/// Denied or missing class candidates are denied fail-closed.
+fn autonomous_plan_for_candidate(candidate: &DiscoveredCandidate) -> AutonomousTaskPlan {
+    let plan_id = stable_hash_json(&("plan-v1", &candidate.dedupe_key))
+        .unwrap_or_else(|_| compute_artifact_hash(&candidate.dedupe_key));
+
+    if !candidate.accepted {
+        return deny_autonomous_task_plan(
+            plan_id,
+            candidate.dedupe_key.clone(),
+            AutonomousRiskTier::High,
+            AutonomousPlanReasonCode::DeniedNoEvidence,
+        );
+    }
+
+    let Some(task_class) = candidate.candidate_class.clone() else {
+        return deny_autonomous_task_plan(
+            plan_id,
+            candidate.dedupe_key.clone(),
+            AutonomousRiskTier::High,
+            AutonomousPlanReasonCode::DeniedUnsupportedClass,
+        );
+    };
+
+    let (risk_tier, feasibility_score, validation_budget, expected_evidence) =
+        autonomous_planning_params_for_class(task_class.clone());
+
+    // Deny high-risk work before proposal generation.
+    if risk_tier >= AutonomousRiskTier::High {
+        return deny_autonomous_task_plan(
+            plan_id,
+            candidate.dedupe_key.clone(),
+            risk_tier,
+            AutonomousPlanReasonCode::DeniedHighRisk,
+        );
+    }
+
+    // Deny if feasibility is below the policy floor of 40.
+    if feasibility_score < 40 {
+        return deny_autonomous_task_plan(
+            plan_id,
+            candidate.dedupe_key.clone(),
+            risk_tier,
+            AutonomousPlanReasonCode::DeniedLowFeasibility,
+        );
+    }
+
+    let summary = format!(
+        "autonomous task plan approved for {task_class:?} ({risk_tier:?} risk, \
+         feasibility={feasibility_score}, budget={validation_budget})"
+    );
+    approve_autonomous_task_plan(
+        plan_id,
+        candidate.dedupe_key.clone(),
+        task_class,
+        risk_tier,
+        feasibility_score,
+        validation_budget,
+        expected_evidence,
+        Some(&summary),
+    )
+}
+
+/// Returns `(risk_tier, feasibility_score, validation_budget, expected_evidence)`.
+fn autonomous_planning_params_for_class(
+    task_class: BoundedTaskClass,
+) -> (AutonomousRiskTier, u8, u8, Vec<String>) {
+    match task_class {
+        BoundedTaskClass::LintFix => (
+            AutonomousRiskTier::Low,
+            85,
+            2,
+            vec![
+                "cargo fmt --all -- --check".to_string(),
+                "cargo clippy targeted output".to_string(),
+            ],
+        ),
+        BoundedTaskClass::DocsSingleFile => (
+            AutonomousRiskTier::Low,
+            90,
+            1,
+            vec!["docs review diff".to_string()],
+        ),
+        BoundedTaskClass::DocsMultiFile => (
+            AutonomousRiskTier::Medium,
+            75,
+            2,
+            vec![
+                "docs review diff".to_string(),
+                "link validation".to_string(),
+            ],
+        ),
+        BoundedTaskClass::CargoDepUpgrade => (
+            AutonomousRiskTier::Medium,
+            70,
+            3,
+            vec![
+                "cargo audit".to_string(),
+                "cargo test regression".to_string(),
+                "cargo build all features".to_string(),
+            ],
+        ),
+    }
 }
 
 fn find_declared_mutation(

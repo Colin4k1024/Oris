@@ -1,0 +1,4 @@
+interface:
+  display_name: "Oris Maintainer"
+  short_description: "Manage Oris issue-to-release workflow"
+  default_prompt: "Use $oris-maintainer to take the next Oris GitHub issue through implementation, Rust validation, crate release, and issue closure."

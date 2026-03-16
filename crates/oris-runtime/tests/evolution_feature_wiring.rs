@@ -249,3 +249,46 @@ fn autonomous_candidate_intake_types_resolve() {
     let _src = oris_runtime::agent_contract::AutonomousCandidateSource::CiFailure;
     let _code = oris_runtime::agent_contract::AutonomousIntakeReasonCode::Accepted;
 }
+
+/// Issue #265 — EVO26-AUTO-02: Bounded task planning types resolve via facade
+#[test]
+fn autonomous_task_planning_types_resolve() {
+    assert_type::<oris_runtime::agent_contract::AutonomousRiskTier>();
+    assert_type::<oris_runtime::agent_contract::AutonomousPlanReasonCode>();
+    assert_type::<oris_runtime::agent_contract::AutonomousDenialCondition>();
+    assert_type::<oris_runtime::agent_contract::AutonomousTaskPlan>();
+
+    // Constructor helpers resolve and produce correct types
+    let _approved: oris_runtime::agent_contract::AutonomousTaskPlan =
+        oris_runtime::agent_contract::approve_autonomous_task_plan(
+            "plan-id-1".to_string(),
+            "dedupe-key-1".to_string(),
+            oris_runtime::agent_contract::BoundedTaskClass::LintFix,
+            oris_runtime::agent_contract::AutonomousRiskTier::Low,
+            85u8,
+            2u8,
+            vec!["cargo fmt".to_string()],
+            Some("approved"),
+        );
+    let _denied: oris_runtime::agent_contract::AutonomousTaskPlan =
+        oris_runtime::agent_contract::deny_autonomous_task_plan(
+            "plan-id-2".to_string(),
+            "dedupe-key-2".to_string(),
+            oris_runtime::agent_contract::AutonomousRiskTier::High,
+            oris_runtime::agent_contract::AutonomousPlanReasonCode::DeniedHighRisk,
+        );
+
+    // Variants accessible
+    let _tier = oris_runtime::agent_contract::AutonomousRiskTier::Low;
+    let _code = oris_runtime::agent_contract::AutonomousPlanReasonCode::Approved;
+
+    // Risk ordering is correct
+    assert!(
+        oris_runtime::agent_contract::AutonomousRiskTier::Low
+            < oris_runtime::agent_contract::AutonomousRiskTier::Medium
+    );
+    assert!(
+        oris_runtime::agent_contract::AutonomousRiskTier::Medium
+            < oris_runtime::agent_contract::AutonomousRiskTier::High
+    );
+}
