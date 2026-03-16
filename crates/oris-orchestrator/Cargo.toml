@@ -1,6 +1,6 @@
 [package]
 name = "oris-orchestrator"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT"
@@ -15,6 +15,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+
+[features]
+release-automation-experimental = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
