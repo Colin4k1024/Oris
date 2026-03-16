@@ -11,12 +11,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{Duration, Utc};
 use oris_agent_contract::{
     AgentTask, AutonomousApprovalMode, AutonomousCandidateSource, AutonomousIntakeInput,
-    AutonomousIntakeReasonCode, AutonomousPlanReasonCode, AutonomousProposalReasonCode,
-    AutonomousRiskTier, BoundedTaskClass, ConfidenceDemotionReasonCode, ConfidenceState,
-    HumanApproval, MutationNeededFailureReasonCode, MutationProposal,
-    MutationProposalContractReasonCode, MutationProposalEvidence, ReplayEligibility,
-    ReplayFallbackNextAction, ReplayFallbackReasonCode, ReplayPlannerDirective,
-    RevalidationOutcome, SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
+    AutonomousIntakeReasonCode, AutonomousPlanReasonCode, AutonomousPrLaneReasonCode,
+    AutonomousPrLaneStatus, AutonomousProposalReasonCode, AutonomousRiskTier, BoundedTaskClass,
+    ConfidenceDemotionReasonCode, ConfidenceState, HumanApproval, MutationNeededFailureReasonCode,
+    MutationProposal, MutationProposalContractReasonCode, MutationProposalEvidence,
+    PrEvidenceBundle, PrLaneApprovalState, ReplayEligibility, ReplayFallbackNextAction,
+    ReplayFallbackReasonCode, ReplayPlannerDirective, RevalidationOutcome,
+    SelfEvolutionAcceptanceGateInput, SelfEvolutionAcceptanceGateReasonCode,
     SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
     SelfEvolutionSelectionReasonCode, SemanticReplayReasonCode, SupervisedDeliveryApprovalState,
     SupervisedDeliveryReasonCode, SupervisedDeliveryStatus, SupervisedDevloopOutcome,
@@ -4202,4 +4203,139 @@ fn confidence_revalidation_reason_codes_and_states_are_stable() {
     );
     assert_eq!(format!("{:?}", ReplayEligibility::Eligible), "Eligible");
     assert_eq!(format!("{:?}", ReplayEligibility::Ineligible), "Ineligible");
+}
+
+// ─── AUTO-06: Bounded Autonomous PR Lane ────────────────────────────────────
+
+fn make_evidence(validation_passed: bool) -> PrEvidenceBundle {
+    PrEvidenceBundle {
+        patch_summary: "test patch".to_string(),
+        validation_passed,
+        audit_trail: vec!["evidence-key-1".to_string()],
+    }
+}
+
+#[test]
+fn autonomous_pr_lane_approved_for_docs_single_file_with_valid_evidence() {
+    let kernel = make_evo_kernel_for_autonomous_intake("prl_docs_single");
+    let decision = kernel.evaluate_autonomous_pr_lane(
+        "task-docs-001",
+        &BoundedTaskClass::DocsSingleFile,
+        AutonomousRiskTier::Low,
+        Some(make_evidence(true)),
+    );
+    assert!(
+        decision.pr_ready,
+        "DocsSingleFile low-risk with evidence should be approved"
+    );
+    assert!(!decision.fail_closed);
+    assert_eq!(decision.delivery_status, AutonomousPrLaneStatus::PrReady);
+    assert_eq!(decision.approval_state, PrLaneApprovalState::ClassApproved);
+    assert_eq!(
+        decision.reason_code,
+        AutonomousPrLaneReasonCode::ApprovedForAutonomousPr
+    );
+    assert!(
+        decision.branch_name.is_some(),
+        "approved lane must provide a branch name"
+    );
+    assert!(
+        decision.evidence_bundle.is_some(),
+        "approved lane must carry evidence bundle"
+    );
+}
+
+#[test]
+fn autonomous_pr_lane_approved_for_lint_fix_with_valid_evidence() {
+    let kernel = make_evo_kernel_for_autonomous_intake("prl_lint_fix");
+    let decision = kernel.evaluate_autonomous_pr_lane(
+        "task-lint-001",
+        &BoundedTaskClass::LintFix,
+        AutonomousRiskTier::Low,
+        Some(make_evidence(true)),
+    );
+    assert!(decision.pr_ready);
+    assert_eq!(
+        decision.reason_code,
+        AutonomousPrLaneReasonCode::ApprovedForAutonomousPr
+    );
+}
+
+#[test]
+fn autonomous_pr_lane_denied_for_high_risk_class() {
+    let kernel = make_evo_kernel_for_autonomous_intake("prl_high_risk");
+    let decision = kernel.evaluate_autonomous_pr_lane(
+        "task-dep-001",
+        &BoundedTaskClass::CargoDepUpgrade,
+        AutonomousRiskTier::Medium,
+        Some(make_evidence(true)),
+    );
+    assert!(!decision.pr_ready, "CargoDepUpgrade should be denied");
+    assert!(decision.fail_closed);
+    assert_eq!(decision.delivery_status, AutonomousPrLaneStatus::Denied);
+    assert_eq!(
+        decision.reason_code,
+        AutonomousPrLaneReasonCode::TaskClassNotApproved
+    );
+}
+
+#[test]
+fn autonomous_pr_lane_denied_when_validation_not_passed() {
+    let kernel = make_evo_kernel_for_autonomous_intake("prl_val_fail");
+    let decision = kernel.evaluate_autonomous_pr_lane(
+        "task-docs-002",
+        &BoundedTaskClass::DocsSingleFile,
+        AutonomousRiskTier::Low,
+        Some(make_evidence(false)),
+    );
+    assert!(
+        !decision.pr_ready,
+        "should be denied when validation did not pass"
+    );
+    assert!(decision.fail_closed);
+    assert_eq!(
+        decision.reason_code,
+        AutonomousPrLaneReasonCode::ValidationEvidenceMissing
+    );
+}
+
+#[test]
+fn autonomous_pr_lane_reason_codes_and_statuses_are_stable() {
+    assert_eq!(
+        format!("{:?}", AutonomousPrLaneReasonCode::ApprovedForAutonomousPr),
+        "ApprovedForAutonomousPr"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPrLaneReasonCode::TaskClassNotApproved),
+        "TaskClassNotApproved"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPrLaneReasonCode::PatchEvidenceMissing),
+        "PatchEvidenceMissing"
+    );
+    assert_eq!(
+        format!(
+            "{:?}",
+            AutonomousPrLaneReasonCode::ValidationEvidenceMissing
+        ),
+        "ValidationEvidenceMissing"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPrLaneReasonCode::RiskTierTooHigh),
+        "RiskTierTooHigh"
+    );
+    assert_eq!(
+        format!("{:?}", AutonomousPrLaneReasonCode::UnknownFailClosed),
+        "UnknownFailClosed"
+    );
+    assert_eq!(format!("{:?}", AutonomousPrLaneStatus::PrReady), "PrReady");
+    assert_eq!(format!("{:?}", AutonomousPrLaneStatus::Denied), "Denied");
+    assert_eq!(
+        format!("{:?}", PrLaneApprovalState::ClassApproved),
+        "ClassApproved"
+    );
+    assert_eq!(
+        format!("{:?}", PrLaneApprovalState::ClassNotApproved),
+        "ClassNotApproved"
+    );
 }
