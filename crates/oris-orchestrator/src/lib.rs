@@ -6,6 +6,7 @@ pub mod github_adapter;
 pub mod issue_selection;
 pub mod loop_adapters;
 pub mod pipeline_orchestrator;
+pub mod proposal_generator;
 pub mod publish_gate;
 pub mod release_gate;
 pub mod runtime_client;
