@@ -10,18 +10,21 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use oris_agent_contract::{
     accept_discovered_candidate, accept_self_evolution_selection_decision,
-    approve_autonomous_task_plan, deny_autonomous_task_plan, deny_discovered_candidate,
+    approve_autonomous_mutation_proposal, approve_autonomous_task_plan,
+    deny_autonomous_mutation_proposal, deny_autonomous_task_plan, deny_discovered_candidate,
     infer_mutation_needed_failure_reason_code, infer_replay_fallback_reason_code,
     normalize_mutation_needed_failure_contract, normalize_replay_fallback_contract,
-    reject_self_evolution_selection_decision, AgentRole, AutonomousCandidateSource,
-    AutonomousIntakeInput, AutonomousIntakeOutput, AutonomousIntakeReasonCode,
-    AutonomousPlanReasonCode, AutonomousRiskTier, AutonomousTaskPlan, BoundedTaskClass,
-    CoordinationMessage, CoordinationPlan, CoordinationPrimitive, CoordinationResult,
-    CoordinationTask, DiscoveredCandidate, ExecutionFeedback, MutationNeededFailureContract,
-    MutationNeededFailureReasonCode, MutationProposal as AgentMutationProposal,
-    MutationProposalContractReasonCode, MutationProposalEvidence, MutationProposalScope,
-    MutationProposalValidationBudget, ReplayFallbackReasonCode, ReplayFeedback,
-    ReplayPlannerDirective, SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
+    reject_self_evolution_selection_decision, AgentRole, AutonomousApprovalMode,
+    AutonomousCandidateSource, AutonomousIntakeInput, AutonomousIntakeOutput,
+    AutonomousIntakeReasonCode, AutonomousMutationProposal, AutonomousPlanReasonCode,
+    AutonomousProposalReasonCode, AutonomousProposalScope, AutonomousRiskTier, AutonomousTaskPlan,
+    BoundedTaskClass, CoordinationMessage, CoordinationPlan, CoordinationPrimitive,
+    CoordinationResult, CoordinationTask, DiscoveredCandidate, ExecutionFeedback,
+    MutationNeededFailureContract, MutationNeededFailureReasonCode,
+    MutationProposal as AgentMutationProposal, MutationProposalContractReasonCode,
+    MutationProposalEvidence, MutationProposalScope, MutationProposalValidationBudget,
+    ReplayFallbackReasonCode, ReplayFeedback, ReplayPlannerDirective,
+    SelfEvolutionAcceptanceGateContract, SelfEvolutionAcceptanceGateInput,
     SelfEvolutionAcceptanceGateReasonCode, SelfEvolutionApprovalEvidence,
     SelfEvolutionAuditConsistencyResult, SelfEvolutionCandidateIntakeRequest,
     SelfEvolutionDeliveryOutcome, SelfEvolutionMutationProposalContract,
@@ -3510,6 +3513,20 @@ impl<S: KernelState> EvoKernel<S> {
         autonomous_plan_for_candidate(candidate)
     }
 
+    /// Autonomous mutation proposal generation from an approved `AutonomousTaskPlan`.
+    ///
+    /// Generates a bounded, machine-readable `AutonomousMutationProposal` from an
+    /// approved plan. Unapproved plans, missing scope, or weak evidence sets produce
+    /// a denied fail-closed proposal.
+    ///
+    /// This is the `EVO26-AUTO-03` entry point. It does **not** execute the mutation.
+    pub fn propose_autonomous_mutation(
+        &self,
+        plan: &AutonomousTaskPlan,
+    ) -> AutonomousMutationProposal {
+        autonomous_proposal_for_plan(plan)
+    }
+
     pub fn select_self_evolution_candidate(
         &self,
         request: &SelfEvolutionCandidateIntakeRequest,
@@ -5421,6 +5438,116 @@ fn autonomous_planning_params_for_class(
                 "cargo audit".to_string(),
                 "cargo test regression".to_string(),
                 "cargo build all features".to_string(),
+            ],
+        ),
+    }
+}
+
+/// Produce an `AutonomousMutationProposal` from an approved `AutonomousTaskPlan`.
+/// Unapproved plans, unsupported classes, or empty evidence sets produce a
+/// denied fail-closed proposal.
+fn autonomous_proposal_for_plan(plan: &AutonomousTaskPlan) -> AutonomousMutationProposal {
+    let proposal_id = stable_hash_json(&("proposal-v1", &plan.plan_id))
+        .unwrap_or_else(|_| compute_artifact_hash(&plan.plan_id));
+
+    if !plan.approved {
+        return deny_autonomous_mutation_proposal(
+            proposal_id,
+            plan.plan_id.clone(),
+            plan.dedupe_key.clone(),
+            AutonomousProposalReasonCode::DeniedPlanNotApproved,
+        );
+    }
+
+    let Some(task_class) = plan.task_class.clone() else {
+        return deny_autonomous_mutation_proposal(
+            proposal_id,
+            plan.plan_id.clone(),
+            plan.dedupe_key.clone(),
+            AutonomousProposalReasonCode::DeniedNoTargetScope,
+        );
+    };
+
+    let (target_paths, scope_rationale, max_files, rollback_conditions) =
+        autonomous_proposal_scope_for_class(&task_class);
+
+    if plan.expected_evidence.is_empty() {
+        return deny_autonomous_mutation_proposal(
+            proposal_id,
+            plan.plan_id.clone(),
+            plan.dedupe_key.clone(),
+            AutonomousProposalReasonCode::DeniedWeakEvidence,
+        );
+    }
+
+    let scope = AutonomousProposalScope {
+        target_paths,
+        scope_rationale,
+        max_files,
+    };
+
+    // Low-risk bounded classes are auto-approved; others require human review.
+    let approval_mode = if plan.risk_tier == AutonomousRiskTier::Low {
+        AutonomousApprovalMode::AutoApproved
+    } else {
+        AutonomousApprovalMode::RequiresHumanReview
+    };
+
+    let summary = format!(
+        "autonomous mutation proposal for {task_class:?} ({:?} approval, {} evidence items)",
+        approval_mode,
+        plan.expected_evidence.len()
+    );
+
+    approve_autonomous_mutation_proposal(
+        proposal_id,
+        plan.plan_id.clone(),
+        plan.dedupe_key.clone(),
+        scope,
+        plan.expected_evidence.clone(),
+        rollback_conditions,
+        approval_mode,
+        Some(&summary),
+    )
+}
+
+/// Returns `(target_paths, scope_rationale, max_files, rollback_conditions)` for a task class.
+fn autonomous_proposal_scope_for_class(
+    task_class: &BoundedTaskClass,
+) -> (Vec<String>, String, u8, Vec<String>) {
+    match task_class {
+        BoundedTaskClass::LintFix => (
+            vec!["crates/**/*.rs".to_string()],
+            "lint and compile fixes are bounded to source files only".to_string(),
+            5,
+            vec![
+                "revert if cargo fmt --all -- --check fails".to_string(),
+                "revert if any test regresses".to_string(),
+            ],
+        ),
+        BoundedTaskClass::DocsSingleFile => (
+            vec!["docs/**/*.md".to_string(), "crates/**/*.rs".to_string()],
+            "doc fixes are bounded to a single documentation or source file".to_string(),
+            1,
+            vec!["revert if docs review diff shows unrelated changes".to_string()],
+        ),
+        BoundedTaskClass::DocsMultiFile => (
+            vec!["docs/**/*.md".to_string()],
+            "multi-file doc updates are bounded to the docs directory".to_string(),
+            5,
+            vec![
+                "revert if docs review diff shows non-doc changes".to_string(),
+                "revert if link validation fails".to_string(),
+            ],
+        ),
+        BoundedTaskClass::CargoDepUpgrade => (
+            vec!["Cargo.toml".to_string(), "Cargo.lock".to_string()],
+            "dependency upgrades are bounded to manifest and lock files only".to_string(),
+            2,
+            vec![
+                "revert if cargo audit reports new vulnerability".to_string(),
+                "revert if any test regresses after upgrade".to_string(),
+                "revert if cargo build all features fails".to_string(),
             ],
         ),
     }
