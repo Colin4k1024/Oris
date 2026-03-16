@@ -9,6 +9,8 @@ pub mod loop_adapters;
 pub mod pipeline_orchestrator;
 pub mod proposal_generator;
 pub mod publish_gate;
+#[cfg(feature = "release-automation-experimental")]
+pub mod release_executor;
 pub mod release_gate;
 pub mod runtime_client;
 pub mod state;
