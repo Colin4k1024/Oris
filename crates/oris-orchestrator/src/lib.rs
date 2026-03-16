@@ -3,6 +3,7 @@ pub mod autonomous_loop;
 pub mod coordinator;
 pub mod evidence;
 pub mod github_adapter;
+pub mod github_delivery;
 pub mod issue_selection;
 pub mod loop_adapters;
 pub mod pipeline_orchestrator;
