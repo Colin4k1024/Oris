@@ -29,6 +29,9 @@ use oris_evolution::{EvolutionPipelinePort, EvolutionPipelineRequest, PipelineRe
 use crate::acceptance_gate::{AcceptanceGate, PipelineOutcomeView};
 use crate::github_adapter::{CreatedPullRequest, PrPayload};
 use crate::release_gate::ReleaseDecision;
+use crate::task_planner::{
+    bounded_task_classes, plan_autonomous_candidate, AutonomousPlanReasonCode, BoundedTaskClass,
+};
 
 // ── Ports ──────────────────────────────────────────────────────────────────
 
@@ -178,6 +181,8 @@ impl Default for AutonomousLoopConfig {
 pub enum IssueOutcome {
     /// No mutation proposal could be generated (e.g. low signal confidence).
     NoProposal,
+    /// Task planning denied the candidate before proposal generation.
+    PlanDenied { reason_code: String },
     /// The acceptance gate rejected the proposal.
     GateRejected { reason: String },
     /// The evolution pipeline rejected or failed the proposal before PR delivery.
@@ -232,6 +237,9 @@ pub struct AutonomousLoop {
     pr_delivery: Box<dyn PrDeliveryPort>,
     pipeline_port: Option<Arc<dyn EvolutionPipelinePort>>,
     config: AutonomousLoopConfig,
+    /// Bounded task-class registry used for autonomous task planning (Stream B).
+    /// Defaults to `bounded_task_classes()` when not provided.
+    bounded_classes: Vec<BoundedTaskClass>,
 }
 
 impl AutonomousLoop {
@@ -248,7 +256,14 @@ impl AutonomousLoop {
             pr_delivery,
             pipeline_port: None,
             config,
+            bounded_classes: bounded_task_classes(),
         }
+    }
+
+    /// Override the bounded task-class registry used for task planning.
+    pub fn with_bounded_classes(mut self, classes: Vec<BoundedTaskClass>) -> Self {
+        self.bounded_classes = classes;
+        self
     }
 
     /// Attach an evolution pipeline gate that runs before PR delivery.
@@ -306,6 +321,14 @@ impl AutonomousLoop {
         prs_created: &mut usize,
         publishes_triggered: &mut usize,
     ) -> IssueOutcome {
+        // Step 0 — task planning: classify, score feasibility, check risk.
+        // Candidates denied here never reach proposal generation.
+        let plan = plan_autonomous_candidate(issue, &self.bounded_classes);
+        if !plan.is_approved() {
+            let reason_code = format!("{:?}", plan.reason_code);
+            return IssueOutcome::PlanDenied { reason_code };
+        }
+
         // Step 1 — generate mutation proposal.
         let Some(proposal) = self.generator.generate(issue) else {
             return IssueOutcome::NoProposal;
@@ -550,7 +573,9 @@ mod tests {
         DiscoveredIssue {
             issue_id: id.to_string(),
             title: format!("Fix {id}"),
-            signals: vec!["test-signal".to_string(), id.to_string()],
+            // Use signals that match the "test-failure" task class so that
+            // task planning (Stream B) approves the candidate.
+            signals: vec!["test failed: assertion error".to_string(), id.to_string()],
         }
     }
 

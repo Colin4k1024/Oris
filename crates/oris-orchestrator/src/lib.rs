@@ -10,4 +10,5 @@ pub mod publish_gate;
 pub mod release_gate;
 pub mod runtime_client;
 pub mod state;
+pub mod task_planner;
 pub mod task_spec;
