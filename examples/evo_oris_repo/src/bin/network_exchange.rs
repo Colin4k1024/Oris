@@ -6,7 +6,7 @@ use evo_oris_repo::{
 };
 use oris_runtime::agent_contract::{AgentTask, ProposalTarget};
 use oris_runtime::economics::{EvuAccount, EvuLedger};
-use oris_runtime::evolution::{EvoSelectorInput as SelectorInput, FetchQuery, RevokeNotice};
+use oris_runtime::evolution::{EvoSelectorInput as SelectorInput, FetchQuery};
 use oris_runtime::evolution_network::NetworkAsset;
 
 #[tokio::main]
@@ -24,6 +24,12 @@ async fn main() -> ExampleResult<()> {
 
     let node_a = build_demo_evo("network-node-a", 1)?.with_economics(node_a_ledger);
     let node_b = build_demo_evo("network-node-b", 1)?;
+
+    let pre_import_health = node_b.health_snapshot()?;
+    println!(
+        "node-b before import: promoted_genes={}, promoted_capsules={}",
+        pre_import_health.promoted_genes, pre_import_health.promoted_capsules
+    );
 
     let task = AgentTask {
         id: "network-publish".into(),
@@ -64,6 +70,12 @@ async fn main() -> ExampleResult<()> {
         import.imported_asset_ids.len()
     );
 
+    let post_import_health = node_b.health_snapshot()?;
+    println!(
+        "node-b after import: promoted_genes={}, promoted_capsules={}",
+        post_import_health.promoted_genes, post_import_health.promoted_capsules
+    );
+
     let imported_gene_signals = envelope
         .assets
         .iter()
@@ -96,6 +108,11 @@ async fn main() -> ExampleResult<()> {
         "node-b local replay validation: used_capsule={}, fallback_to_planner={}, reason={}",
         replay.used_capsule, replay.fallback_to_planner, replay.reason
     );
+    println!(
+        "node-b auto-promotion evidence: imported_assets={}, remote_capsule_reused={}",
+        import.imported_asset_ids.len(),
+        replay.used_capsule
+    );
 
     let fetch = node_b.fetch_assets(
         "node-b",
@@ -111,19 +128,6 @@ async fn main() -> ExampleResult<()> {
         fetch.sender_id,
         fetch.assets.len()
     );
-
-    if let Some(asset_id) = import.imported_asset_ids.first() {
-        let revoked = node_b.revoke_assets(&RevokeNotice {
-            sender_id: "node-b".into(),
-            asset_ids: vec![asset_id.clone()],
-            reason: "example revocation".into(),
-        })?;
-        println!(
-            "node-b revoke: sender_id={}, revoked_assets={}",
-            revoked.sender_id,
-            revoked.asset_ids.len()
-        );
-    }
 
     let health = node_b.health_snapshot()?;
     println!(
