@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod confidence_daemon;
 mod core;
+pub mod pipeline_integration;
 pub mod signal_extractor;
 
 /// Experimental external agent contract facade re-exported through EvoKernel.
@@ -31,3 +32,4 @@ pub mod spec_contract {
 }
 
 pub use core::*;
+pub use pipeline_integration::{detect_from_intake_events, intake_events_to_extractor_input};
