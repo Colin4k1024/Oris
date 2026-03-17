@@ -16,6 +16,7 @@ This release hardens evolution-network capsule ingestion with signed envelopes, 
 - cargo test --release --all-features
 - cargo test -p oris-runtime --features "sqlite-persistence,execution-server" kernel::runtime::api_handlers::tests::security_ -- --nocapture --test-threads=1
 - cargo publish -p oris-evolution-network --all-features --dry-run
+- cargo publish -p oris-evolution-network --all-features
 
 ## Links
 
