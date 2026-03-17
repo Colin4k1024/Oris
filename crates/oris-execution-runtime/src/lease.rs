@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::circuit_breaker::CircuitBreaker;
+
 use chrono::{DateTime, Duration, Utc};
 
 use oris_kernel::event::KernelError;
@@ -149,12 +151,18 @@ pub struct WorkerHealth {
 /// When `lease_expiry_count` for a worker reaches `quarantine_threshold`, the
 /// worker is marked `quarantined = true`. A quarantined worker should not
 /// receive new dispatch leases until it is explicitly cleared.
+///
+/// An optional [`CircuitBreaker`] can be wired in via
+/// [`WorkerHealthTracker::with_circuit_breaker`]. When a worker is quarantined,
+/// the breaker is tripped automatically.
 #[derive(Clone, Default)]
 pub struct WorkerHealthTracker {
     inner: Arc<Mutex<HashMap<String, WorkerHealth>>>,
     /// Number of consecutive lease expirations before a worker is quarantined.
     /// Defaults to 5.
     quarantine_threshold: u64,
+    /// Optional circuit breaker to trip when a worker is quarantined.
+    circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
 
 impl WorkerHealthTracker {
@@ -162,20 +170,55 @@ impl WorkerHealthTracker {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             quarantine_threshold,
+            circuit_breaker: None,
         }
+    }
+
+    /// Attach a shared circuit breaker to this tracker.
+    ///
+    /// The breaker will be tripped whenever a worker is quarantined.
+    pub fn with_circuit_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(breaker);
+        self
     }
 
     /// Record one lease expiry for `worker_id`.
     /// Returns `true` if the worker was just quarantined by this call.
+    ///
+    /// If a circuit breaker is attached, it is tripped when quarantine occurs.
     pub fn record_expiry(&self, worker_id: &str) -> bool {
-        let mut map = self.inner.lock().expect("worker health lock poisoned");
-        let entry = map.entry(worker_id.to_string()).or_default();
-        entry.lease_expiry_count += 1;
-        if !entry.quarantined && entry.lease_expiry_count >= self.quarantine_threshold {
-            entry.quarantined = true;
-            return true;
+        let just_quarantined = {
+            let mut map = self.inner.lock().expect("worker health lock poisoned");
+            let entry = map.entry(worker_id.to_string()).or_default();
+            entry.lease_expiry_count += 1;
+            if !entry.quarantined && entry.lease_expiry_count >= self.quarantine_threshold {
+                entry.quarantined = true;
+                true
+            } else {
+                false
+            }
+        };
+        if just_quarantined {
+            if let Some(cb) = &self.circuit_breaker {
+                cb.trip();
+            }
         }
-        false
+        just_quarantined
+    }
+
+    /// Record a successful dispatch acknowledgement for `worker_id`.
+    ///
+    /// Clears quarantine, resets expiry counter, and resets the circuit breaker to `Closed`.
+    pub fn record_success(&self, worker_id: &str) {
+        {
+            let mut map = self.inner.lock().expect("worker health lock poisoned");
+            let entry = map.entry(worker_id.to_string()).or_default();
+            entry.lease_expiry_count = 0;
+            entry.quarantined = false;
+        }
+        if let Some(cb) = &self.circuit_breaker {
+            cb.record_success();
+        }
     }
 
     /// Record a heartbeat for `worker_id` and clear quarantine if set.

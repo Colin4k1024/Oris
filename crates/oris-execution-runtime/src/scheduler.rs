@@ -1,9 +1,12 @@
 //! Scheduler skeleton for Phase 1 runtime rollout.
 
+use std::sync::Arc;
+
 use chrono::Utc;
 
 use oris_kernel::event::KernelError;
 
+use super::circuit_breaker::CircuitBreaker;
 use super::models::AttemptDispatchRecord;
 use super::observability::RejectionReason;
 use super::repository::RuntimeRepository;
@@ -66,11 +69,25 @@ pub enum SchedulerDecision {
 /// Compile-safe scheduler skeleton for queue -> lease dispatch.
 pub struct SkeletonScheduler<R: RuntimeRepository> {
     repository: R,
+    /// Optional circuit breaker applied globally to all dispatch calls.
+    circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
 
 impl<R: RuntimeRepository> SkeletonScheduler<R> {
     pub fn new(repository: R) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            circuit_breaker: None,
+        }
+    }
+
+    /// Attach a shared circuit breaker to this scheduler.
+    ///
+    /// When the breaker is `Open`, all dispatch calls return
+    /// `SchedulerDecision::Backpressure` until the probe window elapses.
+    pub fn with_circuit_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(breaker);
+        self
     }
 
     /// Attempt to dispatch one eligible attempt to `worker_id`.
@@ -91,6 +108,17 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
         context: Option<&DispatchContext>,
     ) -> Result<SchedulerDecision, KernelError> {
         let now = Utc::now();
+
+        // Circuit breaker gate: if the breaker is Open, reject dispatch.
+        if let Some(cb) = &self.circuit_breaker {
+            if cb.is_open() {
+                return Ok(SchedulerDecision::Backpressure {
+                    reason: RejectionReason::capacity_limit("circuit breaker open"),
+                    queue_depth: 0,
+                });
+            }
+        }
+
         let candidates: Vec<AttemptDispatchRecord> = self
             .repository
             .list_dispatchable_attempts(now, DISPATCH_SCAN_LIMIT)?;
@@ -484,6 +512,55 @@ mod tests {
 
         let decision = scheduler
             .dispatch_one_with_context("worker-1", Some(&ctx))
+            .expect("dispatch should succeed");
+
+        assert!(
+            matches!(decision, SchedulerDecision::Dispatched { .. }),
+            "expected Dispatched, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn open_circuit_breaker_returns_backpressure() {
+        use crate::circuit_breaker::CircuitBreaker;
+        use std::sync::Arc;
+
+        let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
+        let breaker = Arc::new(CircuitBreaker::new(30));
+        breaker.trip();
+
+        let scheduler = SkeletonScheduler::new(repo).with_circuit_breaker(breaker);
+
+        let decision = scheduler
+            .dispatch_one("worker-1")
+            .expect("should not error");
+
+        match decision {
+            SchedulerDecision::Backpressure { reason, .. } => {
+                let msg = format!("{:?}", reason);
+                assert!(
+                    msg.contains("circuit breaker open"),
+                    "unexpected reason: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Backpressure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn closed_circuit_breaker_allows_dispatch() {
+        use crate::circuit_breaker::CircuitBreaker;
+        use std::sync::Arc;
+
+        let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
+        let breaker = Arc::new(CircuitBreaker::new(30)); // starts Closed
+
+        let scheduler = SkeletonScheduler::new(repo).with_circuit_breaker(breaker);
+
+        let decision = scheduler
+            .dispatch_one("worker-1")
             .expect("dispatch should succeed");
 
         assert!(

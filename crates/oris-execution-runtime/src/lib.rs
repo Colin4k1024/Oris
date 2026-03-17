@@ -10,6 +10,7 @@ pub mod api_idempotency;
 pub mod api_models;
 #[cfg(feature = "sqlite-persistence")]
 pub mod backend_config;
+pub mod circuit_breaker;
 #[cfg(feature = "execution-server")]
 pub mod graph_bridge;
 pub mod lease;
@@ -47,6 +48,7 @@ pub use api_models::{
 };
 #[cfg(feature = "sqlite-persistence")]
 pub use backend_config::{RuntimeStorageBackend, RuntimeStorageConfig};
+pub use circuit_breaker::{CircuitBreaker, CircuitState};
 #[cfg(feature = "execution-server")]
 pub use graph_bridge::{
     ExecutionCheckpointView, ExecutionGraphBridge, ExecutionGraphBridgeError,
