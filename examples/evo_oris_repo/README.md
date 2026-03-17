@@ -30,10 +30,12 @@ cargo add oris-runtime --features full-evolution-experimental
 | Program | Command | What it demonstrates |
 | --- | --- | --- |
 | Canonical capture/replay | `cargo run -p evo_oris_repo` | `AgentTask -> MutationProposal -> run_supervised_devloop/capture_from_proposal -> replay_or_fallback_for_run` |
+| Intake webhook demo | `cargo run -p evo_oris_repo --bin intake_webhook_demo` | `WebhookServer -> IntakeEvent -> detect_from_intake_events` |
+| Confidence lifecycle demo | `cargo run -p evo_oris_repo --bin confidence_lifecycle_demo` | Bayesian confidence rise/fall, decay threshold crossing, replacement gene promotion |
 | Bootstrap to local promotion | `cargo run -p evo_oris_repo --bin bootstrap_seed` | `bootstrap_if_empty`, replay before/after local promoted capture |
 | Supervised devloop policy gate | `cargo run -p evo_oris_repo --bin supervised_devloop` | `AwaitingApproval`, `RejectedByPolicy`, `Executed` paths |
 | Spec-compiled mutation | `cargo run -p evo_oris_repo --bin spec_compiled_mutation` | `SpecCompiler` + `prepare_mutation_from_spec` + spec-linked replay |
-| Network exchange | `cargo run -p evo_oris_repo --bin network_exchange` | `export_promoted_assets`, `import_remote_envelope`, `fetch_assets`, `revoke_assets` |
+| Network exchange | `cargo run -p evo_oris_repo --bin network_exchange` | `export_promoted_assets`, `import_remote_envelope`, remote auto-promotion evidence, `fetch_assets`, `revoke_assets` |
 | Economics stake gate | `cargo run -p evo_oris_repo --bin economics_stake` | EVU insufficiency rejection and successful publish after balance/stake policy |
 | Coordination matrix | `cargo run -p evo_oris_repo --bin coordination_matrix` | Sequential/Parallel/Conditional multi-agent coordination outcomes |
 | Metrics and health | `cargo run -p evo_oris_repo --bin metrics_health` | `metrics_snapshot`, `health_snapshot`, Prometheus rendering |
