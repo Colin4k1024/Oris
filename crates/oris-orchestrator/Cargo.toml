@@ -10,7 +10,7 @@ description = "Oris orchestration contracts and control flow primitives."
 async-trait = "0.1"
 oris-agent-contract = { version = "0.5.5", path = "../oris-agent-contract" }
 oris-evolution = { version = "0.3.4", path = "../oris-evolution" }
-oris-intake = { version = "0.3.0", path = "../oris-intake" }
+oris-intake = { version = "0.4.0", path = "../oris-intake" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
