@@ -10854,7 +10854,7 @@ mod tests {
             ))
             .unwrap();
 
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -13595,7 +13595,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -13769,7 +13769,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let fetch_req = Request::builder()
@@ -13784,7 +13784,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let fetch_resp = router.oneshot(fetch_req).await.unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
         assert_eq!(fetch_resp.status(), StatusCode::NOT_FOUND);
 
         let claim_req = Request::builder()
@@ -13798,7 +13798,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let claim_resp = router.oneshot(claim_req).await.unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
         assert_eq!(claim_resp.status(), StatusCode::NOT_FOUND);
 
         let complete_req = Request::builder()
@@ -13813,7 +13813,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let complete_resp = router.oneshot(complete_req).await.unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
         assert_eq!(complete_resp.status(), StatusCode::NOT_FOUND);
 
         let work_claim_req = Request::builder()
@@ -13827,7 +13827,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let work_claim_resp = router.oneshot(work_claim_req).await.unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
         assert_eq!(work_claim_resp.status(), StatusCode::NOT_FOUND);
 
         let work_complete_req = Request::builder()
@@ -13842,7 +13842,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let work_complete_resp = router.oneshot(work_complete_req).await.unwrap();
+        let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
         assert_eq!(work_complete_resp.status(), StatusCode::NOT_FOUND);
 
         let heartbeat_req = Request::builder()

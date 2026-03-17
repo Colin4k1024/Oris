@@ -1,15 +1,20 @@
 //! Protocol contracts for the Oris Evolution Network (OEN).
 
 pub mod gossip;
+pub mod rate_limiter;
+pub mod signing;
 pub mod sync;
 
 pub use gossip::{
     GossipConfig, GossipDigest, GossipDigestEntry, GossipSyncEngine as PushPullGossipSyncEngine,
     GossipSyncReport, PeerAddress,
 };
+pub use rate_limiter::{PeerRateLimitConfig, PeerRateLimiter};
+pub use signing::{sign_envelope, verify_envelope, NodeKeypair, SignedEnvelope};
 pub use sync::{
-    CapsuleDisposition, GossipSyncEngine, QuarantineEntry, QuarantineReason, QuarantineState,
-    QuarantineStore, RemoteCapsuleReceiver, SyncStats, PROMOTE_THRESHOLD,
+    CapsuleDisposition, GossipSyncEngine, NetworkAuditDisposition, NetworkAuditEntry,
+    QuarantineEntry, QuarantineReason, QuarantineState, QuarantineStore, RejectionReason,
+    RemoteCapsuleReceiver, SyncStats, PROMOTE_THRESHOLD,
 };
 
 use std::collections::BTreeSet;
@@ -19,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use oris_evolution::{Capsule, EvolutionEvent, Gene};
+
+pub type Ed25519Signature = String;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MessageType {
@@ -48,7 +55,7 @@ pub struct EvolutionEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<EnvelopeManifest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
+    pub signature: Option<Ed25519Signature>,
     pub content_hash: String,
 }
 
@@ -192,7 +199,6 @@ impl EvolutionEnvelope {
             &self.timestamp,
             &self.assets,
             &self.manifest,
-            &self.signature,
         );
         let json = serde_json::to_vec(&payload).unwrap_or_default();
         let mut hasher = Sha256::new();
@@ -232,8 +238,8 @@ impl EvolutionEnvelope {
         Ok(())
     }
 
-    pub fn verify_signature(&self) -> bool {
-        true
+    pub fn verify_signature(&self, public_key_hex: &str) -> bool {
+        crate::signing::verify_envelope(public_key_hex, self).is_ok()
     }
 }
 

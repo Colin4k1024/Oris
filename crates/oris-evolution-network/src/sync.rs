@@ -21,7 +21,11 @@
 //! exchange their last-seen sequence number so that only *new* assets need to
 //! be transferred on each round.
 
-use crate::{FetchQuery, FetchResponse, NetworkAsset, PublishRequest, SyncAudit};
+use crate::{
+    verify_envelope, EvolutionEnvelope, FetchQuery, FetchResponse, NetworkAsset,
+    PeerRateLimitConfig, PeerRateLimiter, PublishRequest, SyncAudit,
+};
+use chrono::Utc;
 use oris_evolution::{AssetState, Capsule, Gene};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -452,6 +456,26 @@ pub enum QuarantineReason {
     GeneMissing,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RejectionReason {
+    InvalidSignature,
+    MissingSignature,
+    RateLimited,
+    GeneMissing,
+}
+
+impl std::fmt::Display for RejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectionReason::InvalidSignature => write!(f, "invalid_signature"),
+            RejectionReason::MissingSignature => write!(f, "missing_signature"),
+            RejectionReason::RateLimited => write!(f, "rate_limited"),
+            RejectionReason::GeneMissing => write!(f, "gene_missing"),
+        }
+    }
+}
+
 impl std::fmt::Display for QuarantineReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -481,11 +505,34 @@ pub enum CapsuleDisposition {
 /// Audit log entry appended to `capsule_audit_log.jsonl`.
 #[derive(Serialize)]
 struct AuditLogEntry<'a> {
+    timestamp: String,
+    peer_id: &'a str,
     capsule_id: &'a str,
     gene_id: &'a str,
+    disposition: NetworkAuditDisposition,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
     score: f64,
-    disposition: &'a CapsuleDisposition,
-    timestamp_secs: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkAuditDisposition {
+    Accept,
+    Reject,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkAuditEntry {
+    pub timestamp: String,
+    pub peer_id: String,
+    pub capsule_id: String,
+    pub gene_id: String,
+    pub disposition: NetworkAuditDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
 
 /// Drives the receive → score → promote/quarantine pipeline for remote capsules.
@@ -503,6 +550,8 @@ pub struct RemoteCapsuleReceiver {
     audit_log_path: Option<std::path::PathBuf>,
     /// In-memory audit trail (always populated regardless of file).
     audit_trail: Mutex<Vec<(String, CapsuleDisposition)>>,
+    network_audit_trail: Mutex<Vec<NetworkAuditEntry>>,
+    rate_limiter: PeerRateLimiter,
 }
 
 impl Default for RemoteCapsuleReceiver {
@@ -521,10 +570,20 @@ impl RemoteCapsuleReceiver {
         audit_log_path: Option<impl AsRef<std::path::Path>>,
         threshold: Option<f64>,
     ) -> Self {
+        Self::with_rate_limit_config(audit_log_path, threshold, PeerRateLimitConfig::default())
+    }
+
+    pub fn with_rate_limit_config(
+        audit_log_path: Option<impl AsRef<std::path::Path>>,
+        threshold: Option<f64>,
+        rate_limit_config: PeerRateLimitConfig,
+    ) -> Self {
         Self {
             threshold: threshold.unwrap_or(PROMOTE_THRESHOLD),
             audit_log_path: audit_log_path.map(|p| p.as_ref().to_path_buf()),
             audit_trail: Mutex::new(Vec::new()),
+            network_audit_trail: Mutex::new(Vec::new()),
+            rate_limiter: PeerRateLimiter::new(rate_limit_config),
         }
     }
 
@@ -542,6 +601,76 @@ impl RemoteCapsuleReceiver {
     /// store (e.g. `GeneStore::upsert_gene`).  The returned `CapsuleDisposition`
     /// carries the promoted `gene_id` so the caller can act accordingly.
     pub fn on_capsule_received(&self, capsule: &Capsule, gene: &mut Gene) -> CapsuleDisposition {
+        self.evaluate_capsule("unknown", capsule, gene)
+    }
+
+    pub fn on_signed_capsule_received(
+        &self,
+        peer_id: &str,
+        public_key_hex: &str,
+        envelope: &EvolutionEnvelope,
+        capsule: &Capsule,
+        gene: &mut Gene,
+    ) -> Result<CapsuleDisposition, RejectionReason> {
+        if !self.rate_limiter.check(peer_id) {
+            self.write_rejection_audit_entry(
+                peer_id,
+                capsule,
+                Some(gene.id.as_str()),
+                RejectionReason::RateLimited,
+            );
+            return Err(RejectionReason::RateLimited);
+        }
+
+        if envelope.signature.is_none() {
+            self.write_rejection_audit_entry(
+                peer_id,
+                capsule,
+                Some(gene.id.as_str()),
+                RejectionReason::MissingSignature,
+            );
+            return Err(RejectionReason::MissingSignature);
+        }
+
+        if verify_envelope(public_key_hex, envelope).is_err() {
+            self.write_rejection_audit_entry(
+                peer_id,
+                capsule,
+                Some(gene.id.as_str()),
+                RejectionReason::InvalidSignature,
+            );
+            return Err(RejectionReason::InvalidSignature);
+        }
+
+        let has_capsule = envelope.assets.iter().any(|asset| {
+            matches!(asset, NetworkAsset::Capsule { capsule: remote } if remote.id == capsule.id && remote.gene_id == capsule.gene_id)
+        });
+        let has_gene = envelope.assets.iter().any(
+            |asset| matches!(asset, NetworkAsset::Gene { gene: remote } if remote.id == gene.id),
+        );
+        if !has_capsule || !has_gene || gene.id != capsule.gene_id {
+            self.write_rejection_audit_entry(
+                peer_id,
+                capsule,
+                Some(gene.id.as_str()),
+                RejectionReason::GeneMissing,
+            );
+            return Err(RejectionReason::GeneMissing);
+        }
+
+        Ok(self.evaluate_capsule(peer_id, capsule, gene))
+    }
+
+    pub fn network_audit_trail(&self) -> Vec<NetworkAuditEntry> {
+        self.network_audit_trail.lock().unwrap().clone()
+    }
+
+    fn evaluate_capsule(
+        &self,
+        peer_id: &str,
+        capsule: &Capsule,
+        gene: &mut Gene,
+    ) -> CapsuleDisposition {
         let score = capsule.confidence as f64;
 
         let disposition = if score >= self.threshold {
@@ -557,7 +686,7 @@ impl RemoteCapsuleReceiver {
             }
         };
 
-        self.write_audit_entry(capsule, &disposition, score);
+        self.write_accept_audit_entry(peer_id, capsule, &disposition, score);
         self.audit_trail
             .lock()
             .unwrap()
@@ -576,17 +705,90 @@ impl RemoteCapsuleReceiver {
         self.audit_trail.lock().unwrap().len()
     }
 
-    fn write_audit_entry(&self, capsule: &Capsule, disposition: &CapsuleDisposition, score: f64) {
+    fn write_accept_audit_entry(
+        &self,
+        peer_id: &str,
+        capsule: &Capsule,
+        disposition: &CapsuleDisposition,
+        score: f64,
+    ) {
         let Some(ref path) = self.audit_log_path else {
+            self.network_audit_trail
+                .lock()
+                .unwrap()
+                .push(NetworkAuditEntry {
+                    timestamp: Utc::now().to_rfc3339(),
+                    peer_id: peer_id.to_string(),
+                    capsule_id: capsule.id.clone(),
+                    gene_id: capsule.gene_id.clone(),
+                    disposition: NetworkAuditDisposition::Accept,
+                    reason: match disposition {
+                        CapsuleDisposition::Promoted { .. } => None,
+                        CapsuleDisposition::Quarantined { reason } => Some(reason.clone()),
+                    },
+                    score: Some(score),
+                });
             return;
         };
         let entry = AuditLogEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            peer_id,
             capsule_id: &capsule.id,
             gene_id: &capsule.gene_id,
+            disposition: NetworkAuditDisposition::Accept,
+            reason: match disposition {
+                CapsuleDisposition::Promoted { .. } => None,
+                CapsuleDisposition::Quarantined { reason } => Some(reason.clone()),
+            },
             score,
-            disposition,
-            timestamp_secs: now_unix_secs(),
         };
+        self.network_audit_trail
+            .lock()
+            .unwrap()
+            .push(NetworkAuditEntry {
+                timestamp: entry.timestamp.clone(),
+                peer_id: entry.peer_id.to_string(),
+                capsule_id: entry.capsule_id.to_string(),
+                gene_id: entry.gene_id.to_string(),
+                disposition: entry.disposition.clone(),
+                reason: entry.reason.clone(),
+                score: Some(entry.score),
+            });
+        if let Ok(mut line) = serde_json::to_string(&entry) {
+            line.push('\n');
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+    }
+
+    fn write_rejection_audit_entry(
+        &self,
+        peer_id: &str,
+        capsule: &Capsule,
+        gene_id: Option<&str>,
+        reason: RejectionReason,
+    ) {
+        let entry = NetworkAuditEntry {
+            timestamp: Utc::now().to_rfc3339(),
+            peer_id: peer_id.to_string(),
+            capsule_id: capsule.id.clone(),
+            gene_id: gene_id.unwrap_or(&capsule.gene_id).to_string(),
+            disposition: NetworkAuditDisposition::Reject,
+            reason: Some(reason.to_string()),
+            score: Some(capsule.confidence as f64),
+        };
+        self.network_audit_trail.lock().unwrap().push(entry.clone());
+
+        let Some(ref path) = self.audit_log_path else {
+            return;
+        };
+
         if let Ok(mut line) = serde_json::to_string(&entry) {
             line.push('\n');
             use std::io::Write;
@@ -608,6 +810,7 @@ impl RemoteCapsuleReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{sign_envelope, NodeKeypair};
     use oris_evolution::{AssetState, Capsule, EnvFingerprint, Gene, Outcome};
 
     fn make_gene(id: &str) -> NetworkAsset {
@@ -659,6 +862,24 @@ mod tests {
             state: AssetState::Candidate,
             task_class_id: None,
         }
+    }
+
+    fn make_signed_envelope(
+        keypair: &NodeKeypair,
+        sender_id: &str,
+        capsule: &Capsule,
+        gene: &Gene,
+    ) -> EvolutionEnvelope {
+        let envelope = EvolutionEnvelope::publish(
+            sender_id,
+            vec![
+                NetworkAsset::Gene { gene: gene.clone() },
+                NetworkAsset::Capsule {
+                    capsule: capsule.clone(),
+                },
+            ],
+        );
+        sign_envelope(keypair, &envelope)
     }
 
     // -----------------------------------------------------------------------
@@ -954,5 +1175,173 @@ mod tests {
             &trail[1].1,
             CapsuleDisposition::Quarantined { .. }
         ));
+    }
+
+    #[test]
+    fn test_remote_capsule_missing_signature_is_rejected() {
+        let receiver = RemoteCapsuleReceiver::default();
+        let capsule = make_capsule("cap-sec-1", "gene-sec-1", 0.82);
+        let mut gene = make_plain_gene("gene-sec-1");
+        let envelope = EvolutionEnvelope::publish(
+            "node-a",
+            vec![
+                NetworkAsset::Gene { gene: gene.clone() },
+                NetworkAsset::Capsule {
+                    capsule: capsule.clone(),
+                },
+            ],
+        );
+
+        let result = receiver
+            .on_signed_capsule_received("peer-a", "deadbeef", &envelope, &capsule, &mut gene);
+
+        assert_eq!(result.unwrap_err(), RejectionReason::MissingSignature);
+        assert_eq!(receiver.network_audit_trail().len(), 1);
+        assert_eq!(gene.state, AssetState::Candidate);
+    }
+
+    #[test]
+    fn test_remote_capsule_tampered_signature_is_rejected() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "oris-node-key-{}.key",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let keypair =
+            NodeKeypair::generate_at(&temp_path).expect("keypair generation should succeed");
+        let receiver = RemoteCapsuleReceiver::default();
+        let capsule = make_capsule("cap-sec-2", "gene-sec-2", 0.90);
+        let mut gene = make_plain_gene("gene-sec-2");
+        let mut envelope = make_signed_envelope(&keypair, "node-a", &capsule, &gene);
+        if let Some(NetworkAsset::Gene { gene: remote_gene }) = envelope.assets.first_mut() {
+            remote_gene.strategy.push("tampered".to_string());
+        }
+
+        let result = receiver.on_signed_capsule_received(
+            "peer-a",
+            &keypair.public_key_hex(),
+            &envelope,
+            &capsule,
+            &mut gene,
+        );
+
+        assert_eq!(result.unwrap_err(), RejectionReason::InvalidSignature);
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_remote_capsule_rate_limited_is_rejected() {
+        let temp_path = std::env::temp_dir().join(format!(
+            "oris-node-key-{}.key",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let keypair =
+            NodeKeypair::generate_at(&temp_path).expect("keypair generation should succeed");
+        let receiver = RemoteCapsuleReceiver::with_rate_limit_config(
+            None::<&str>,
+            None,
+            PeerRateLimitConfig {
+                max_capsules_per_hour: 1,
+                window_secs: 3600,
+            },
+        );
+        let capsule = make_capsule("cap-sec-3", "gene-sec-3", 0.91);
+        let mut gene = make_plain_gene("gene-sec-3");
+        let envelope = make_signed_envelope(&keypair, "node-a", &capsule, &gene);
+
+        let first = receiver.on_signed_capsule_received(
+            "peer-a",
+            &keypair.public_key_hex(),
+            &envelope,
+            &capsule,
+            &mut gene,
+        );
+        assert!(first.is_ok());
+
+        let mut gene_again = make_plain_gene("gene-sec-3");
+        let second = receiver.on_signed_capsule_received(
+            "peer-a",
+            &keypair.public_key_hex(),
+            &envelope,
+            &capsule,
+            &mut gene_again,
+        );
+        assert_eq!(second.unwrap_err(), RejectionReason::RateLimited);
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_network_audit_log_records_accept_and_reject_events() {
+        let temp_key = std::env::temp_dir().join(format!(
+            "oris-node-key-{}.key",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let keypair =
+            NodeKeypair::generate_at(&temp_key).expect("keypair generation should succeed");
+        let log_path = std::env::temp_dir().join(format!(
+            "network_audit_log_test_{}.jsonl",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let receiver = RemoteCapsuleReceiver::with_rate_limit_config(
+            Some(&log_path),
+            None,
+            PeerRateLimitConfig {
+                max_capsules_per_hour: 10,
+                window_secs: 3600,
+            },
+        );
+        let capsule = make_capsule("cap-sec-4", "gene-sec-4", 0.88);
+        let mut gene = make_plain_gene("gene-sec-4");
+        let envelope = make_signed_envelope(&keypair, "node-a", &capsule, &gene);
+        let accepted = receiver.on_signed_capsule_received(
+            "peer-a",
+            &keypair.public_key_hex(),
+            &envelope,
+            &capsule,
+            &mut gene,
+        );
+        assert!(accepted.is_ok());
+
+        let unsigned_envelope = EvolutionEnvelope::publish(
+            "node-a",
+            vec![
+                NetworkAsset::Gene { gene: gene.clone() },
+                NetworkAsset::Capsule {
+                    capsule: capsule.clone(),
+                },
+            ],
+        );
+        let mut rejected_gene = make_plain_gene("gene-sec-4");
+        let rejected = receiver.on_signed_capsule_received(
+            "peer-b",
+            &keypair.public_key_hex(),
+            &unsigned_envelope,
+            &capsule,
+            &mut rejected_gene,
+        );
+        assert_eq!(rejected.unwrap_err(), RejectionReason::MissingSignature);
+
+        let contents = std::fs::read_to_string(&log_path).expect("audit log must exist");
+        let lines: Vec<serde_json::Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("audit line must be valid JSON"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["disposition"], "accept");
+        assert_eq!(lines[1]["disposition"], "reject");
+        let _ = std::fs::remove_file(temp_key);
+        let _ = std::fs::remove_file(log_path);
     }
 }
