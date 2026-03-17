@@ -151,6 +151,7 @@ pub struct GitlabPipelineEvent {
 #[derive(Clone, Debug, Deserialize)]
 pub struct GitlabPipelineAttributes {
     pub id: i64,
+    #[serde(rename = "ref")]
     pub ref_: String,
     pub sha: String,
     pub status: String,

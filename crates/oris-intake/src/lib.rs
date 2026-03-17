@@ -25,6 +25,8 @@ mod continuous;
 mod mutation;
 mod prioritize;
 mod rules;
+#[cfg(feature = "webhook")]
+pub mod server;
 mod signal;
 mod source;
 
