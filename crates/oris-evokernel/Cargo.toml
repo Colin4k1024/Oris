@@ -16,7 +16,7 @@ oris-economics = { version = "0.2.0", path = "../oris-economics" }
 oris-evolution = { version = "0.4.1", path = "../oris-evolution" }
 oris-intake = { version = "0.4.0", path = "../oris-intake" }
 oris-mutation-evaluator = { version = "0.3.0", path = "../oris-mutation-evaluator" }
-oris-evolution-network = { version = "0.4.2", path = "../oris-evolution-network" }
+oris-evolution-network = { version = "0.4.3", path = "../oris-evolution-network" }
 oris-genestore = { version = "0.2.0", path = "../oris-genestore" }
 oris-governor = { version = "0.3.2", path = "../oris-governor" }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel" }
