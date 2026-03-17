@@ -192,6 +192,13 @@ fn bench_dispatch_path(
             SchedulerDecision::Noop => {
                 return Err("dispatch benchmark unexpectedly produced noop".into());
             }
+            SchedulerDecision::Backpressure { queue_depth, .. } => {
+                return Err(format!(
+                    "dispatch benchmark unexpectedly hit backpressure (queue_depth={})",
+                    queue_depth
+                )
+                .into());
+            }
         }
 
         let outcome = repo.ack_attempt(
