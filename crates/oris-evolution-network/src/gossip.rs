@@ -483,7 +483,11 @@ impl GossipSyncEngine {
             next_cursor: None,
             resume_token: None,
             sync_audit: SyncAudit {
-                batch_id: format!("gossip-fetch-{}-{}", self.local_peer_id, Utc::now().timestamp()),
+                batch_id: format!(
+                    "gossip-fetch-{}-{}",
+                    self.local_peer_id,
+                    Utc::now().timestamp()
+                ),
                 requested_cursor: None,
                 scanned_count: query.signals.len(),
                 applied_count: applied,
@@ -498,7 +502,8 @@ impl GossipSyncEngine {
         if response.assets.is_empty() {
             return vec![];
         }
-        let envelope = EvolutionEnvelope::publish(response.sender_id.clone(), response.assets.clone());
+        let envelope =
+            EvolutionEnvelope::publish(response.sender_id.clone(), response.assets.clone());
         let imported = envelope
             .assets
             .iter()
@@ -555,7 +560,9 @@ fn confidence_for_gene(assets: &[NetworkAsset], gene_id: &str) -> f32 {
     assets
         .iter()
         .filter_map(|asset| match asset {
-            NetworkAsset::Capsule { capsule } if capsule.gene_id == gene_id => Some(capsule.confidence),
+            NetworkAsset::Capsule { capsule } if capsule.gene_id == gene_id => {
+                Some(capsule.confidence)
+            }
             _ => None,
         })
         .fold(0.0_f32, f32::max)
