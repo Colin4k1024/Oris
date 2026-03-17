@@ -419,6 +419,140 @@ impl ConfidenceController {
     }
 }
 
+// ---------------------------------------------------------------------------
+// BayesianConfidenceUpdater and ConfidenceSnapshot
+// ---------------------------------------------------------------------------
+
+/// A snapshot of the current Bayesian posterior for an asset's confidence.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConfidenceSnapshot {
+    /// Posterior mean: α / (α + β).
+    pub mean: f32,
+    /// Posterior variance: αβ / ((α+β)²(α+β+1)).
+    pub variance: f32,
+    /// Total observations (successes + failures) since the updater was created.
+    pub sample_count: u32,
+    /// `true` when `sample_count ≥ 10` and `variance < 0.01`, indicating a stable
+    /// credible interval.
+    pub is_stable: bool,
+}
+
+/// Per-class Beta-distribution prior.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BetaPrior {
+    /// Alpha parameter (pseudo-success count).
+    pub alpha: f32,
+    /// Beta parameter (pseudo-failure count).
+    pub beta: f32,
+}
+
+impl BetaPrior {
+    pub fn new(alpha: f32, beta: f32) -> Self {
+        assert!(
+            alpha > 0.0 && beta > 0.0,
+            "Beta distribution parameters must be positive"
+        );
+        Self { alpha, beta }
+    }
+}
+
+/// Return the canonical built-in priors.
+///
+/// Encodes a weak prior leaning toward success (α=2, β=1) reflecting that
+/// genes entering the pool should already have passed static validation.
+pub fn builtin_priors() -> BetaPrior {
+    BetaPrior::new(2.0, 1.0)
+}
+
+/// Bayesian confidence updater using a Beta-Bernoulli conjugate model.
+///
+/// # Model
+///
+/// Maintains parameters `(α, β)` of a Beta distribution.  On each observation:
+/// - Success: `α += 1`
+/// - Failure: `β += 1`
+///
+/// The posterior mean `α / (α + β)` is used as the point estimate.
+pub struct BayesianConfidenceUpdater {
+    alpha: f32,
+    beta: f32,
+}
+
+impl BayesianConfidenceUpdater {
+    /// Create an updater with an explicit prior.
+    pub fn new(prior: BetaPrior) -> Self {
+        Self {
+            alpha: prior.alpha,
+            beta: prior.beta,
+        }
+    }
+
+    /// Create an updater with the `builtin_priors()` prior.
+    pub fn with_builtin_prior() -> Self {
+        Self::new(builtin_priors())
+    }
+
+    /// Record a success observation (`α += 1`).
+    pub fn update_success(&mut self) {
+        self.alpha += 1.0;
+    }
+
+    /// Record a failure observation (`β += 1`).
+    pub fn update_failure(&mut self) {
+        self.beta += 1.0;
+    }
+
+    /// Apply `successes` and `failures` in bulk.
+    pub fn update(&mut self, successes: u32, failures: u32) {
+        self.alpha += successes as f32;
+        self.beta += failures as f32;
+    }
+
+    /// Posterior mean: `α / (α + β)`.
+    pub fn posterior_mean(&self) -> f32 {
+        self.alpha / (self.alpha + self.beta)
+    }
+
+    /// Posterior variance: `αβ / ((α+β)²(α+β+1))`.
+    pub fn posterior_variance(&self) -> f32 {
+        let ab = self.alpha + self.beta;
+        (self.alpha * self.beta) / (ab * ab * (ab + 1.0))
+    }
+
+    /// Total observations recorded above the prior (i.e. `(α - α₀) + (β - β₀)`).
+    pub fn sample_count(&self, prior: &BetaPrior) -> u32 {
+        let raw = (self.alpha - prior.alpha) + (self.beta - prior.beta);
+        raw.round().max(0.0) as u32
+    }
+
+    /// Build a `ConfidenceSnapshot` from the current posterior state.
+    ///
+    /// `prior` is used only to compute `sample_count`; pass `builtin_priors()`
+    /// unless you constructed this updater with a custom prior.
+    pub fn snapshot(&self, prior: &BetaPrior) -> ConfidenceSnapshot {
+        let mean = self.posterior_mean();
+        let variance = self.posterior_variance();
+        let count = self.sample_count(prior);
+        let is_stable = count >= 10 && variance < 0.01;
+        ConfidenceSnapshot {
+            mean,
+            variance,
+            sample_count: count,
+            is_stable,
+        }
+    }
+
+    /// Current alpha parameter (useful for serialisation/inspection).
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+
+    /// Current beta parameter (useful for serialisation/inspection).
+    pub fn beta(&self) -> f32 {
+        self.beta
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,5 +775,66 @@ mod tests {
         assert!((evt.failure_rate - 1.0).abs() < 0.001);
         assert_eq!(evt.window_samples, 3);
         assert_eq!(evt.event_at_ms, NOW + 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // BayesianConfidenceUpdater tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bayesian_updater_prior_mean() {
+        // builtin_priors: α=2, β=1 → mean = 2/3 ≈ 0.667
+        let updater = BayesianConfidenceUpdater::with_builtin_prior();
+        let mean = updater.posterior_mean();
+        assert!((mean - 2.0 / 3.0).abs() < 0.001, "mean={mean}");
+    }
+
+    #[test]
+    fn bayesian_updater_converges_to_true_rate() {
+        // 100 observations at 70% success-rate; posterior mean should approach 0.70.
+        let mut updater = BayesianConfidenceUpdater::with_builtin_prior();
+        updater.update(70, 30);
+        let mean = updater.posterior_mean();
+        assert!(
+            (mean - 0.70).abs() < 0.02,
+            "expected mean ≈ 0.70, got {mean}"
+        );
+    }
+
+    #[test]
+    fn bayesian_updater_sample_count() {
+        let prior = builtin_priors();
+        let mut updater = BayesianConfidenceUpdater::with_builtin_prior();
+        updater.update(5, 5);
+        assert_eq!(updater.sample_count(&prior), 10);
+    }
+
+    #[test]
+    fn bayesian_updater_snapshot_is_stable_after_observations() {
+        let prior = builtin_priors();
+        let mut updater = BayesianConfidenceUpdater::with_builtin_prior();
+        // 50 successes, 50 failures → balanced → variance should be small after many samples
+        updater.update(50, 50);
+        let snap = updater.snapshot(&prior);
+        assert_eq!(snap.sample_count, 100);
+        // variance = αβ/((α+β)²(α+β+1)); with α=52,β=51 → very small
+        assert!(snap.is_stable, "should be stable with 100 samples");
+    }
+
+    #[test]
+    fn bayesian_updater_sequential_updates_equal_bulk() {
+        let mut seq = BayesianConfidenceUpdater::with_builtin_prior();
+        for _ in 0..7 {
+            seq.update_success();
+        }
+        for _ in 0..3 {
+            seq.update_failure();
+        }
+
+        let mut bulk = BayesianConfidenceUpdater::with_builtin_prior();
+        bulk.update(7, 3);
+
+        assert!((seq.posterior_mean() - bulk.posterior_mean()).abs() < 1e-6);
+        assert!((seq.posterior_variance() - bulk.posterior_variance()).abs() < 1e-9);
     }
 }

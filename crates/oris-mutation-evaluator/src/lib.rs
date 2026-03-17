@@ -15,4 +15,7 @@ pub use mutation_backend::{
     ContractViolation, EnvRoutedBackend, LlmMutationBackend, MockMutationBackend, MutationRequest,
     ProposalContract,
 };
-pub use types::{EvaluationReport, MutationProposal, Verdict, APPLY_THRESHOLD, PROMOTE_THRESHOLD};
+pub use types::{
+    wilson_interval, CompositeScore, EvaluationReport, MutationProposal, Verdict, APPLY_THRESHOLD,
+    PROMOTE_THRESHOLD,
+};
