@@ -5,6 +5,9 @@
 | Crate | Version |
 |-------|---------|
 | `oris-sandbox` | 0.3.0 |
+| `oris-evolution-network` | 0.4.1 |
+| `oris-governor` | 0.3.2 |
+| `oris-spec` | 0.2.2 |
 | `oris-evokernel` | 0.14.1 |
 | `oris-runtime` | 0.44.0 |
 
