@@ -1,6 +1,6 @@
 # Oris EvoKernel - 90 Day Implementation Roadmap
 
-Source: https://www.notion.so/317e8a70eec580cfb252f8b09a40d21c
+Source: migrated from internal planning notes.
 
 Last synced: March 5, 2026
 

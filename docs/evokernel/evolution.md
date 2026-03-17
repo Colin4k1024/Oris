@@ -2,7 +2,7 @@
 
 
 > **Implementation Status: In Progress** 🔄
-Source: https://www.notion.so/317e8a70eec5804ca71ae1ae0ea354fa
+Source: migrated from internal planning notes.
 
 Last synced: March 3, 2026
 

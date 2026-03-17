@@ -1,6 +1,6 @@
 # Oris: Toward Self-Evolving Software Systems
 
-Source: https://www.notion.so/317e8a70eec580b2abe4ecf9ee16834f
+Source: migrated from internal planning notes.
 
 Last synced: March 2, 2026
 
