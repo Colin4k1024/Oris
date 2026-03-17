@@ -2824,6 +2824,8 @@ pub struct ExecutionApiState {
     pub idempotency_store: Option<SqliteIdempotencyStore>,
     #[cfg(feature = "sqlite-persistence")]
     pub runtime_repo: Option<SqliteRuntimeRepository>,
+    #[cfg(feature = "kernel-postgres")]
+    pub pg_idempotency_store: Option<crate::execution_runtime::PostgresIdempotencyStore>,
     pub runtime_metrics: RuntimeMetrics,
     pub worker_poll_limit: usize,
     pub max_active_leases_per_worker: usize,
@@ -2958,6 +2960,8 @@ impl ExecutionApiState {
             idempotency_store: None,
             #[cfg(feature = "sqlite-persistence")]
             runtime_repo: None,
+            #[cfg(feature = "kernel-postgres")]
+            pg_idempotency_store: None,
             runtime_metrics: RuntimeMetrics::default(),
             worker_poll_limit: 1,
             max_active_leases_per_worker: 8,
@@ -8386,6 +8390,46 @@ pub async fn run_job(
         }
     }
 
+    #[cfg(feature = "kernel-postgres")]
+    if let (Some(key), Some(store)) = (
+        req.idempotency_key.clone(),
+        state.pg_idempotency_store.as_ref(),
+    ) {
+        if key.trim().is_empty() {
+            return Err(ApiError::bad_request("idempotency_key must not be empty")
+                .with_request_id(rid.clone()));
+        }
+        if let Some(existing) = store
+            .get(&key)
+            .map_err(|e| ApiError::internal(e).with_request_id(rid.clone()))?
+        {
+            if existing.operation == "run"
+                && existing.thread_id == req.thread_id
+                && existing.payload_hash == request_payload_hash
+            {
+                let mut response: RunJobResponse = serde_json::from_str(&existing.response_json)
+                    .map_err(|e| {
+                        ApiError::internal(format!("decode idempotent response failed: {}", e))
+                            .with_request_id(rid.clone())
+                    })?;
+                response.idempotent_replay = true;
+                return Ok(Json(ApiEnvelope {
+                    meta: ApiMeta::ok(),
+                    request_id: rid,
+                    data: response,
+                }));
+            }
+            return Err(ApiError::conflict(
+                "idempotency_key already exists with different request payload",
+            )
+            .with_request_id(rid.clone())
+            .with_details(serde_json::json!({
+                "idempotency_key": key,
+                "operation": existing.operation
+            })));
+        }
+    }
+
     record_task_queued(
         &state,
         &req.thread_id,
@@ -8505,6 +8549,25 @@ pub async fn run_job(
         state.idempotency_store.as_ref(),
     ) {
         let record = IdempotencyRecord {
+            operation: "run".to_string(),
+            thread_id: req.thread_id.clone(),
+            payload_hash: request_payload_hash.clone(),
+            response_json: serde_json::to_string(&response).map_err(|e| {
+                ApiError::internal(format!("encode idempotent response failed: {}", e))
+                    .with_request_id(rid.clone())
+            })?,
+        };
+        store
+            .put(&key, &record)
+            .map_err(|e| ApiError::internal(e).with_request_id(rid.clone()))?;
+    }
+
+    #[cfg(feature = "kernel-postgres")]
+    if let (Some(key), Some(store)) = (
+        req.idempotency_key.clone(),
+        state.pg_idempotency_store.as_ref(),
+    ) {
+        let record = crate::execution_runtime::PostgresIdempotencyRecord {
             operation: "run".to_string(),
             thread_id: req.thread_id.clone(),
             payload_hash: request_payload_hash,

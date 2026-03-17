@@ -5,6 +5,9 @@
 //! running work. Lease expiry and recovery are handled by [LeaseManager::tick]
 //! (expire stale leases, requeue attempts); replay-restart is re-dispatch after requeue.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use chrono::{DateTime, Duration, Utc};
 
 use oris_kernel::event::KernelError;
@@ -123,6 +126,94 @@ impl<R: RuntimeRepository> LeaseManager for RepositoryLeaseManager<R> {
             timed_out,
             expired_requeued: expired,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkerHealthTracker — per-worker lease-expiry counter
+// ---------------------------------------------------------------------------
+
+/// Per-worker health statistics maintained by the scheduler or control plane.
+#[derive(Clone, Debug, Default)]
+pub struct WorkerHealth {
+    /// Total number of times this worker's leases have been expired and requeued.
+    pub lease_expiry_count: u64,
+    /// Last time a heartbeat was observed from this worker (epoch ms).
+    pub last_heartbeat_ms: Option<i64>,
+    /// Whether this worker is currently quarantined (too many consecutive expirations).
+    pub quarantined: bool,
+}
+
+/// Thread-safe tracker that records per-worker health statistics.
+///
+/// When `lease_expiry_count` for a worker reaches `quarantine_threshold`, the
+/// worker is marked `quarantined = true`. A quarantined worker should not
+/// receive new dispatch leases until it is explicitly cleared.
+#[derive(Clone, Default)]
+pub struct WorkerHealthTracker {
+    inner: Arc<Mutex<HashMap<String, WorkerHealth>>>,
+    /// Number of consecutive lease expirations before a worker is quarantined.
+    /// Defaults to 5.
+    quarantine_threshold: u64,
+}
+
+impl WorkerHealthTracker {
+    pub fn new(quarantine_threshold: u64) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            quarantine_threshold,
+        }
+    }
+
+    /// Record one lease expiry for `worker_id`.
+    /// Returns `true` if the worker was just quarantined by this call.
+    pub fn record_expiry(&self, worker_id: &str) -> bool {
+        let mut map = self.inner.lock().expect("worker health lock poisoned");
+        let entry = map.entry(worker_id.to_string()).or_default();
+        entry.lease_expiry_count += 1;
+        if !entry.quarantined && entry.lease_expiry_count >= self.quarantine_threshold {
+            entry.quarantined = true;
+            return true;
+        }
+        false
+    }
+
+    /// Record a heartbeat for `worker_id` and clear quarantine if set.
+    pub fn record_heartbeat(&self, worker_id: &str, heartbeat_ms: i64) {
+        let mut map = self.inner.lock().expect("worker health lock poisoned");
+        let entry = map.entry(worker_id.to_string()).or_default();
+        entry.last_heartbeat_ms = Some(heartbeat_ms);
+        // A successful heartbeat resets the expiry counter and lifts quarantine.
+        entry.lease_expiry_count = 0;
+        entry.quarantined = false;
+    }
+
+    /// Returns `true` if the worker is currently quarantined.
+    pub fn is_quarantined(&self, worker_id: &str) -> bool {
+        self.inner
+            .lock()
+            .expect("worker health lock poisoned")
+            .get(worker_id)
+            .map(|h| h.quarantined)
+            .unwrap_or(false)
+    }
+
+    /// Snapshot the health record for `worker_id`, or `None` if unknown.
+    pub fn get(&self, worker_id: &str) -> Option<WorkerHealth> {
+        self.inner
+            .lock()
+            .expect("worker health lock poisoned")
+            .get(worker_id)
+            .cloned()
+    }
+
+    /// Clear quarantine and reset expiry counter for `worker_id`.
+    pub fn clear_quarantine(&self, worker_id: &str) {
+        let mut map = self.inner.lock().expect("worker health lock poisoned");
+        if let Some(entry) = map.get_mut(worker_id) {
+            entry.quarantined = false;
+            entry.lease_expiry_count = 0;
+        }
     }
 }
 
@@ -413,5 +504,55 @@ mod tests {
             .expect("cutoff lock")
             .expect("cutoff recorded");
         assert_eq!(seen_cutoff, now - Duration::seconds(7));
+    }
+
+    // -----------------------------------------------------------------------
+    // WorkerHealthTracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn worker_health_tracker_quarantines_after_threshold() {
+        let tracker = WorkerHealthTracker::new(3);
+        assert!(!tracker.is_quarantined("w1"));
+
+        let just_quarantined = tracker.record_expiry("w1");
+        assert!(!just_quarantined); // 1 < 3
+        tracker.record_expiry("w1"); // 2 < 3
+        let just_quarantined = tracker.record_expiry("w1"); // 3 >= 3
+        assert!(just_quarantined);
+        assert!(tracker.is_quarantined("w1"));
+    }
+
+    #[test]
+    fn worker_health_tracker_heartbeat_clears_quarantine() {
+        let tracker = WorkerHealthTracker::new(2);
+        tracker.record_expiry("w1");
+        tracker.record_expiry("w1");
+        assert!(tracker.is_quarantined("w1"));
+
+        tracker.record_heartbeat("w1", 1_700_000_000_000);
+        assert!(!tracker.is_quarantined("w1"));
+
+        let health = tracker.get("w1").expect("health record exists");
+        assert_eq!(health.lease_expiry_count, 0);
+        assert_eq!(health.last_heartbeat_ms, Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn worker_health_tracker_clear_quarantine_explicit() {
+        let tracker = WorkerHealthTracker::new(1);
+        tracker.record_expiry("w1");
+        assert!(tracker.is_quarantined("w1"));
+
+        tracker.clear_quarantine("w1");
+        assert!(!tracker.is_quarantined("w1"));
+        assert_eq!(tracker.get("w1").map(|h| h.lease_expiry_count), Some(0));
+    }
+
+    #[test]
+    fn worker_health_tracker_unknown_worker_not_quarantined() {
+        let tracker = WorkerHealthTracker::new(3);
+        assert!(!tracker.is_quarantined("unknown-worker"));
+        assert!(tracker.get("unknown-worker").is_none());
     }
 }

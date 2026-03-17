@@ -52,14 +52,19 @@ pub use graph_bridge::{
     ExecutionCheckpointView, ExecutionGraphBridge, ExecutionGraphBridgeError,
     ExecutionGraphBridgeErrorKind, ExecutionInvokeView, ExecutionStateView,
 };
-pub use lease::{LeaseConfig, LeaseManager, LeaseTickResult, RepositoryLeaseManager, WorkerLease};
+pub use lease::{
+    LeaseConfig, LeaseManager, LeaseTickResult, RepositoryLeaseManager, WorkerHealth,
+    WorkerHealthTracker, WorkerLease,
+};
 pub use models::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, RunRecord,
     RunRuntimeStatus,
 };
 pub use observability::{KernelObservability, RejectionReason};
 #[cfg(feature = "kernel-postgres")]
-pub use postgres_runtime_repository::PostgresRuntimeRepository;
+pub use postgres_runtime_repository::{
+    PostgresIdempotencyRecord, PostgresIdempotencyStore, PostgresRuntimeRepository,
+};
 pub use recovery::{CrashRecoveryPipeline, RecoveryContext, RecoveryStep};
 pub use repository::RuntimeRepository;
 pub use scheduler::{DispatchContext, SchedulerDecision, SkeletonScheduler};
