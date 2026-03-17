@@ -13,9 +13,9 @@ async-trait = "0.1.80"
 chrono = { version = "0.4", default-features = true }
 oris-agent-contract = { version = "0.5.5", path = "../oris-agent-contract" }
 oris-economics = { version = "0.2.0", path = "../oris-economics" }
-oris-evolution = { version = "0.4.0", path = "../oris-evolution" }
+oris-evolution = { version = "0.4.1", path = "../oris-evolution" }
 oris-intake = { version = "0.4.0", path = "../oris-intake" }
-oris-mutation-evaluator = { version = "0.2.1", path = "../oris-mutation-evaluator" }
+oris-mutation-evaluator = { version = "0.3.0", path = "../oris-mutation-evaluator" }
 oris-evolution-network = { version = "0.4.0", path = "../oris-evolution-network" }
 oris-genestore = { version = "0.2.0", path = "../oris-genestore" }
 oris-governor = { version = "0.3.0", path = "../oris-governor" }
