@@ -1,6 +1,6 @@
 [package]
 name = "oris-evokernel"
-version = "0.14.0"
+version = "0.14.1"
 edition = "2021"
 rust-version = "1.80"
 publish = ["crates-io"]
@@ -20,7 +20,7 @@ oris-evolution-network = { version = "0.4.0", path = "../oris-evolution-network"
 oris-genestore = { version = "0.2.0", path = "../oris-genestore" }
 oris-governor = { version = "0.3.0", path = "../oris-governor" }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel" }
-oris-sandbox = { version = "0.2.0", path = "../oris-sandbox" }
+oris-sandbox = { version = "0.3.0", path = "../oris-sandbox" }
 oris-spec = { version = "0.2.0", path = "../oris-spec" }
 regex-lite = "0.1"
 serde = { version = "1.0", features = ["derive"] }

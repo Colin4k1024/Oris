@@ -18,6 +18,21 @@ pub struct SandboxPolicy {
     pub max_duration_ms: u64,
     pub max_output_bytes: usize,
     pub denied_env_prefixes: Vec<String>,
+    /// Maximum address-space (RSS) in bytes for the child process.
+    /// Enforced via `RLIMIT_AS` on Linux when the `resource-limits` feature is enabled.
+    /// Ignored on other platforms.
+    #[serde(default)]
+    pub max_memory_bytes: Option<u64>,
+    /// Maximum CPU time in seconds for the child process.
+    /// Enforced via `RLIMIT_CPU` on Linux when the `resource-limits` feature is enabled.
+    /// Ignored on other platforms.
+    #[serde(default)]
+    pub max_cpu_secs: Option<u64>,
+    /// When `true`, the child is spawned in a new process group and the entire
+    /// group is killed on timeout.  This prevents zombie grandchildren.
+    /// Requires the `resource-limits` feature on Linux; silently ignored otherwise.
+    #[serde(default)]
+    pub use_process_group: bool,
 }
 
 impl SandboxPolicy {
@@ -27,6 +42,9 @@ impl SandboxPolicy {
             max_duration_ms: 300_000,
             max_output_bytes: 1_048_576,
             denied_env_prefixes: vec!["TOKEN".into(), "KEY".into(), "SECRET".into()],
+            max_memory_bytes: None,
+            max_cpu_secs: None,
+            use_process_group: false,
         }
     }
 }
@@ -223,6 +241,19 @@ pub async fn execute_allowed_command(
         }
     }
 
+    // Apply OS-level resource limits and process-group isolation.
+    #[cfg(all(feature = "resource-limits", target_os = "linux"))]
+    crate::resource_limits::apply_linux_limits(&mut command, policy);
+
+    // macOS: wrap with sandbox-exec when use_process_group is requested.
+    // On macOS we launch via `sandbox-exec -p <profile> <program> <args...>`.
+    #[cfg(all(feature = "resource-limits", target_os = "macos"))]
+    let _macos_guard = if policy.use_process_group {
+        crate::resource_limits::apply_macos_sandbox(&mut command, program, args)
+    } else {
+        false
+    };
+
     let output = timeout(Duration::from_millis(timeout_ms), command.output())
         .await
         .map_err(|_| SandboxError::Timeout(format!("{program} {}", args.join(" "))))?
@@ -368,6 +399,9 @@ mod tests {
             max_duration_ms: 1_000,
             max_output_bytes: 1024,
             denied_env_prefixes: Vec::new(),
+            max_memory_bytes: None,
+            max_cpu_secs: None,
+            use_process_group: false,
         };
         let result = execute_allowed_command(&policy, &workspace, "cargo", &[], 1_000).await;
         assert!(matches!(result, Err(SandboxError::CommandDenied(_))));
