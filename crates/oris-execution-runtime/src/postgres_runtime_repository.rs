@@ -17,7 +17,7 @@ use super::models::{
 };
 use super::repository::RuntimeRepository;
 
-const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 4;
+const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 5;
 
 fn is_valid_schema_ident(schema: &str) -> bool {
     !schema.is_empty()
@@ -533,6 +533,50 @@ impl PostgresRuntimeRepository {
                     sqlx::query(&sql_record)
                         .bind(4_i32)
                         .bind("runtime_recipes_organisms_sessions_disputes")
+                        .bind(now)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                // Migration v5: priority column on runtime_attempts for ordered dispatch
+                if current_version < 5 {
+                    let sql_add_priority = format!(
+                        "ALTER TABLE \"{}\".runtime_attempts ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0",
+                        schema
+                    );
+                    let sql_idx_priority = format!(
+                        "CREATE INDEX IF NOT EXISTS idx_runtime_attempts_status_priority_retry
+                         ON \"{}\".runtime_attempts(status, priority DESC, retry_at_ms)",
+                        schema
+                    );
+                    let sql_idx_tenant_priority = format!(
+                        "CREATE INDEX IF NOT EXISTS idx_runtime_attempts_tenant_status_priority
+                         ON \"{}\".runtime_attempts(status, priority DESC)",
+                        schema
+                    );
+                    sqlx::query(&sql_add_priority)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_idx_priority)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_idx_tenant_priority)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let now = dt_to_ms(Utc::now());
+                    let sql_record = format!(
+                        "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT(version) DO NOTHING",
+                        schema
+                    );
+                    sqlx::query(&sql_record)
+                        .bind(5_i32)
+                        .bind("attempt_priority_dispatch_order")
                         .bind(now)
                         .execute(&pool)
                         .await
@@ -1483,7 +1527,7 @@ impl RuntimeRepository for PostgresRuntimeRepository {
                      a.status = 'queued'
                      OR (a.status = 'retry_backoff' AND (a.retry_at_ms IS NULL OR a.retry_at_ms <= $1))
                    )
-                 ORDER BY a.attempt_no ASC, a.attempt_id ASC
+                 ORDER BY a.priority DESC, a.attempt_no ASC, a.attempt_id ASC
                  LIMIT $2",
                 schema, schema
             );
