@@ -1,7 +1,19 @@
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde_json::{json, Value};
+
+#[derive(Debug, Clone, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Table,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        Self::Json
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "oris-operator-cli")]
@@ -9,6 +21,12 @@ use serde_json::{json, Value};
 struct Cli {
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     server: String,
+    /// Bearer token for API authentication (sets Authorization header).
+    #[arg(long, env = "ORIS_API_TOKEN")]
+    token: Option<String>,
+    /// Output format: json (default) or table.
+    #[arg(long, default_value = "json")]
+    format: OutputFormat,
     #[command(subcommand)]
     command: Command,
 }
@@ -21,6 +39,9 @@ enum Command {
         input: Option<String>,
         #[arg(long)]
         idempotency_key: Option<String>,
+        /// Optional dispatch priority (higher = dispatched sooner).
+        #[arg(long)]
+        priority: Option<i32>,
     },
     List {
         #[arg(long)]
@@ -50,6 +71,26 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Dead-letter queue operations.
+    Dlq {
+        #[command(subcommand)]
+        action: DlqCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DlqCommand {
+    /// List dead-letter queue entries.
+    List {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+    },
+    /// Inspect a single DLQ entry.
+    Inspect { attempt_id: String },
+    /// Replay a dead-letter attempt.
+    Replay { attempt_id: String },
 }
 
 #[tokio::main]
@@ -57,18 +98,25 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let client = Client::builder().build()?;
     let base = cli.server.trim_end_matches('/');
+    let token = cli.token.as_deref();
+    let format = &cli.format;
 
     let result = match cli.command {
         Command::Run {
             thread_id,
             input,
             idempotency_key,
+            priority,
         } => {
-            let req = client.post(format!("{}/v1/jobs/run", base)).json(&json!({
-                "thread_id": thread_id,
-                "input": input,
-                "idempotency_key": idempotency_key
-            }));
+            let req = auth(
+                client.post(format!("{}/v1/jobs/run", base)).json(&json!({
+                    "thread_id": thread_id,
+                    "input": input,
+                    "idempotency_key": idempotency_key,
+                    "priority": priority
+                })),
+                token,
+            );
             send_and_decode(req).await?
         }
         Command::List {
@@ -81,11 +129,11 @@ async fn main() -> Result<()> {
             if let Some(status) = status {
                 query.push(("status", status));
             }
-            let req = client.get(format!("{}/v1/jobs", base)).query(&query);
+            let req = auth(client.get(format!("{}/v1/jobs", base)).query(&query), token);
             send_and_decode(req).await?
         }
         Command::Inspect { thread_id } => {
-            let req = client.get(format!("{}/v1/jobs/{}", base, thread_id));
+            let req = auth(client.get(format!("{}/v1/jobs/{}", base, thread_id)), token);
             send_and_decode(req).await?
         }
         Command::Resume {
@@ -95,37 +143,107 @@ async fn main() -> Result<()> {
         } => {
             let parsed_value: Value =
                 serde_json::from_str(&value).context("`--value` must be valid JSON")?;
-            let req = client
-                .post(format!("{}/v1/jobs/{}/resume", base, thread_id))
-                .json(&json!({
-                    "value": parsed_value,
-                    "checkpoint_id": checkpoint_id
-                }));
+            let req = auth(
+                client
+                    .post(format!("{}/v1/jobs/{}/resume", base, thread_id))
+                    .json(&json!({
+                        "value": parsed_value,
+                        "checkpoint_id": checkpoint_id
+                    })),
+                token,
+            );
             send_and_decode(req).await?
         }
         Command::Replay {
             thread_id,
             checkpoint_id,
         } => {
-            let req = client
-                .post(format!("{}/v1/jobs/{}/replay", base, thread_id))
-                .json(&json!({
-                    "checkpoint_id": checkpoint_id
-                }));
+            let req = auth(
+                client
+                    .post(format!("{}/v1/jobs/{}/replay", base, thread_id))
+                    .json(&json!({
+                        "checkpoint_id": checkpoint_id
+                    })),
+                token,
+            );
             send_and_decode(req).await?
         }
         Command::Cancel { thread_id, reason } => {
-            let req = client
-                .post(format!("{}/v1/jobs/{}/cancel", base, thread_id))
-                .json(&json!({
-                    "reason": reason
-                }));
+            let req = auth(
+                client
+                    .post(format!("{}/v1/jobs/{}/cancel", base, thread_id))
+                    .json(&json!({ "reason": reason })),
+                token,
+            );
             send_and_decode(req).await?
         }
+        Command::Dlq { action } => match action {
+            DlqCommand::List { limit, offset } => {
+                let req = auth(
+                    client
+                        .get(format!("{}/v1/dlq", base))
+                        .query(&[("limit", limit.to_string()), ("offset", offset.to_string())]),
+                    token,
+                );
+                send_and_decode(req).await?
+            }
+            DlqCommand::Inspect { attempt_id } => {
+                let req = auth(client.get(format!("{}/v1/dlq/{}", base, attempt_id)), token);
+                send_and_decode(req).await?
+            }
+            DlqCommand::Replay { attempt_id } => {
+                let req = auth(
+                    client.post(format!("{}/v1/dlq/{}/replay", base, attempt_id)),
+                    token,
+                );
+                send_and_decode(req).await?
+            }
+        },
     };
 
-    println!("{}", serde_json::to_string_pretty(&result)?);
+    print_output(&result, format);
     Ok(())
+}
+
+fn auth(req: RequestBuilder, token: Option<&str>) -> RequestBuilder {
+    if let Some(t) = token {
+        req.header("Authorization", format!("Bearer {}", t))
+    } else {
+        req
+    }
+}
+
+fn print_output(value: &Value, format: &OutputFormat) {
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value).unwrap()),
+        OutputFormat::Table => print_table(value),
+    }
+}
+
+fn print_table(value: &Value) {
+    match value {
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                print_table(item);
+            }
+        }
+        Value::Object(map) => {
+            let key_width = map.keys().map(|k| k.len()).max().unwrap_or(10) + 2;
+            for (k, v) in map {
+                let val = match v {
+                    Value::String(s) => s.clone(),
+                    Value::Null => "(null)".to_string(),
+                    other => other.to_string(),
+                };
+                println!("{:<width$} {}", format!("{}:", k), val, width = key_width);
+            }
+        }
+        Value::String(s) => println!("{}", s),
+        other => println!("{}", other),
+    }
 }
 
 async fn send_and_decode(req: RequestBuilder) -> Result<Value> {

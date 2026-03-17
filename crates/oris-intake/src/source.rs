@@ -537,21 +537,114 @@ impl IntakeSource for LogFileIntakeSource {
     }
 }
 
-/// Prometheus/Alertmanager intake source stub.
+/// Prometheus/Alertmanager v4 webhook payload.
 ///
-/// This is intentionally a compile-safe placeholder so downstream callers can
-/// wire the source type today while the concrete alert payload mapping is
-/// implemented in a later issue.
+/// See https://prometheus.io/docs/alerting/latest/configuration/#webhook_config
+#[derive(Clone, Debug, Deserialize)]
+pub struct AlertmanagerPayload {
+    pub version: Option<String>,
+    pub status: Option<String>,
+    #[serde(rename = "groupLabels")]
+    pub group_labels: Option<std::collections::HashMap<String, String>>,
+    #[serde(rename = "commonLabels")]
+    pub common_labels: Option<std::collections::HashMap<String, String>>,
+    #[serde(rename = "commonAnnotations")]
+    pub common_annotations: Option<std::collections::HashMap<String, String>>,
+    pub alerts: Option<Vec<AlertmanagerAlert>>,
+    #[serde(rename = "externalURL")]
+    pub external_url: Option<String>,
+}
+
+/// Single alert within an Alertmanager payload.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AlertmanagerAlert {
+    pub status: Option<String>,
+    pub labels: Option<std::collections::HashMap<String, String>>,
+    pub annotations: Option<std::collections::HashMap<String, String>>,
+    pub fingerprint: Option<String>,
+}
+
+/// Prometheus/Alertmanager intake source.
+///
+/// Processes Alertmanager webhook v4 payloads and converts firing alerts to
+/// `IntakeEvent` instances. One event is emitted per alert in the payload.
 #[derive(Clone, Debug, Default)]
 pub struct PrometheusIntakeSource;
+
+impl PrometheusIntakeSource {
+    fn alert_severity(labels: &std::collections::HashMap<String, String>) -> IssueSeverity {
+        match labels.get("severity").map(|s| s.as_str()).unwrap_or("") {
+            "critical" | "page" => IssueSeverity::Critical,
+            "warning" | "high" => IssueSeverity::High,
+            "info" | "low" => IssueSeverity::Low,
+            _ => IssueSeverity::Medium,
+        }
+    }
+}
 
 impl IntakeSource for PrometheusIntakeSource {
     fn source_type(&self) -> IntakeSourceType {
         IntakeSourceType::Prometheus
     }
 
-    fn process(&self, _payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
-        todo!("Prometheus alert payload mapping is not implemented yet")
+    fn process(&self, payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
+        let alert_payload: AlertmanagerPayload = serde_json::from_slice(payload)
+            .map_err(|e| IntakeError::ParseError(format!("invalid Alertmanager JSON: {}", e)))?;
+
+        let group_status = alert_payload.status.as_deref().unwrap_or("unknown");
+        let alerts = alert_payload.alerts.unwrap_or_default();
+        let empty_map = std::collections::HashMap::new();
+
+        let events = alerts
+            .into_iter()
+            .filter(|a| a.status.as_deref().unwrap_or("") == "firing")
+            .map(|alert| {
+                let labels = alert.labels.as_ref().unwrap_or(&empty_map);
+                let annotations = alert.annotations.as_ref().unwrap_or(&empty_map);
+                let alert_name = labels
+                    .get("alertname")
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let summary = annotations
+                    .get("summary")
+                    .or_else(|| annotations.get("message"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("Prometheus alert fired");
+                let description = annotations
+                    .get("description")
+                    .or_else(|| annotations.get("runbook_url"))
+                    .map(|s| s.as_str())
+                    .unwrap_or(summary);
+
+                let severity = Self::alert_severity(labels);
+
+                let signals: Vec<String> = labels
+                    .iter()
+                    .map(|(k, v)| format!("label:{}:{}", k, v))
+                    .chain(
+                        alert
+                            .fingerprint
+                            .as_ref()
+                            .map(|fp| format!("fingerprint:{}", fp))
+                            .into_iter(),
+                    )
+                    .collect();
+
+                IntakeEvent {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    source_type: IntakeSourceType::Prometheus,
+                    source_event_id: alert.fingerprint.clone(),
+                    title: format!("Alert: {} [{}]", alert_name, group_status),
+                    description: description.to_string(),
+                    severity,
+                    signals,
+                    raw_payload: None,
+                    timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                }
+            })
+            .collect();
+
+        Ok(events)
     }
 
     fn validate(&self, payload: &[u8]) -> IntakeResult<()> {
@@ -561,21 +654,124 @@ impl IntakeSource for PrometheusIntakeSource {
     }
 }
 
-/// Sentry intake source stub.
+/// Minimal Sentry issue alert webhook payload.
+#[derive(Clone, Debug, Deserialize)]
+pub struct SentryAlertPayload {
+    pub action: Option<String>,
+    pub actor: Option<SentryActor>,
+    pub data: Option<SentryAlertData>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SentryActor {
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SentryAlertData {
+    pub issue: Option<SentryIssue>,
+    pub error: Option<SentryError>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SentryIssue {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub level: Option<String>,
+    pub project: Option<SentryProject>,
+    pub permalink: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SentryProject {
+    pub slug: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SentryError {
+    pub message: Option<String>,
+    pub level: Option<String>,
+}
+
+/// Sentry issue alert intake source.
 ///
-/// This is intentionally a compile-safe placeholder so downstream callers can
-/// depend on the source type now while the concrete Sentry envelope/event
-/// translation is implemented in a later issue.
+/// Handles Sentry issue-alert webhook payloads (action: created/resolved).
+/// Emits one `IntakeEvent` per webhook delivery.
 #[derive(Clone, Debug, Default)]
 pub struct SentryIntakeSource;
+
+impl SentryIntakeSource {
+    fn level_to_severity(level: &str) -> IssueSeverity {
+        match level {
+            "fatal" | "critical" => IssueSeverity::Critical,
+            "error" => IssueSeverity::High,
+            "warning" => IssueSeverity::Medium,
+            "info" | "debug" => IssueSeverity::Low,
+            _ => IssueSeverity::Medium,
+        }
+    }
+}
 
 impl IntakeSource for SentryIntakeSource {
     fn source_type(&self) -> IntakeSourceType {
         IntakeSourceType::Sentry
     }
 
-    fn process(&self, _payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
-        todo!("Sentry event payload mapping is not implemented yet")
+    fn process(&self, payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
+        let alert: SentryAlertPayload = serde_json::from_slice(payload)
+            .map_err(|e| IntakeError::ParseError(format!("invalid Sentry JSON: {}", e)))?;
+
+        let action = alert.action.as_deref().unwrap_or("unknown");
+        // Only process "created" (new error) and "triggered" (alert rule) actions.
+        if !matches!(action, "created" | "triggered") {
+            return Ok(vec![]);
+        }
+
+        let data = alert.data.as_ref();
+        let issue = data.and_then(|d| d.issue.as_ref());
+        let error_data = data.and_then(|d| d.error.as_ref());
+
+        let (title, level, event_id, description) = if let Some(issue) = issue {
+            let lvl = issue.level.as_deref().unwrap_or("error");
+            let project = issue
+                .project
+                .as_ref()
+                .and_then(|p| p.slug.as_deref())
+                .unwrap_or("unknown");
+            let title = issue.title.as_deref().unwrap_or("Sentry issue").to_string();
+            let id = issue.id.clone();
+            let desc = issue
+                .permalink
+                .as_deref()
+                .map(|url| format!("View issue: {}", url))
+                .unwrap_or_else(|| format!("Sentry [{}] {} in project {}", lvl, title, project));
+            (title, lvl.to_string(), id, desc)
+        } else if let Some(err) = error_data {
+            let lvl = err.level.as_deref().unwrap_or("error");
+            let msg = err.message.as_deref().unwrap_or("Sentry error");
+            (msg.to_string(), lvl.to_string(), None, msg.to_string())
+        } else {
+            return Ok(vec![]);
+        };
+
+        let severity = Self::level_to_severity(&level);
+        let signals = vec![
+            format!("sentry_action:{}", action),
+            format!("sentry_level:{}", level),
+        ];
+
+        Ok(vec![IntakeEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            source_type: IntakeSourceType::Sentry,
+            source_event_id: event_id,
+            title: format!("Sentry: {}", title),
+            description,
+            severity,
+            signals,
+            raw_payload: None,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        }])
     }
 
     fn validate(&self, payload: &[u8]) -> IntakeResult<()> {
@@ -640,5 +836,77 @@ mod tests {
 
         assert!(prometheus.validate(br#"{"alerts":[]}"#).is_ok());
         assert!(sentry.validate(br#"{"event_id":"abc"}"#).is_ok());
+    }
+
+    #[test]
+    fn test_prometheus_intake_source_parses_firing_alert() {
+        let source = PrometheusIntakeSource;
+        let payload = br#"{
+            "version": "4",
+            "status": "firing",
+            "commonLabels": {"severity": "critical"},
+            "commonAnnotations": {"summary": "DB down"},
+            "alerts": [
+                {
+                    "status": "firing",
+                    "labels": {"alertname": "DBDown", "severity": "critical"},
+                    "annotations": {"summary": "Database is unreachable"},
+                    "fingerprint": "abc123"
+                },
+                {
+                    "status": "resolved",
+                    "labels": {"alertname": "DBDown", "severity": "critical"},
+                    "annotations": {"summary": "Database is unreachable"},
+                    "fingerprint": "abc124"
+                }
+            ]
+        }"#;
+        let events = source
+            .process(payload)
+            .expect("should parse alertmanager payload");
+        // Only firing alerts should produce events
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].severity, IssueSeverity::Critical);
+        assert!(events[0].title.contains("DBDown"));
+        assert_eq!(events[0].source_type, IntakeSourceType::Prometheus);
+        assert_eq!(events[0].source_event_id, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_prometheus_intake_source_empty_alerts() {
+        let source = PrometheusIntakeSource;
+        let payload = br#"{"version":"4","status":"resolved","alerts":[]}"#;
+        let events = source.process(payload).expect("empty alerts ok");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_sentry_intake_source_parses_issue_created() {
+        let source = SentryIntakeSource;
+        let payload = br#"{
+            "action": "created",
+            "data": {
+                "issue": {
+                    "id": "sentry-issue-1",
+                    "title": "ZeroDivisionError",
+                    "level": "error",
+                    "project": {"slug": "my-app", "name": "My App"},
+                    "permalink": "https://sentry.io/org/my-app/issues/1"
+                }
+            }
+        }"#;
+        let events = source.process(payload).expect("sentry parse ok");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].severity, IssueSeverity::High);
+        assert!(events[0].title.contains("ZeroDivisionError"));
+        assert_eq!(events[0].source_type, IntakeSourceType::Sentry);
+    }
+
+    #[test]
+    fn test_sentry_intake_source_resolved_action_skipped() {
+        let source = SentryIntakeSource;
+        let payload = br#"{"action": "resolved", "data": {"issue": {"id": "1", "title": "Err", "level": "error"}}}"#;
+        let events = source.process(payload).expect("resolved parse ok");
+        assert!(events.is_empty());
     }
 }
