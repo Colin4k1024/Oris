@@ -13,4 +13,7 @@ pub use core::*;
 pub use evolver::*;
 pub use pipeline::*;
 pub use port::*;
-pub use task_class::{builtin_task_classes, signals_match_class, TaskClass, TaskClassMatcher};
+pub use task_class::{
+    builtin_task_class_definitions, builtin_task_classes, load_task_classes, signals_match_class,
+    TaskClass, TaskClassDefinition, TaskClassInferencer, TaskClassMatcher,
+};
