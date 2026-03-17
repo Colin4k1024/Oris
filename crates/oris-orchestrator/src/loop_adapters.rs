@@ -292,6 +292,7 @@ impl EvolutionPipelinePort for StandardPipelineAdapter {
                         success: false,
                         stage_states,
                         error: Some(error.to_string()),
+                        inferred_task_class_id: None,
                     };
                 }
             }
@@ -328,6 +329,7 @@ impl EvolutionPipelinePort for StandardPipelineAdapter {
             success,
             stage_states,
             error,
+            inferred_task_class_id: None,
         }
     }
 }

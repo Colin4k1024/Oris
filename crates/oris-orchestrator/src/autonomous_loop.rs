@@ -535,6 +535,7 @@ mod tests {
                     success: true,
                     stage_states: vec![],
                     error: None,
+                    inferred_task_class_id: None,
                 },
                 requests: Mutex::new(Vec::new()),
             }
@@ -546,6 +547,7 @@ mod tests {
                     success: false,
                     stage_states: vec![],
                     error: Some(reason.to_string()),
+                    inferred_task_class_id: None,
                 },
                 requests: Mutex::new(Vec::new()),
             }
