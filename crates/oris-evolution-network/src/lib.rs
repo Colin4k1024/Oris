@@ -3,7 +3,10 @@
 pub mod gossip;
 pub mod sync;
 
-pub use sync::{GossipSyncEngine, QuarantineEntry, QuarantineState, QuarantineStore, SyncStats};
+pub use sync::{
+    CapsuleDisposition, GossipSyncEngine, QuarantineEntry, QuarantineReason, QuarantineState,
+    QuarantineStore, RemoteCapsuleReceiver, SyncStats, PROMOTE_THRESHOLD,
+};
 
 use std::collections::BTreeSet;
 
