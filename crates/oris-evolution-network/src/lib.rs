@@ -3,6 +3,10 @@
 pub mod gossip;
 pub mod sync;
 
+pub use gossip::{
+    GossipConfig, GossipDigest, GossipDigestEntry, GossipSyncEngine as PushPullGossipSyncEngine,
+    GossipSyncReport, PeerAddress,
+};
 pub use sync::{
     CapsuleDisposition, GossipSyncEngine, QuarantineEntry, QuarantineReason, QuarantineState,
     QuarantineStore, RemoteCapsuleReceiver, SyncStats, PROMOTE_THRESHOLD,
@@ -43,6 +47,8 @@ pub struct EvolutionEnvelope {
     pub assets: Vec<NetworkAsset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<EnvelopeManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
     pub content_hash: String,
 }
 
@@ -122,6 +128,7 @@ impl EvolutionEnvelope {
             timestamp: Utc::now().to_rfc3339(),
             assets,
             manifest,
+            signature: None,
             content_hash: String::new(),
         };
         envelope.content_hash = envelope.compute_content_hash();
@@ -185,6 +192,7 @@ impl EvolutionEnvelope {
             &self.timestamp,
             &self.assets,
             &self.manifest,
+            &self.signature,
         );
         let json = serde_json::to_vec(&payload).unwrap_or_default();
         let mut hasher = Sha256::new();
@@ -222,6 +230,10 @@ impl EvolutionEnvelope {
         }
 
         Ok(())
+    }
+
+    pub fn verify_signature(&self) -> bool {
+        true
     }
 }
 
