@@ -22,6 +22,7 @@
 //! be transferred on each round.
 
 use crate::{FetchQuery, FetchResponse, NetworkAsset, PublishRequest, SyncAudit};
+use oris_evolution::{AssetState, Capsule, Gene};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -433,13 +434,181 @@ fn asset_id_of(asset: &NetworkAsset) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Remote capsule auto-promotion pipeline (P2-06)
+// ---------------------------------------------------------------------------
+
+/// Default score threshold above which a remote capsule is auto-promoted.
+pub const PROMOTE_THRESHOLD: f64 = 0.70;
+
+/// Reason a capsule was held in quarantine.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuarantineReason {
+    /// Capsule composite score was below the promotion threshold.
+    LowScore { score: f64 },
+    /// Signature verification failed (placeholder until P3-02).
+    SignatureInvalid,
+    /// The capsule's gene could not be located.
+    GeneMissing,
+}
+
+impl std::fmt::Display for QuarantineReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QuarantineReason::LowScore { score } => {
+                write!(f, "low_score:{:.4}", score)
+            }
+            QuarantineReason::SignatureInvalid => write!(f, "signature_invalid"),
+            QuarantineReason::GeneMissing => write!(f, "gene_missing"),
+        }
+    }
+}
+
+/// Outcome of an auto-promotion decision for a single remote capsule.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "disposition")]
+pub enum CapsuleDisposition {
+    /// Capsule passed the score threshold; its gene was solidified.
+    Promoted {
+        gene_id: String,
+        /// The composite score that triggered promotion.
+        score: f64,
+    },
+    /// Capsule did not pass; held in quarantine.
+    Quarantined { reason: String },
+}
+
+/// Audit log entry appended to `capsule_audit_log.jsonl`.
+#[derive(Serialize)]
+struct AuditLogEntry<'a> {
+    capsule_id: &'a str,
+    gene_id: &'a str,
+    score: f64,
+    disposition: &'a CapsuleDisposition,
+    timestamp_secs: i64,
+}
+
+/// Drives the receive → score → promote/quarantine pipeline for remote capsules.
+///
+/// # Usage
+///
+/// ```ignore
+/// let receiver = RemoteCapsuleReceiver::new("/tmp/audit.jsonl", None);
+/// let disposition = receiver.on_capsule_received(&capsule, &gene);
+/// ```
+pub struct RemoteCapsuleReceiver {
+    /// Score threshold; capsules >= threshold are promoted.
+    threshold: f64,
+    /// Path to the append-only JSONL audit log. `None` disables file writing.
+    audit_log_path: Option<std::path::PathBuf>,
+    /// In-memory audit trail (always populated regardless of file).
+    audit_trail: Mutex<Vec<(String, CapsuleDisposition)>>,
+}
+
+impl Default for RemoteCapsuleReceiver {
+    fn default() -> Self {
+        Self::new(None::<&str>, None)
+    }
+}
+
+impl RemoteCapsuleReceiver {
+    /// Create a new receiver.
+    ///
+    /// * `audit_log_path` — if `Some`, every decision is appended as a JSONL
+    ///   line to that file.
+    /// * `threshold` — override the default `PROMOTE_THRESHOLD` (0.70).
+    pub fn new(
+        audit_log_path: Option<impl AsRef<std::path::Path>>,
+        threshold: Option<f64>,
+    ) -> Self {
+        Self {
+            threshold: threshold.unwrap_or(PROMOTE_THRESHOLD),
+            audit_log_path: audit_log_path.map(|p| p.as_ref().to_path_buf()),
+            audit_trail: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Evaluate a received capsule and return the promotion decision.
+    ///
+    /// Steps:
+    /// 1. Verify signature (placeholder — always passes until P3-02).
+    /// 2. Use the capsule's own `confidence` field as the composite score.
+    /// 3. If `score >= threshold`: set `gene.state = Promoted` and return
+    ///    `CapsuleDisposition::Promoted`.
+    /// 4. Otherwise: return `CapsuleDisposition::Quarantined { reason: LowScore }`.
+    /// 5. Append an audit entry to `capsule_audit_log.jsonl`.
+    ///
+    /// The caller is responsible for persisting the promoted gene to a gene
+    /// store (e.g. `GeneStore::upsert_gene`).  The returned `CapsuleDisposition`
+    /// carries the promoted `gene_id` so the caller can act accordingly.
+    pub fn on_capsule_received(&self, capsule: &Capsule, gene: &mut Gene) -> CapsuleDisposition {
+        let score = capsule.confidence as f64;
+
+        let disposition = if score >= self.threshold {
+            gene.state = AssetState::Promoted;
+            CapsuleDisposition::Promoted {
+                gene_id: capsule.gene_id.clone(),
+                score,
+            }
+        } else {
+            let reason = QuarantineReason::LowScore { score };
+            CapsuleDisposition::Quarantined {
+                reason: reason.to_string(),
+            }
+        };
+
+        self.write_audit_entry(capsule, &disposition, score);
+        self.audit_trail
+            .lock()
+            .unwrap()
+            .push((capsule.id.clone(), disposition.clone()));
+
+        disposition
+    }
+
+    /// All in-memory audit entries accumulated so far.
+    pub fn audit_trail(&self) -> Vec<(String, CapsuleDisposition)> {
+        self.audit_trail.lock().unwrap().clone()
+    }
+
+    /// Number of audit entries recorded.
+    pub fn audit_count(&self) -> usize {
+        self.audit_trail.lock().unwrap().len()
+    }
+
+    fn write_audit_entry(&self, capsule: &Capsule, disposition: &CapsuleDisposition, score: f64) {
+        let Some(ref path) = self.audit_log_path else {
+            return;
+        };
+        let entry = AuditLogEntry {
+            capsule_id: &capsule.id,
+            gene_id: &capsule.gene_id,
+            score,
+            disposition,
+            timestamp_secs: now_unix_secs(),
+        };
+        if let Ok(mut line) = serde_json::to_string(&entry) {
+            line.push('\n');
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = file.write_all(line.as_bytes());
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oris_evolution::{AssetState, Gene};
+    use oris_evolution::{AssetState, Capsule, EnvFingerprint, Gene, Outcome};
 
     fn make_gene(id: &str) -> NetworkAsset {
         NetworkAsset::Gene {
@@ -451,6 +620,44 @@ mod tests {
                 state: AssetState::Promoted,
                 task_class_id: None,
             },
+        }
+    }
+
+    fn make_capsule(id: &str, gene_id: &str, confidence: f32) -> Capsule {
+        Capsule {
+            id: id.to_string(),
+            gene_id: gene_id.to_string(),
+            mutation_id: "mut-1".to_string(),
+            run_id: "run-1".to_string(),
+            diff_hash: "abc123".to_string(),
+            confidence,
+            env: EnvFingerprint {
+                rustc_version: "1.80.0".to_string(),
+                cargo_lock_hash: "hash".to_string(),
+                target_triple: "aarch64-apple-darwin".to_string(),
+                os: "macos".to_string(),
+            },
+            outcome: Outcome {
+                success: true,
+                validation_profile: "default".to_string(),
+                validation_duration_ms: 100,
+                changed_files: vec![],
+                validator_hash: "vh1".to_string(),
+                lines_changed: 5,
+                replay_verified: false,
+            },
+            state: AssetState::Candidate,
+        }
+    }
+
+    fn make_plain_gene(id: &str) -> Gene {
+        Gene {
+            id: id.to_string(),
+            signals: vec!["test.fail".into()],
+            strategy: vec!["fix test".into()],
+            validation: vec!["cargo test".into()],
+            state: AssetState::Candidate,
+            task_class_id: None,
         }
     }
 
@@ -634,5 +841,118 @@ mod tests {
         assert_eq!(s.assets_quarantined, 2);
         assert_eq!(s.assets_promoted, 1);
         assert_eq!(s.assets_failed_validation, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // AC P2-06: RemoteCapsuleReceiver auto-promotion pipeline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_remote_capsule_high_score_is_promoted() {
+        let receiver = RemoteCapsuleReceiver::new(None::<&str>, None);
+        let capsule = make_capsule("cap-1", "gene-1", 0.85);
+        let mut gene = make_plain_gene("gene-1");
+
+        let disposition = receiver.on_capsule_received(&capsule, &mut gene);
+
+        match &disposition {
+            CapsuleDisposition::Promoted { gene_id, score } => {
+                assert_eq!(gene_id, "gene-1");
+                assert!(*score >= PROMOTE_THRESHOLD);
+            }
+            other => panic!("expected Promoted, got {:?}", other),
+        }
+        assert_eq!(gene.state, AssetState::Promoted);
+        assert_eq!(receiver.audit_count(), 1);
+    }
+
+    #[test]
+    fn test_remote_capsule_low_score_is_quarantined() {
+        let receiver = RemoteCapsuleReceiver::new(None::<&str>, None);
+        let capsule = make_capsule("cap-2", "gene-2", 0.40);
+        let mut gene = make_plain_gene("gene-2");
+        let original_state = gene.state.clone();
+
+        let disposition = receiver.on_capsule_received(&capsule, &mut gene);
+
+        match &disposition {
+            CapsuleDisposition::Quarantined { reason } => {
+                assert!(reason.starts_with("low_score:"), "reason={}", reason);
+            }
+            other => panic!("expected Quarantined, got {:?}", other),
+        }
+        // Gene state must not be changed when quarantined.
+        assert_eq!(gene.state, original_state);
+        assert_eq!(receiver.audit_count(), 1);
+    }
+
+    #[test]
+    fn test_remote_capsule_at_threshold_is_promoted() {
+        let receiver = RemoteCapsuleReceiver::new(None::<&str>, None);
+        // Use a confidence value just at or above threshold (0.70). Because
+        // f32 → f64 casting can introduce tiny rounding errors we use a value
+        // that is safely representable: 0.75 (exactly 3/4 in binary).
+        let capsule = make_capsule("cap-3", "gene-3", 0.75_f32);
+        let mut gene = make_plain_gene("gene-3");
+
+        let disposition = receiver.on_capsule_received(&capsule, &mut gene);
+        assert!(
+            matches!(&disposition, CapsuleDisposition::Promoted { .. }),
+            "capsule at or above threshold must be promoted"
+        );
+    }
+
+    #[test]
+    fn test_remote_capsule_audit_log_written() {
+        let dir = std::env::temp_dir();
+        let log_path = dir.join(format!(
+            "capsule_audit_log_test_{}.jsonl",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        {
+            let receiver = RemoteCapsuleReceiver::new(Some(&log_path), None);
+            let c1 = make_capsule("cap-a", "g-a", 0.90);
+            let c2 = make_capsule("cap-b", "g-b", 0.30);
+            let mut gene_a = make_plain_gene("g-a");
+            let mut gene_b = make_plain_gene("g-b");
+            receiver.on_capsule_received(&c1, &mut gene_a);
+            receiver.on_capsule_received(&c2, &mut gene_b);
+        }
+
+        let contents = std::fs::read_to_string(&log_path).expect("audit log must exist");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2, "two decisions must produce two log lines");
+        // Each line must be valid JSON
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line)
+                .expect("each audit line must be valid JSON");
+        }
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    #[test]
+    fn test_remote_capsule_audit_trail_in_memory() {
+        let receiver = RemoteCapsuleReceiver::default();
+        let c1 = make_capsule("cap-x", "g-x", 0.80);
+        let c2 = make_capsule("cap-y", "g-y", 0.50);
+        let mut g1 = make_plain_gene("g-x");
+        let mut g2 = make_plain_gene("g-y");
+
+        receiver.on_capsule_received(&c1, &mut g1);
+        receiver.on_capsule_received(&c2, &mut g2);
+
+        let trail = receiver.audit_trail();
+        assert_eq!(trail.len(), 2);
+        assert_eq!(trail[0].0, "cap-x");
+        assert_eq!(trail[1].0, "cap-y");
+        assert!(matches!(&trail[0].1, CapsuleDisposition::Promoted { .. }));
+        assert!(matches!(
+            &trail[1].1,
+            CapsuleDisposition::Quarantined { .. }
+        ));
     }
 }
