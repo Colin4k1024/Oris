@@ -30,7 +30,7 @@ const PLANNER_OPENAI_COMPAT: &str = "openai-compatible";
 const SHAREABLE_ASSET_RUNTIME_ROOT: &str = "examples/evo_oris_repo/assets/evo-shareable/runtime";
 const SHAREABLE_ASSET_GENERATED_ROOT: &str =
     "examples/evo_oris_repo/assets/evo-shareable/generated";
-const DEFAULT_OPENAI_COMPAT_BASE_URL: &str = "https://mgallery.haier.net/v1";
+const DEFAULT_OPENAI_COMPAT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_COMPAT_MODEL: &str = "qwen3-235b-a22b";
 
 #[derive(Clone, Debug)]
