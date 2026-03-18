@@ -17,6 +17,8 @@ oris-runtime now exposes a fail-closed autonomous PR lane that prepares determin
 - cargo fmt --all -- --check
 - cargo build --verbose --all --release --all-features
 - cargo test --release --all-features
+- cargo publish -p oris-runtime --all-features --registry crates-io --dry-run
+- cargo publish -p oris-runtime --all-features --registry crates-io
 
 ## Links
 
