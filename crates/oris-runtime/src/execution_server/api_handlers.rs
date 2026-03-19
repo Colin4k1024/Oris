@@ -23965,6 +23965,428 @@ mod tests {
         let count2_json: serde_json::Value = serde_json::from_slice(&count2_body).unwrap();
         assert!(count2_json["data"]["eligible_count"].as_u64().unwrap() >= 1);
     }
+
+    // ── /a2a/assets/* tests (issue #330) ──────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_empty_sender_id_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_requires_handshake() {
+        // No prior handshake — expect 403 Forbidden
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=unauthenticated-discovery-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_returns_results_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-search-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=asset-search-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "search");
+        assert!(j["data"]["results"].is_array());
+        assert!(j["data"]["total"].is_number());
+        assert!(j["data"]["limit"].is_number());
+        assert!(j["data"]["offset"].is_number());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_mode_field_is_search() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-search-mode-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=asset-search-mode-agent&q=rust")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            j["data"]["mode"], "search",
+            "mode must be 'search' for the search endpoint"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_ranked_returns_ranked_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-ranked-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=asset-ranked-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "ranked");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_explore_returns_explore_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-explore-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/explore?sender_id=asset-explore-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "explore");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_recommended_returns_recommended_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-recommended-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/recommended?sender_id=asset-recommended-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "recommended");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_trending_returns_trending_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-trending-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/trending?sender_id=asset-trending-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "trending");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_categories_returns_categories_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-categories-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/categories?sender_id=asset-categories-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "categories");
+        assert!(j["data"]["categories"].is_array());
+        assert!(j["data"]["total_categories"].is_number());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_pagination_limit_respected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-pagination-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=asset-pagination-agent&limit=1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let results = j["data"]["results"].as_array().unwrap();
+        assert!(
+            results.len() <= 1,
+            "limit=1 must return at most one result, got {}",
+            results.len()
+        );
+        assert_eq!(j["data"]["limit"], 1);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_ranked_deterministic_for_same_inputs() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-determinism-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let make_req = || {
+            Request::builder()
+                .method(Method::GET)
+                .uri("/a2a/assets/ranked?sender_id=asset-determinism-agent")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let r2 = router.clone().oneshot(make_req()).await.unwrap();
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j1["data"]["results"], j2["data"]["results"],
+            "ranked asset discovery must be deterministic for the same inputs"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_idempotent_flag_is_true() {
+        // All discovery modes must advertise idempotent = true
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-idempotent-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        for endpoint in &[
+            "/a2a/assets/search?sender_id=asset-idempotent-agent",
+            "/a2a/assets/ranked?sender_id=asset-idempotent-agent",
+            "/a2a/assets/explore?sender_id=asset-idempotent-agent",
+            "/a2a/assets/recommended?sender_id=asset-idempotent-agent",
+            "/a2a/assets/trending?sender_id=asset-idempotent-agent",
+            "/a2a/assets/categories?sender_id=asset-idempotent-agent",
+        ] {
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri(*endpoint)
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "endpoint {endpoint} must return 200"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                j["data"]["idempotent"], true,
+                "endpoint {endpoint} must advertise idempotent=true"
+            );
+        }
+    }
 }
 
 // ===================================================================
