@@ -15,6 +15,7 @@ pub mod execution_suspension;
 pub mod identity;
 pub mod interrupt;
 pub mod interrupt_resolver;
+pub mod kernel_interrupt;
 pub mod kernel_mode;
 pub mod policy;
 #[cfg(feature = "kernel-postgres")]
@@ -48,6 +49,11 @@ pub use identity::{RunId, Seq, StepId};
 pub use interrupt::{Interrupt, InterruptError, InterruptId, InterruptKind, InterruptStore};
 pub use interrupt_resolver::{
     InterruptResolver, InterruptResolverError, InterruptSource, ResolveResult,
+};
+pub use kernel_interrupt::{
+    InterruptCheckpoint, KernelInterrupt, KernelInterruptError, KernelInterruptId,
+    KernelInterruptKind, KernelInterruptStatus, KernelInterruptStore,
+    InMemoryKernelInterruptStore,
 };
 pub use kernel_mode::KernelMode;
 pub use policy::{

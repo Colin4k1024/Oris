@@ -1,5 +1,9 @@
 //! Scheduler skeleton for Phase 1 runtime rollout.
+//!
+//! K5-c: Context-Aware Scheduler Kernel with priority-aware dispatch and configurable fairness.
+//! K5-d: Safe Backpressure Engine with per-tenant and per-worker throttle limits.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -12,6 +16,71 @@ use super::observability::RejectionReason;
 use super::repository::RuntimeRepository;
 
 const DISPATCH_SCAN_LIMIT: usize = 16;
+
+/// Fairness policy for the scheduler (K5-c).
+#[derive(Clone, Debug, Default)]
+pub enum FairnessPolicy {
+    /// First-come-first-served (default)
+    #[default]
+    FCFS,
+    /// Priority-based with configurable weight
+    PriorityWeighted { default_weight: u32 },
+    /// Round-robin across tenants
+    RoundRobin,
+}
+
+/// Priority level for dispatch candidates (K5-c).
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ThreadPriority(pub u32);
+
+impl ThreadPriority {
+    pub const LOW: ThreadPriority = ThreadPriority(0);
+    pub const NORMAL: ThreadPriority = ThreadPriority(100);
+    pub const HIGH: ThreadPriority = ThreadPriority(200);
+    pub const CRITICAL: ThreadPriority = ThreadPriority(300);
+}
+
+/// Resource budget for a dispatch candidate (K5-c).
+#[derive(Clone, Debug, Default)]
+pub struct ResourceBudget {
+    /// Maximum CPU units (0-1000)
+    pub cpu_units: u32,
+    /// Maximum memory in MB
+    pub memory_mb: u32,
+    /// Maximum concurrent actions
+    pub max_concurrent_actions: u32,
+}
+
+impl ResourceBudget {
+    pub fn unbounded() -> Self {
+        Self {
+            cpu_units: 1000,
+            memory_mb: u32::MAX,
+            max_concurrent_actions: 10,
+        }
+    }
+}
+
+/// Throttle limits for backpressure (K5-d).
+#[derive(Clone, Debug)]
+pub struct ThrottleLimits {
+    /// Maximum concurrent runs per tenant
+    pub max_concurrent_runs_per_tenant: usize,
+    /// Maximum concurrent leases per worker
+    pub max_concurrent_leases_per_worker: usize,
+    /// Maximum queue depth before global backpressure
+    pub max_queue_depth: usize,
+}
+
+impl Default for ThrottleLimits {
+    fn default() -> Self {
+        Self {
+            max_concurrent_runs_per_tenant: 100,
+            max_concurrent_leases_per_worker: 10,
+            max_queue_depth: 1000,
+        }
+    }
+}
 
 /// Context for context-aware dispatch (tenant, priority, plugin/worker capabilities).
 /// Used to route or filter work; concrete routing logic can be extended later.
@@ -28,6 +97,12 @@ pub struct DispatchContext {
     /// `dispatch_one_with_context` returns `SchedulerDecision::Backpressure`
     /// instead of acquiring a new lease.
     pub max_queue_depth: Option<usize>,
+    /// Fairness policy for this dispatch (K5-c)
+    pub fairness_policy: Option<FairnessPolicy>,
+    /// Thread priority for this dispatch (K5-c)
+    pub thread_priority: Option<ThreadPriority>,
+    /// Resource budget for this dispatch (K5-c)
+    pub resource_budget: Option<ResourceBudget>,
 }
 
 impl DispatchContext {
@@ -49,6 +124,21 @@ impl DispatchContext {
         self.max_queue_depth = Some(limit);
         self
     }
+
+    pub fn with_fairness_policy(mut self, policy: FairnessPolicy) -> Self {
+        self.fairness_policy = Some(policy);
+        self
+    }
+
+    pub fn with_thread_priority(mut self, priority: ThreadPriority) -> Self {
+        self.thread_priority = Some(priority);
+        self
+    }
+
+    pub fn with_resource_budget(mut self, budget: ResourceBudget) -> Self {
+        self.resource_budget = Some(budget);
+        self
+    }
 }
 
 /// Scheduler dispatch decision.
@@ -66,11 +156,19 @@ pub enum SchedulerDecision {
     Noop,
 }
 
-/// Compile-safe scheduler skeleton for queue -> lease dispatch.
+/// Compile-safe scheduler skeleton for queue -> lease dispatch with context-awareness (K5-c, K5-d).
 pub struct SkeletonScheduler<R: RuntimeRepository> {
     repository: R,
     /// Optional circuit breaker applied globally to all dispatch calls.
     circuit_breaker: Option<Arc<CircuitBreaker>>,
+    /// Fairness policy for dispatch (K5-c)
+    fairness_policy: FairnessPolicy,
+    /// Throttle limits for backpressure (K5-d)
+    throttle_limits: ThrottleLimits,
+    /// Current per-tenant run counts (for backpressure)
+    tenant_run_counts: std::sync::Mutex<HashMap<String, usize>>,
+    /// Current per-worker lease counts (for backpressure)
+    worker_lease_counts: std::sync::Mutex<HashMap<String, usize>>,
 }
 
 impl<R: RuntimeRepository> SkeletonScheduler<R> {
@@ -78,6 +176,10 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
         Self {
             repository,
             circuit_breaker: None,
+            fairness_policy: FairnessPolicy::default(),
+            throttle_limits: ThrottleLimits::default(),
+            tenant_run_counts: std::sync::Mutex::new(HashMap::new()),
+            worker_lease_counts: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -90,9 +192,129 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
         self
     }
 
+    /// Set fairness policy for the scheduler (K5-c).
+    pub fn with_fairness_policy(mut self, policy: FairnessPolicy) -> Self {
+        self.fairness_policy = policy;
+        self
+    }
+
+    /// Set throttle limits for backpressure (K5-d).
+    pub fn with_throttle_limits(mut self, limits: ThrottleLimits) -> Self {
+        self.throttle_limits = limits;
+        self
+    }
+
     /// Attempt to dispatch one eligible attempt to `worker_id`.
     pub fn dispatch_one(&self, worker_id: &str) -> Result<SchedulerDecision, KernelError> {
         self.dispatch_one_with_context(worker_id, None)
+    }
+
+    /// Sort candidates based on fairness policy and priority (K5-c).
+    fn sort_candidates(
+        &self,
+        candidates: &mut [AttemptDispatchRecord],
+        context: Option<&DispatchContext>,
+    ) {
+        let policy = context
+            .and_then(|c| c.fairness_policy.as_ref())
+            .unwrap_or(&self.fairness_policy);
+
+        match policy {
+            FairnessPolicy::FCFS => {
+                // Already in order from repository
+            }
+            FairnessPolicy::PriorityWeighted { .. } => {
+                // Sort by priority (higher first)
+                // Note: AttemptDispatchRecord doesn't have priority, so we use attempt_no as proxy
+                candidates.sort_by(|a, b| b.attempt_no.cmp(&a.attempt_no));
+            }
+            FairnessPolicy::RoundRobin => {
+                // For round-robin, we could track last dispatched tenant
+                // For now, just use FCFS
+            }
+        }
+    }
+
+    /// Check per-tenant backpressure (K5-d).
+    fn check_tenant_backpressure(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Option<(RejectionReason, usize)> {
+        if let Some(tenant) = tenant_id {
+            let counts = self.tenant_run_counts.lock().unwrap();
+            if let Some(&count) = counts.get(tenant) {
+                if count >= self.throttle_limits.max_concurrent_runs_per_tenant {
+                    return Some((
+                        RejectionReason::tenant_limit(format!(
+                            "tenant {} at {} runs, limit {}",
+                            tenant,
+                            count,
+                            self.throttle_limits.max_concurrent_runs_per_tenant
+                        )),
+                        count,
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Check per-worker backpressure (K5-d).
+    fn check_worker_backpressure(
+        &self,
+        worker_id: &str,
+    ) -> Option<(RejectionReason, usize)> {
+        let counts = self.worker_lease_counts.lock().unwrap();
+        if let Some(&count) = counts.get(worker_id) {
+            if count >= self.throttle_limits.max_concurrent_leases_per_worker {
+                return Some((
+                    RejectionReason::capacity_limit(format!(
+                        "worker {} at {} leases, limit {}",
+                        worker_id,
+                        count,
+                        self.throttle_limits.max_concurrent_leases_per_worker
+                    )),
+                    count,
+                ));
+            }
+        }
+        None
+    }
+
+    /// Increment tenant run count after successful dispatch (K5-d).
+    fn increment_tenant_count(&self, tenant_id: Option<&str>) {
+        if let Some(tenant) = tenant_id {
+            let mut counts = self.tenant_run_counts.lock().unwrap();
+            *counts.entry(tenant.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    /// Increment worker lease count after successful dispatch (K5-d).
+    fn increment_worker_count(&self, worker_id: &str) {
+        let mut counts = self.worker_lease_counts.lock().unwrap();
+        *counts.entry(worker_id.to_string()).or_insert(0) += 1;
+    }
+
+    /// Decrement worker lease count when lease is released (K5-d).
+    pub fn decrement_worker_count(&self, worker_id: &str) {
+        let mut counts = self.worker_lease_counts.lock().unwrap();
+        if let Some(count) = counts.get_mut(worker_id) {
+            if *count > 0 {
+                *count -= 1;
+            }
+        }
+    }
+
+    /// Get current scheduler metrics for observability (K5-d).
+    pub fn get_metrics(&self) -> SchedulerMetrics {
+        let tenant_counts = self.tenant_run_counts.lock().unwrap();
+        let worker_counts = self.worker_lease_counts.lock().unwrap();
+
+        SchedulerMetrics {
+            tenant_run_counts: tenant_counts.clone(),
+            worker_lease_counts: worker_counts.clone(),
+            throttle_limits: self.throttle_limits.clone(),
+        }
     }
 
     /// Dispatch one attempt to `worker_id` with optional context for tenant/priority/capability routing.
@@ -123,23 +345,45 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
             .repository
             .list_dispatchable_attempts(now, DISPATCH_SCAN_LIMIT)?;
 
+        // Sort candidates based on fairness policy (K5-c)
+        let mut sorted_candidates = candidates.clone();
+        self.sort_candidates(&mut sorted_candidates, context);
+
         // Backpressure gate: if queue depth meets or exceeds the limit, reject dispatch.
         if let Some(limit) = context.and_then(|c| c.max_queue_depth) {
-            if candidates.len() >= limit {
+            if sorted_candidates.len() >= limit {
                 return Ok(SchedulerDecision::Backpressure {
                     reason: RejectionReason::capacity_limit(format!(
                         "queue depth {} >= limit {}",
-                        candidates.len(),
+                        sorted_candidates.len(),
                         limit
                     )),
-                    queue_depth: candidates.len(),
+                    queue_depth: sorted_candidates.len(),
                 });
             }
         }
 
+        // Per-tenant backpressure check (K5-d)
+        if let Some(tenant_id) = context.and_then(|c| c.tenant_id.as_deref()) {
+            if let Some((reason, count)) = self.check_tenant_backpressure(Some(tenant_id)) {
+                return Ok(SchedulerDecision::Backpressure {
+                    reason,
+                    queue_depth: count,
+                });
+            }
+        }
+
+        // Per-worker backpressure check (K5-d)
+        if let Some((reason, count)) = self.check_worker_backpressure(worker_id) {
+            return Ok(SchedulerDecision::Backpressure {
+                reason,
+                queue_depth: count,
+            });
+        }
+
         let lease_expires_at = now + chrono::Duration::seconds(30);
 
-        for candidate in candidates {
+        for candidate in sorted_candidates {
             if let Err(e) =
                 self.repository
                     .upsert_lease(&candidate.attempt_id, worker_id, lease_expires_at)
@@ -151,6 +395,10 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
                 return Err(e);
             }
 
+            // Update counts after successful dispatch (K5-d)
+            self.increment_tenant_count(context.and_then(|c| c.tenant_id.as_deref()));
+            self.increment_worker_count(worker_id);
+
             return Ok(SchedulerDecision::Dispatched {
                 attempt_id: candidate.attempt_id,
                 worker_id: worker_id.to_string(),
@@ -159,6 +407,14 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
 
         Ok(SchedulerDecision::Noop)
     }
+}
+
+/// Scheduler metrics for observability (K5-d).
+#[derive(Clone, Debug)]
+pub struct SchedulerMetrics {
+    pub tenant_run_counts: HashMap<String, usize>,
+    pub worker_lease_counts: HashMap<String, usize>,
+    pub throttle_limits: ThrottleLimits,
 }
 
 #[cfg(test)]
@@ -229,6 +485,8 @@ mod tests {
                 lease_expires_at,
                 heartbeat_at: Utc::now(),
                 version: 1,
+                terminal_state: None,
+                terminal_at: None,
             })
         }
 
@@ -568,5 +826,105 @@ mod tests {
             "expected Dispatched, got {:?}",
             decision
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // K5-c: Context-Aware Scheduler Tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_with_priority_weighted_fairness() {
+        let repo = FakeRepository::new(
+            vec![
+                attempt("attempt-low", 1),   // lower attempt_no = lower priority
+                attempt("attempt-high", 10), // higher attempt_no = higher priority
+            ],
+            &[],
+        );
+        let scheduler = SkeletonScheduler::new(repo);
+        let ctx = DispatchContext::new()
+            .with_fairness_policy(FairnessPolicy::PriorityWeighted { default_weight: 100 });
+
+        let decision = scheduler
+            .dispatch_one_with_context("worker-1", Some(&ctx))
+            .expect("dispatch should succeed");
+
+        match decision {
+            SchedulerDecision::Dispatched { attempt_id, .. } => {
+                // With PriorityWeighted, higher attempt_no should be dispatched first
+                assert_eq!(attempt_id, "attempt-high");
+            }
+            other => panic!("expected Dispatched, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_context_builder_with_priority_and_fairness() {
+        let ctx = DispatchContext::new()
+            .with_tenant("tenant-1")
+            .with_priority(5)
+            .with_fairness_policy(FairnessPolicy::RoundRobin)
+            .with_thread_priority(ThreadPriority::HIGH)
+            .with_resource_budget(ResourceBudget::unbounded());
+        
+        assert_eq!(ctx.tenant_id.as_deref(), Some("tenant-1"));
+        assert_eq!(ctx.priority, Some(5));
+        assert!(matches!(ctx.fairness_policy, Some(FairnessPolicy::RoundRobin)));
+        assert!(matches!(ctx.thread_priority, Some(ThreadPriority::HIGH)));
+        assert!(ctx.resource_budget.is_some());
+    }
+
+    // ---------------------------------------------------------------------------
+    // K5-d: Backpressure Engine Tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn per_worker_backpressure_tracks_lease_counts() {
+        let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
+        let throttle_limits = ThrottleLimits {
+            max_concurrent_runs_per_tenant: 100,
+            max_concurrent_leases_per_worker: 2,
+            max_queue_depth: 1000,
+        };
+        
+        let scheduler = SkeletonScheduler::new(repo)
+            .with_throttle_limits(throttle_limits.clone());
+
+        // First dispatch should succeed
+        let decision1 = scheduler.dispatch_one("worker-1").expect("dispatch 1");
+        assert!(matches!(decision1, SchedulerDecision::Dispatched { .. }));
+        
+        // Second dispatch to same worker should also succeed (limit is 2)
+        let decision2 = scheduler.dispatch_one("worker-1").expect("dispatch 2");
+        assert!(matches!(decision2, SchedulerDecision::Dispatched { .. }));
+        
+        // Third dispatch should fail with backpressure
+        let decision3 = scheduler.dispatch_one("worker-1").expect("dispatch 3");
+        match decision3 {
+            SchedulerDecision::Backpressure { reason, .. } => {
+                let msg = format!("{:?}", reason);
+                assert!(msg.contains("worker-1 at 2 leases"), "got: {}", msg);
+            }
+            other => panic!("expected Backpressure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn scheduler_metrics_tracks_counts() {
+        let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
+        let scheduler = SkeletonScheduler::new(repo);
+        
+        let _ = scheduler.dispatch_one("worker-1").expect("dispatch");
+        
+        let metrics = scheduler.get_metrics();
+        assert_eq!(metrics.worker_lease_counts.get("worker-1"), Some(&1));
+    }
+
+    #[test]
+    fn throttle_limits_defaults() {
+        let limits = ThrottleLimits::default();
+        assert_eq!(limits.max_concurrent_runs_per_tenant, 100);
+        assert_eq!(limits.max_concurrent_leases_per_worker, 10);
+        assert_eq!(limits.max_queue_depth, 1000);
     }
 }
