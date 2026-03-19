@@ -59,7 +59,7 @@ pub use lease::{
     WorkerHealthTracker, WorkerLease,
 };
 pub use models::{
-    AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, RunRecord,
+    AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, LeaseTerminalState, RunRecord,
     RunRuntimeStatus,
 };
 pub use observability::{KernelObservability, RejectionReason};
@@ -69,6 +69,7 @@ pub use postgres_runtime_repository::{
 };
 pub use recovery::{CrashRecoveryPipeline, RecoveryContext, RecoveryStep};
 pub use repository::RuntimeRepository;
-pub use scheduler::{DispatchContext, SchedulerDecision, SkeletonScheduler};
+pub use scheduler::{DispatchContext, FairnessPolicy, ResourceBudget, SchedulerDecision, SchedulerMetrics,
+    SkeletonScheduler, ThrottleLimits, ThreadPriority};
 #[cfg(feature = "sqlite-persistence")]
 pub use sqlite_runtime_repository::SqliteRuntimeRepository;

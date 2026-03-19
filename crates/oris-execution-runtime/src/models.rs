@@ -59,6 +59,32 @@ pub struct LeaseRecord {
     pub lease_expires_at: DateTime<Utc>,
     pub heartbeat_at: DateTime<Utc>,
     pub version: u64,
+    /// Terminal state for explicit lifecycle management (K5-a)
+    pub terminal_state: Option<LeaseTerminalState>,
+    /// Timestamp when terminal state was set (K5-a)
+    pub terminal_at: Option<DateTime<Utc>>,
+}
+
+/// Terminal states for leased execution (K5-a).
+/// These states define the explicit lifecycle of a lease and ensure deterministic recovery.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LeaseTerminalState {
+    /// Lease is active and worker is executing.
+    Active,
+    /// Lease completed successfully.
+    Completed,
+    /// Lease failed (execution error).
+    Failed,
+    /// Lease expired (worker didn't heartbeat in time).
+    Expired,
+    /// Lease was cancelled (external cancellation).
+    Cancelled,
+}
+
+impl Default for LeaseTerminalState {
+    fn default() -> Self {
+        LeaseTerminalState::Active
+    }
 }
 
 /// Interrupt metadata record for operator resume flow.

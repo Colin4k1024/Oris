@@ -4321,6 +4321,97 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
                 resource_type: "worker",
                 resource_id: None,
             }),
+            // EvoMap semantic endpoints audit targets
+            ["a2a", "task", "swarm"] => Some(AuditTarget {
+                action: "a2a.semantic.task.swarm",
+                resource_type: "task",
+                resource_id: None,
+            }),
+            ["a2a", "bounty", "create"] => Some(AuditTarget {
+                action: "a2a.semantic.bounty.create",
+                resource_type: "bounty",
+                resource_id: None,
+            }),
+            ["a2a", "bounty", bid_id, "accept"] => Some(AuditTarget {
+                action: "a2a.semantic.bounty.accept",
+                resource_type: "bounty",
+                resource_id: Some((*bid_id).to_string()),
+            }),
+            ["a2a", "bounty", bid_id, "close"] => Some(AuditTarget {
+                action: "a2a.semantic.bounty.close",
+                resource_type: "bounty",
+                resource_id: Some((*bid_id).to_string()),
+            }),
+            ["a2a", "worker", "register"] => Some(AuditTarget {
+                action: "a2a.semantic.worker.register",
+                resource_type: "worker",
+                resource_id: None,
+            }),
+            ["a2a", "recipe"] => Some(AuditTarget {
+                action: "a2a.semantic.recipe.create",
+                resource_type: "recipe",
+                resource_id: None,
+            }),
+            ["a2a", "recipe", "list"] => Some(AuditTarget {
+                action: "a2a.semantic.recipe.list",
+                resource_type: "recipe",
+                resource_id: None,
+            }),
+            ["a2a", "recipe", recipe_id] => Some(AuditTarget {
+                action: "a2a.semantic.recipe.get",
+                resource_type: "recipe",
+                resource_id: Some((*recipe_id).to_string()),
+            }),
+            ["a2a", "recipe", recipe_id, "fork"] => Some(AuditTarget {
+                action: "a2a.semantic.recipe.fork",
+                resource_type: "recipe",
+                resource_id: Some((*recipe_id).to_string()),
+            }),
+            ["a2a", "organism", "express"] => Some(AuditTarget {
+                action: "a2a.semantic.organism.express",
+                resource_type: "organism",
+                resource_id: None,
+            }),
+            ["a2a", "organism", "active"] => Some(AuditTarget {
+                action: "a2a.semantic.organism.list_active",
+                resource_type: "organism",
+                resource_id: None,
+            }),
+            ["a2a", "organism", organism_id] => Some(AuditTarget {
+                action: "a2a.semantic.organism.get",
+                resource_type: "organism",
+                resource_id: Some((*organism_id).to_string()),
+            }),
+            ["a2a", "session", "join"] => Some(AuditTarget {
+                action: "a2a.semantic.session.join",
+                resource_type: "session",
+                resource_id: None,
+            }),
+            ["a2a", "session", "message"] => Some(AuditTarget {
+                action: "a2a.semantic.session.message",
+                resource_type: "session",
+                resource_id: None,
+            }),
+            ["a2a", "session", "submit"] => Some(AuditTarget {
+                action: "a2a.semantic.session.submit",
+                resource_type: "session",
+                resource_id: None,
+            }),
+            ["a2a", "dispute", "open"] => Some(AuditTarget {
+                action: "a2a.semantic.dispute.open",
+                resource_type: "dispute",
+                resource_id: None,
+            }),
+            ["a2a", "dispute", "evidence"] => Some(AuditTarget {
+                action: "a2a.semantic.dispute.evidence",
+                resource_type: "dispute",
+                resource_id: None,
+            }),
+            ["a2a", "dispute", "resolve"] => Some(AuditTarget {
+                action: "a2a.semantic.dispute.resolve",
+                resource_type: "dispute",
+                resource_id: None,
+            }),
             _ => None,
         };
     }
@@ -4529,6 +4620,25 @@ fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> b
     let is_attempts = path.starts_with("/v1/attempts");
     let is_dlq = path.starts_with("/v1/dlq");
     let is_a2a_compat = is_a2a_compat_path(path);
+
+    // EvoMap semantic endpoint path checks
+    let is_evomap_bounty = path.starts_with("/a2a/bounty/");
+    let is_evomap_session = path.starts_with("/a2a/session/");
+    let is_evomap_dispute = path.starts_with("/a2a/dispute/");
+    let is_evomap_recipe = path.starts_with("/a2a/recipe");
+    let is_evomap_organism = path.starts_with("/a2a/organism");
+    let is_evomap_worker_register = path == "/a2a/worker/register";
+    let is_evomap_swarm = path == "/a2a/task/swarm";
+
+    // EvoMap semantic endpoints are accessible by Operator role (POST mutating, GET for read)
+    let is_evomap_semantic = is_evomap_bounty
+        || is_evomap_session
+        || is_evomap_dispute
+        || is_evomap_recipe
+        || is_evomap_organism
+        || is_evomap_worker_register
+        || is_evomap_swarm;
+
     match role {
         ApiRole::Operator => {
             is_jobs_or_interrupts
@@ -4536,10 +4646,14 @@ fn role_can_access(role: &ApiRole, method: &axum::http::Method, path: &str) -> b
                 || (is_attempts && *method == axum::http::Method::GET)
                 || is_dlq
                 || is_a2a_compat
+                || is_evomap_semantic
         }
         ApiRole::Worker => {
-            // Worker role can only call worker control/data-plane endpoints.
-            is_workers && *method != axum::http::Method::GET
+            // Worker role can call:
+            // 1. Worker control/data-plane endpoints (non-GET only)
+            // 2. Worker registration endpoint
+            // 3. EvoMap semantic endpoints that workers need (e.g., worker register)
+            (is_workers && *method != axum::http::Method::GET) || is_evomap_worker_register
         }
         ApiRole::Admin => true,
     }
