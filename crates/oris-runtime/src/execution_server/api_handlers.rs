@@ -24834,6 +24834,747 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
+
+    // ─── Council Session ────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_open_returns_ok() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "open",
+                    "session_id": "c-sess-t001",
+                    "quorum": 1,
+                    "min_yes": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["action"], "open");
+        assert_eq!(j["data"]["session"]["session_id"], "c-sess-t001");
+        assert_eq!(j["data"]["session"]["status"], "open");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_open_idempotent_same_settings() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let payload = serde_json::json!({
+            "sender_id": "council-agent",
+            "action": "open",
+            "session_id": "c-sess-t002",
+            "quorum": 2,
+            "min_yes": 1
+        })
+        .to_string();
+        let req1 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.clone()))
+            .unwrap();
+        router.clone().oneshot(req1).await.unwrap();
+        let req2 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(payload))
+            .unwrap();
+        let resp = router.oneshot(req2).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["session"]["session_id"], "c-sess-t002");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_invalid_action_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "restart"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_close_returns_ok() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let open_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "open",
+                    "session_id": "c-sess-t004",
+                    "quorum": 1,
+                    "min_yes": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(open_req).await.unwrap();
+        let close_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "close",
+                    "session_id": "c-sess-t004"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(close_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["action"], "close");
+        assert_eq!(j["data"]["session"]["status"], "closed");
+    }
+
+    // ─── Council Propose ────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_propose_missing_title_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "proposer-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_propose_records_proposal() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "proposer-agent",
+                    "title": "Adopt unified deployment policy",
+                    "proposal_id": "c-prop-t006"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["proposal"]["proposal_id"], "c-prop-t006");
+        assert_eq!(j["data"]["proposal"]["status"], "proposed");
+        assert_eq!(j["data"]["proposal"]["proposer_id"], "proposer-agent");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_propose_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let open_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "proposer-agent",
+                    "action": "open",
+                    "session_id": "c-sess-t007",
+                    "quorum": 1,
+                    "min_yes": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(open_req).await.unwrap();
+        let payload = serde_json::json!({
+            "sender_id": "proposer-agent",
+            "title": "Idempotent proposal",
+            "proposal_id": "c-prop-t007",
+            "session_id": "c-sess-t007"
+        })
+        .to_string();
+        let req1 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.clone()))
+            .unwrap();
+        router.clone().oneshot(req1).await.unwrap();
+        let req2 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(payload))
+            .unwrap();
+        let resp = router.oneshot(req2).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["proposal"]["proposal_id"], "c-prop-t007");
+    }
+
+    // ─── Council Vote ───────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_vote_records_vote() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t008",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Vote-test proposal",
+                            "proposal_id": "c-prop-t008",
+                            "session_id": "c-sess-t008"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "voter-agent",
+                    "proposal_id": "c-prop-t008",
+                    "vote": "yes"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(vote_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["vote"], "yes");
+        assert_eq!(j["data"]["proposal"]["votes"]["yes"], 1);
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_vote_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t009",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Idempotent-vote proposal",
+                            "proposal_id": "c-prop-t009",
+                            "session_id": "c-sess-t009"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let vote_payload = serde_json::json!({
+            "sender_id": "voter-agent",
+            "proposal_id": "c-prop-t009",
+            "vote": "yes"
+        })
+        .to_string();
+        let make_vote = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/council/vote")
+                .header("content-type", "application/json")
+                .body(Body::from(vote_payload.clone()))
+                .unwrap()
+        };
+        router.clone().oneshot(make_vote()).await.unwrap();
+        let resp = router.oneshot(make_vote()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["proposal"]["votes"]["yes"], 1);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_vote_conflict_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t010",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Conflict-vote proposal",
+                            "proposal_id": "c-prop-t010",
+                            "session_id": "c-sess-t010"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/vote")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "proposal_id": "c-prop-t010",
+                            "vote": "yes"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let conflict_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "voter-agent",
+                    "proposal_id": "c-prop-t010",
+                    "vote": "no"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(conflict_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["details"]["reason"], "vote_conflict");
+    }
+
+    // ─── Council Execute ────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_execute_insufficient_quorum_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // session with quorum=2 so zero votes will not reach quorum
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t011",
+                            "quorum": 2,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Quorum-test proposal",
+                            "proposal_id": "c-prop-t011",
+                            "session_id": "c-sess-t011"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exec_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "exec-agent",
+                    "proposal_id": "c-prop-t011"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(exec_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["details"]["reason"], "insufficient_quorum");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_execute_approved_proposal_succeeds() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t012",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Approved proposal",
+                            "proposal_id": "c-prop-t012",
+                            "session_id": "c-sess-t012"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/vote")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "proposal_id": "c-prop-t012",
+                            "vote": "yes"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exec_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "exec-agent",
+                    "proposal_id": "c-prop-t012"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(exec_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["proposal"]["status"], "executed");
+        assert_eq!(j["data"]["executed_by"], "exec-agent");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_execute_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t013",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Idempotent-execute proposal",
+                            "proposal_id": "c-prop-t013",
+                            "session_id": "c-sess-t013"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/vote")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "proposal_id": "c-prop-t013",
+                            "vote": "yes"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exec_payload = serde_json::json!({
+            "sender_id": "exec-agent",
+            "proposal_id": "c-prop-t013"
+        })
+        .to_string();
+        let make_exec = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/council/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(exec_payload.clone()))
+                .unwrap()
+        };
+        router.clone().oneshot(make_exec()).await.unwrap();
+        let resp = router.oneshot(make_exec()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["proposal"]["status"], "executed");
+    }
 }
 
 // ===================================================================
