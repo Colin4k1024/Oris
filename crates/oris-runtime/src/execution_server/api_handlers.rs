@@ -3197,7 +3197,7 @@ pub fn build_router(state: ExecutionApiState) -> Router {
     feature = "evolution-network-experimental"
 ))]
 fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
-    router
+    let router = router
         .route("/a2a/hello", post(evolution_a2a_hello_compat))
         .route("/a2a/fetch", post(evolution_a2a_fetch_compat))
         .route(
@@ -3314,7 +3314,16 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route(
             "/a2a/community/governance",
             post(evomap_governance_principles),
-        )
+        );
+    // Lifecycle query is exposed here only when full-evolution-experimental is
+    // NOT active. When it is active, with_evolution_routes already registers the
+    // same path and a duplicate would panic.
+    #[cfg(not(feature = "full-evolution-experimental"))]
+    let router = router.route(
+        "/v1/evolution/a2a/tasks/:task_id/lifecycle",
+        get(evolution_a2a_task_lifecycle),
+    );
+    router
 }
 
 #[cfg(not(all(
@@ -23138,6 +23147,823 @@ mod tests {
             j1["data"]["tiers"], j2["data"]["tiers"],
             "model-tiers endpoint must be deterministic"
         );
+    }
+
+    // ── /a2a/task/submit tests (issue #329) ──────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_creates_open_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "task-submit-agent",
+                    "title": "My first task",
+                    "summary": "A test task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["state"], "created");
+        let task = &json["data"]["task"];
+        assert_eq!(task["status"], "open");
+        assert_eq!(task["created_by"], "task-submit-agent");
+        assert_eq!(task["title"], "My first task");
+        assert!(task["task_id"].is_string());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_uses_explicit_task_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "explicit-task-id-1",
+                    "sender_id": "task-submit-agent-2",
+                    "title": "Explicit ID task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["task_id"], "explicit-task-id-1");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_requires_sender_or_created_by() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"title": "no sender"}).to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx when sender_id absent, got {}",
+            resp.status()
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_accepts_created_by_field() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "created_by": "creator-agent",
+                    "title": "Created by test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["created_by"], "creator-agent");
+    }
+
+    // ── /a2a/task/list tests (issue #329) ────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_list_returns_submitted_tasks() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        for i in 0..3u8 {
+            let _ = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/task/submit")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "task_id": format!("list-task-{i}"),
+                                "sender_id": "list-agent",
+                                "title": format!("Task {i}")
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/list")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks array");
+        assert!(tasks.len() >= 3);
+        assert!(json["data"]["total"].as_u64().unwrap() >= 3);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_list_filters_by_status() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        // Directly populate with known statuses
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            tasks.insert(
+                "filter-open-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "filter-open-1".to_string(),
+                    title: "Open Task".to_string(),
+                    summary: "open".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "filter-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "filter-released-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "filter-released-1".to_string(),
+                    title: "Released Task".to_string(),
+                    summary: "released".to_string(),
+                    status: EvomapSemanticTaskStatus::Released,
+                    created_by: "filter-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 2,
+                    updated_at_ms: 2,
+                    last_submission_id: None,
+                },
+            );
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/list?status=Open")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks");
+        assert!(tasks.iter().all(|t| t["status"] == "open"));
+        let ids: Vec<&str> = tasks.iter().filter_map(|t| t["task_id"].as_str()).collect();
+        assert!(ids.contains(&"filter-open-1"), "open task must appear");
+        assert!(
+            !ids.contains(&"filter-released-1"),
+            "released must not appear"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_list_pagination_respects_limit_and_offset() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            for i in 0..5u64 {
+                tasks.insert(
+                    format!("page-task-{i}"),
+                    EvomapSemanticTaskRecord {
+                        task_id: format!("page-task-{i}"),
+                        title: format!("Page Task {i}"),
+                        summary: "paging test".to_string(),
+                        status: EvomapSemanticTaskStatus::Open,
+                        created_by: "page-agent".to_string(),
+                        claimed_by: None,
+                        created_at_ms: i as i64,
+                        updated_at_ms: i as i64,
+                        last_submission_id: None,
+                    },
+                );
+            }
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/list?limit=2&offset=1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 2, "limit=2 must return exactly 2 tasks");
+        assert!(json["data"]["total"].as_u64().unwrap() >= 5);
+    }
+
+    // ── /a2a/task/:id tests (issue #329) ─────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_get_returns_task_detail() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "detail-task-1",
+                            "sender_id": "detail-agent",
+                            "title": "Detail Task"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/detail-task-1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["task_id"], "detail-task-1");
+        assert_eq!(json["data"]["task"]["title"], "Detail Task");
+        assert_eq!(json["data"]["task"]["status"], "open");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_get_returns_404_for_unknown_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/nonexistent-task-xyz-999")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── /a2a/task/my tests (issue #329) ──────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_my_returns_own_tasks_only() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            tasks.insert(
+                "my-task-a".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "my-task-a".to_string(),
+                    title: "My Task A".to_string(),
+                    summary: "a".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "my-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 100,
+                    updated_at_ms: 100,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "other-task-b".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "other-task-b".to_string(),
+                    title: "Other Task B".to_string(),
+                    summary: "b".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "other-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 200,
+                    updated_at_ms: 200,
+                    last_submission_id: None,
+                },
+            );
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/my?sender_id=my-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 1, "only my-agent's tasks must appear");
+        assert_eq!(tasks[0]["task_id"], "my-task-a");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_my_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/my")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx without sender_id, got {}",
+            resp.status()
+        );
+    }
+
+    // ── /a2a/task/eligible-count tests (issue #329) ───────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_eligible_count_reflects_open_and_released_tasks() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            tasks.insert(
+                "elig-open-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "elig-open-1".to_string(),
+                    title: "Eligible Open".to_string(),
+                    summary: "open".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "elig-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "elig-released-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "elig-released-1".to_string(),
+                    title: "Eligible Released".to_string(),
+                    summary: "released".to_string(),
+                    status: EvomapSemanticTaskStatus::Released,
+                    created_by: "elig-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 2,
+                    updated_at_ms: 2,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "elig-accepted-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "elig-accepted-1".to_string(),
+                    title: "Non-Eligible Accepted".to_string(),
+                    summary: "accepted".to_string(),
+                    status: EvomapSemanticTaskStatus::Accepted,
+                    created_by: "elig-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 3,
+                    updated_at_ms: 3,
+                    last_submission_id: None,
+                },
+            );
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/eligible-count")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // At least open + released (2), accepted does NOT count
+        let count = json["data"]["eligible_count"].as_u64().expect("count");
+        assert!(
+            count >= 2,
+            "eligible count must include open + released, got {count}"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_eligible_count_zero_when_no_tasks() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/eligible-count")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["eligible_count"], 0);
+    }
+
+    // ── /a2a/task/release tests (issue #329) ─────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_release_transitions_to_released_status() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "release-task-1",
+                            "sender_id": "release-agent",
+                            "title": "To be released"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let release_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/release")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "release-task-1",
+                    "sender_id": "release-agent",
+                    "reason": "no longer needed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.clone().oneshot(release_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["status"], "released");
+        assert_eq!(json["data"]["reason"], "no longer needed");
+
+        // Verify eligible count increases after release
+        let count_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/eligible-count")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let count_body = axum::body::to_bytes(count_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let count_json: serde_json::Value = serde_json::from_slice(&count_body).unwrap();
+        assert!(count_json["data"]["eligible_count"].as_u64().unwrap() >= 1);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_release_returns_404_for_unknown_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/release")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "no-such-task-release",
+                    "sender_id": "release-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── /a2a/ask tests (issue #329) ──────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_ask_creates_queued_question() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/ask")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "ask-agent",
+                    "question": "What is the expected output format?",
+                    "details": "Need format clarification for the downstream consumer"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["status"], "queued");
+        assert!(json["data"]["question_id"].is_string());
+        let task = &json["data"]["task"];
+        assert_eq!(task["status"], "open");
+        assert_eq!(task["created_by"], "ask-agent");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_ask_question_appears_in_task_list() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let ask_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/ask")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "ask-list-agent",
+                            "question": "How should errors be handled?"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ask_body = axum::body::to_bytes(ask_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ask_json: serde_json::Value = serde_json::from_slice(&ask_body).unwrap();
+        let created_task_id = ask_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("task_id")
+            .to_string();
+
+        // Verify the question task appears in the /a2a/task/my list
+        let my_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/my?sender_id=ask-list-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let my_body = axum::body::to_bytes(my_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let my_json: serde_json::Value = serde_json::from_slice(&my_body).unwrap();
+        let task_ids: Vec<&str> = my_json["data"]["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .filter_map(|t| t["task_id"].as_str())
+            .collect();
+        assert!(
+            task_ids.contains(&created_task_id.as_str()),
+            "ask task must appear in my tasks list"
+        );
+    }
+
+    // ── Full lifecycle (submit → list → detail → eligible → release) ─────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_full_lifecycle_submit_detail_release_eligible() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // submit
+        let submit_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "lifecycle-full-1",
+                            "sender_id": "lifecycle-agent",
+                            "title": "Full lifecycle task"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+
+        // detail
+        let detail_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/lifecycle-full-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = axum::body::to_bytes(detail_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+        assert_eq!(detail_json["data"]["task"]["status"], "open");
+
+        // eligible count = 1
+        let count_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/eligible-count")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let count_body = axum::body::to_bytes(count_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let count_json: serde_json::Value = serde_json::from_slice(&count_body).unwrap();
+        let count_before = count_json["data"]["eligible_count"].as_u64().unwrap();
+        assert!(count_before >= 1);
+
+        // release
+        let release_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/release")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "lifecycle-full-1",
+                            "sender_id": "lifecycle-agent"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(release_resp.status(), StatusCode::OK);
+        let release_body = axum::body::to_bytes(release_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let release_json: serde_json::Value = serde_json::from_slice(&release_body).unwrap();
+        assert_eq!(release_json["data"]["task"]["status"], "released");
+
+        // eligible count still >= 1 (released still counts)
+        let count2_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/eligible-count")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let count2_body = axum::body::to_bytes(count2_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let count2_json: serde_json::Value = serde_json::from_slice(&count2_body).unwrap();
+        assert!(count2_json["data"]["eligible_count"].as_u64().unwrap() >= 1);
     }
 }
 
