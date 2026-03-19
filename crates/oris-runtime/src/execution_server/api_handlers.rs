@@ -22468,6 +22468,677 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&store_root);
     }
+
+    // ── /a2a/validate tests (issue #328) ─────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_accepted_with_default_tier() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "agent-validate-1",
+                    "model_tier": "A3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["accepted"], true);
+        assert!(json["data"]["capabilities"].is_array());
+        assert_eq!(json["data"]["tier_gate"]["allowed"], true);
+        assert_eq!(json["data"]["tier_gate"]["reason"], "ok");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_rejected_when_model_tier_insufficient() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "agent-validate-2",
+                    "required_model_tier": "A5",
+                    "model_tier": "A3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["accepted"], true);
+        assert_eq!(json["data"]["tier_gate"]["allowed"], false);
+        assert_eq!(
+            json["data"]["tier_gate"]["reason"],
+            "insufficient_model_tier"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_filters_requested_capabilities() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "agent-validate-3",
+                    "model_tier": "A3",
+                    "requested_capabilities": ["Coordination", "UnknownCap"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let accepted_caps = json["data"]["accepted_capabilities"]
+            .as_array()
+            .expect("accepted_capabilities array");
+        assert!(accepted_caps.iter().any(|v| v == "Coordination"));
+        // "UnknownCap" must be filtered out
+        assert!(!accepted_caps.iter().any(|v| v == "UnknownCap"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_accepts_arbitrary_sender_id() {
+        // sender_id is stored as-is; the handler does not enforce format restrictions.
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "not valid id!@#$",
+                    "model_tier": "A3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "sender_id format is not validated by the handler"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_succeeds_without_optional_fields() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({}).to_string()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["accepted"], true);
+    }
+
+    // ── /a2a/report tests (issue #328) ───────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_submits_to_open_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // First create a task to report against
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-task-1",
+                    "sender_id": "report-agent",
+                    "title": "Task for report tests"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-task-1",
+                    "sender_id": "report-agent",
+                    "summary": "work completed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["task_id"], "report-task-1");
+        assert_eq!(json["data"]["status"], "submitted");
+        assert!(json["data"]["submission_id"].is_string());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_idempotency_key_returns_cached_response() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-idem-task",
+                    "sender_id": "report-idem-agent",
+                    "title": "Idempotency test task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let _ = router.clone().oneshot(submit_req).await.unwrap();
+
+        let report_body = serde_json::json!({
+            "task_id": "report-idem-task",
+            "sender_id": "report-idem-agent",
+            "summary": "first submission",
+            "idempotency_key": "idem-key-report-42"
+        })
+        .to_string();
+
+        let first_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(report_body.clone()))
+            .unwrap();
+        let first_resp = router.clone().oneshot(first_req).await.unwrap();
+        assert_eq!(first_resp.status(), StatusCode::OK);
+        let first_body = axum::body::to_bytes(first_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        let first_submission_id = first_json["data"]["submission_id"]
+            .as_str()
+            .expect("first submission_id")
+            .to_string();
+
+        // Second request with same idempotency key and different task state
+        // (task is now Submitted, but the cached response must be returned)
+        let second_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(report_body))
+            .unwrap();
+        let second_resp = router.clone().oneshot(second_req).await.unwrap();
+        assert_eq!(second_resp.status(), StatusCode::OK);
+        let second_body = axum::body::to_bytes(second_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+        // Idempotent: same submission_id must be returned
+        assert_eq!(
+            second_json["data"]["submission_id"].as_str().unwrap(),
+            first_submission_id,
+            "idempotency key must return the same submission_id"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_returns_404_for_unknown_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "nonexistent-task-xyz",
+                    "sender_id": "report-agent-x",
+                    "summary": "should 404"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // Submit a task first
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-no-sender-task",
+                    "sender_id": "creator-agent",
+                    "title": "task without sender in report"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let _ = router.clone().oneshot(submit_req).await.unwrap();
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-no-sender-task",
+                    "summary": "no sender provided"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx when sender_id is missing, got {}",
+            resp.status()
+        );
+    }
+
+    // ── /a2a/decision tests (issue #328) ─────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_decision_accepts_submitted_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // submit + report to reach Submitted state
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-task-1","sender_id":"decision-agent","title":"Decision task"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-task-1","sender_id":"decision-agent","summary":"done"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report_json: serde_json::Value = serde_json::from_slice(&report_body).unwrap();
+        let submission_id = report_json["data"]["submission_id"]
+            .as_str()
+            .expect("submission_id")
+            .to_string();
+
+        let decision_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "decision-task-1",
+                    "submission_id": submission_id,
+                    "decision": "accept",
+                    "decided_by": "decision-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(decision_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["decision"], "accept");
+        assert_eq!(json["data"]["status"], "recorded");
+        assert_eq!(json["data"]["task_status"], "accepted");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_decision_rejects_invalid_decision_value() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // Build a submitted task first
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-bad-task","sender_id":"agent","title":"bad"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-bad-task","sender_id":"agent","summary":"done"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "decision-bad-task",
+                    "decision": "maybe",
+                    "decided_by": "agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_decision_idempotency_key_returns_same_decision_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-idem-task","sender_id":"agent","title":"idem"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-idem-task","sender_id":"agent","summary":"done"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report_json: serde_json::Value = serde_json::from_slice(&report_body).unwrap();
+        let subid = report_json["data"]["submission_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let decision_payload = serde_json::json!({
+            "task_id": "decision-idem-task",
+            "submission_id": subid,
+            "decision": "reject",
+            "decided_by": "agent",
+            "idempotency_key": "decision-idem-key-99"
+        })
+        .to_string();
+        let first_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/decision")
+                    .header("content-type", "application/json")
+                    .body(Body::from(decision_payload.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let first_body = axum::body::to_bytes(first_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        let first_decision_id = first_json["data"]["decision_id"]
+            .as_str()
+            .expect("decision_id")
+            .to_string();
+
+        let second_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/decision")
+                    .header("content-type", "application/json")
+                    .body(Body::from(decision_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second_body = axum::body::to_bytes(second_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+        assert_eq!(
+            second_json["data"]["decision_id"].as_str().unwrap(),
+            first_decision_id,
+            "idempotency must return same decision_id"
+        );
+    }
+
+    // ── /a2a/revoke tests (issue #328) ────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_revoke_rejects_empty_asset_ids() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "asset_ids": [],
+                    "revoked_by": "revoker-agent",
+                    "reason": "test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx for empty asset_ids, got {}",
+            resp.status()
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_revoke_rejects_invalid_payload() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from("not-valid-json"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    // ── /a2a/policy/model-tiers tests (issue #328) ────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_model_tiers_returns_tier_list() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/policy/model-tiers")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let tiers = json["data"]["tiers"].as_array().expect("tiers array");
+        assert!(!tiers.is_empty(), "tiers must not be empty");
+        assert!(json["data"]["default_tier"].is_string());
+        // All required tiers must be present
+        let tier_names: Vec<&str> = tiers.iter().filter_map(|t| t["tier"].as_str()).collect();
+        assert!(tier_names.contains(&"A1"), "A1 must be present");
+        assert!(tier_names.contains(&"A3"), "A3 must be present");
+        assert!(tier_names.contains(&"A5"), "A5 must be present");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_model_tiers_deterministic_shape() {
+        // Same request twice must return identical response shape
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let make_req = || {
+            Request::builder()
+                .method(Method::GET)
+                .uri("/a2a/policy/model-tiers")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        let r2 = router.oneshot(make_req()).await.unwrap();
+        assert_eq!(r1.status(), r2.status());
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j1["data"]["tiers"], j2["data"]["tiers"],
+            "model-tiers endpoint must be deterministic"
+        );
+    }
 }
 
 // ===================================================================
