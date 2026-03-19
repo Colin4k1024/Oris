@@ -46,6 +46,16 @@ impl WorkerLease {
         &self.record.worker_id
     }
 
+    /// Returns the terminal state if set (K5-a).
+    pub fn terminal_state(&self) -> Option<&LeaseTerminalState> {
+        self.record.terminal_state.as_ref()
+    }
+
+    /// Returns true if the lease is in a terminal state (not Active) (K5-a).
+    pub fn is_terminal(&self) -> bool {
+        self.record.terminal_state.is_some()
+    }
+
     /// Returns true if the lease has passed its expiry time (no heartbeat grace here).
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         now >= self.record.lease_expires_at
@@ -69,6 +79,13 @@ impl WorkerLease {
         now: DateTime<Utc>,
     ) -> Result<(), KernelError> {
         self.verify_owner(worker_id)?;
+        // Check terminal state first (K5-a)
+        if self.is_terminal() {
+            return Err(KernelError::Driver(format!(
+                "lease {} is in terminal state {:?}",
+                self.record.lease_id, self.record.terminal_state
+            )));
+        }
         if self.is_expired(now) {
             return Err(KernelError::Driver(format!(
                 "lease {} expired at {}",
@@ -76,6 +93,20 @@ impl WorkerLease {
             )));
         }
         Ok(())
+    }
+
+    /// Validates state transition to a terminal state (K5-a).
+    /// Returns Ok(()) if the transition is valid, error otherwise.
+    pub fn can_transition_to(&self, new_state: &LeaseTerminalState) -> Result<(), KernelError> {
+        // Can always transition to terminal states from Active
+        if self.record.terminal_state.is_none() {
+            return Ok(());
+        }
+        // Once terminal, no further transitions allowed
+        Err(KernelError::Driver(format!(
+            "invalid state transition: cannot transition from {:?} to {:?}",
+            self.record.terminal_state, new_state
+        )))
     }
 }
 
@@ -308,6 +339,8 @@ mod tests {
                 lease_expires_at,
                 heartbeat_at: Utc::now(),
                 version: 1,
+                terminal_state: None,
+                terminal_at: None,
             })
         }
 
@@ -486,6 +519,8 @@ mod tests {
             lease_expires_at: Utc::now() + Duration::seconds(60),
             heartbeat_at: Utc::now(),
             version: 1,
+            terminal_state: None,
+            terminal_at: None,
         };
         let lease = WorkerLease::from_record(record);
         assert!(lease.verify_owner("W1").is_ok());
@@ -502,6 +537,8 @@ mod tests {
             lease_expires_at: now - Duration::seconds(1),
             heartbeat_at: now - Duration::seconds(2),
             version: 1,
+            terminal_state: None,
+            terminal_at: None,
         };
         let lease = WorkerLease::from_record(record);
         assert!(lease.is_expired(now));
@@ -518,6 +555,8 @@ mod tests {
             lease_expires_at: now + Duration::seconds(10),
             heartbeat_at: now,
             version: 1,
+            terminal_state: None,
+            terminal_at: None,
         };
         let lease = WorkerLease::from_record(record);
         assert!(lease.check_execution_allowed("W1", now).is_ok());
@@ -597,5 +636,60 @@ mod tests {
         let tracker = WorkerHealthTracker::new(3);
         assert!(!tracker.is_quarantined("unknown-worker"));
         assert!(tracker.get("unknown-worker").is_none());
+    }
+
+    // K5-a: Lease terminal state tests
+    #[test]
+    fn worker_lease_terminal_state_blocks_execution() {
+        let now = Utc::now();
+        let record = LeaseRecord {
+            lease_id: "L1".to_string(),
+            attempt_id: "A1".to_string(),
+            worker_id: "W1".to_string(),
+            lease_expires_at: now + Duration::seconds(10),
+            heartbeat_at: now,
+            version: 1,
+            terminal_state: Some(LeaseTerminalState::Completed),
+            terminal_at: Some(now),
+        };
+        let lease = WorkerLease::from_record(record);
+        assert!(lease.is_terminal());
+        assert!(lease.check_execution_allowed("W1", now).is_err());
+    }
+
+    #[test]
+    fn worker_lease_state_transition_guards() {
+        let now = Utc::now();
+        
+        // Active lease can transition to any terminal state
+        let active_record = LeaseRecord {
+            lease_id: "L1".to_string(),
+            attempt_id: "A1".to_string(),
+            worker_id: "W1".to_string(),
+            lease_expires_at: now + Duration::seconds(10),
+            heartbeat_at: now,
+            version: 1,
+            terminal_state: None,
+            terminal_at: None,
+        };
+        let active_lease = WorkerLease::from_record(active_record);
+        assert!(active_lease.can_transition_to(&LeaseTerminalState::Completed).is_ok());
+        assert!(active_lease.can_transition_to(&LeaseTerminalState::Failed).is_ok());
+        assert!(active_lease.can_transition_to(&LeaseTerminalState::Expired).is_ok());
+        assert!(active_lease.can_transition_to(&LeaseTerminalState::Cancelled).is_ok());
+
+        // Terminal lease cannot transition again
+        let terminal_record = LeaseRecord {
+            lease_id: "L2".to_string(),
+            attempt_id: "A1".to_string(),
+            worker_id: "W1".to_string(),
+            lease_expires_at: now + Duration::seconds(10),
+            heartbeat_at: now,
+            version: 1,
+            terminal_state: Some(LeaseTerminalState::Completed),
+            terminal_at: Some(now),
+        };
+        let terminal_lease = WorkerLease::from_record(terminal_record);
+        assert!(terminal_lease.can_transition_to(&LeaseTerminalState::Failed).is_err());
     }
 }

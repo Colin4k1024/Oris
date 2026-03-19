@@ -229,6 +229,8 @@ mod tests {
                 lease_expires_at,
                 heartbeat_at: Utc::now(),
                 version: 1,
+                terminal_state: None,
+                terminal_at: None,
             })
         }
 

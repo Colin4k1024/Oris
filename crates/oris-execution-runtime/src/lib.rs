@@ -59,7 +59,7 @@ pub use lease::{
     WorkerHealthTracker, WorkerLease,
 };
 pub use models::{
-    AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, RunRecord,
+    AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, LeaseTerminalState, RunRecord,
     RunRuntimeStatus,
 };
 pub use observability::{KernelObservability, RejectionReason};
