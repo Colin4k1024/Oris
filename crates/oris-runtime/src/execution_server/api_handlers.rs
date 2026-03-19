@@ -24387,6 +24387,453 @@ mod tests {
             );
         }
     }
+
+    // ── /a2a/assets/:id (detail + governance) tests (issue #331) ─────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_unknown_asset_returns_404() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/completely-unknown-asset-id-xyz?sender_id=detail-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_returns_full_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1?sender_id=detail-shape-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            j["data"]["asset"]["asset_id"].is_string(),
+            "asset.asset_id must be present"
+        );
+        assert!(
+            j["data"]["governance"]["verification"]["total"].is_number(),
+            "governance.verification.total must be present"
+        );
+        assert!(
+            j["data"]["governance"]["votes"]["total"].is_number(),
+            "governance.votes.total must be present"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_verify_records_verification() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-verify-agent",
+                    "status": "verified",
+                    "note": "looks good"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["verification"]["status"], "verified");
+        assert_eq!(j["data"]["summary"]["total"], 1);
+        assert_eq!(j["data"]["summary"]["verified"], 1);
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_verify_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let body = serde_json::json!({
+            "sender_id": "detail-verify-idem-agent",
+            "status": "verified",
+            "note": "stable"
+        })
+        .to_string();
+        let make_req = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        // First call — not idempotent
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        assert_eq!(j1["data"]["idempotent"], false);
+        // Second identical call — must be idempotent
+        let r2 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j2["data"]["idempotent"], true,
+            "repeated identical verify must be idempotent"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_verify_rejects_invalid_status() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-verify-invalid-agent",
+                    "status": "maybe"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["code"], "invalid_argument");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_vote_records_vote() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-vote-agent",
+                    "vote": "up",
+                    "reason": "solid implementation"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["vote"]["vote"], "up");
+        assert_eq!(j["data"]["summary"]["up"], 1);
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_vote_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let body = serde_json::json!({
+            "sender_id": "detail-vote-idem-agent",
+            "vote": "down",
+            "reason": "needs more work"
+        })
+        .to_string();
+        let make_req = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        assert_eq!(j1["data"]["idempotent"], false);
+
+        let r2 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j2["data"]["idempotent"], true,
+            "repeated identical vote must be idempotent"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_vote_rejects_invalid_vote_value() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-vote-invalid-agent",
+                    "vote": "maybe"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["code"], "invalid_argument");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_audit_trail_reflects_governance_events() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // Perform a verify + vote so audit trail has >= 2 events
+        let verify_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "audit-trail-agent",
+                    "status": "verified"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(verify_req).await.unwrap();
+
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "audit-trail-agent",
+                    "vote": "up"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(vote_req).await.unwrap();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/audit-trail?sender_id=audit-trail-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            j["data"]["total"].as_u64().unwrap_or(0) >= 2,
+            "audit trail must contain at least the verify and vote events"
+        );
+        assert!(j["data"]["trail"].is_array());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_reviews_returns_reviews_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // Add a verify and a vote so reviews is non-empty
+        let verify_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "reviews-shape-agent",
+                    "status": "verified",
+                    "note": "solid"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(verify_req).await.unwrap();
+
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "reviews-shape-agent",
+                    "vote": "up"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(vote_req).await.unwrap();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/reviews?sender_id=reviews-shape-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(j["data"]["reviews"].is_array());
+        assert!(
+            j["data"]["total"].as_u64().unwrap_or(0) >= 2,
+            "reviews must contain verification and vote entries"
+        );
+        // Spot-check first review has expected fields
+        if let Some(first) = j["data"]["reviews"].as_array().and_then(|arr| arr.first()) {
+            assert!(first["review_id"].is_string());
+            assert!(first["reviewer_id"].is_string());
+            assert!(first["type"].is_string());
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_governance_worker_role_rejected_on_verify() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "governance-worker-key",
+                "governance-worker-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("x-api-key-id", "governance-worker-key")
+            .header("x-api-key", "governance-worker-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "governance-worker-agent",
+                    "status": "verified"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_governance_worker_role_rejected_on_vote() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "vote-worker-key",
+                "vote-worker-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("x-api-key-id", "vote-worker-key")
+            .header("x-api-key", "vote-worker-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "vote-worker-agent",
+                    "vote": "up"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
 }
 
 // ===================================================================
