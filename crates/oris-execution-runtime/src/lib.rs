@@ -69,6 +69,7 @@ pub use postgres_runtime_repository::{
 };
 pub use recovery::{CrashRecoveryPipeline, RecoveryContext, RecoveryStep};
 pub use repository::RuntimeRepository;
-pub use scheduler::{DispatchContext, SchedulerDecision, SkeletonScheduler};
+pub use scheduler::{DispatchContext, FairnessPolicy, ResourceBudget, SchedulerDecision, SchedulerMetrics,
+    SkeletonScheduler, ThrottleLimits, ThreadPriority};
 #[cfg(feature = "sqlite-persistence")]
 pub use sqlite_runtime_repository::SqliteRuntimeRepository;
