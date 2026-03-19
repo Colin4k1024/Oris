@@ -199,6 +199,7 @@ impl EvolutionEnvelope {
             &self.timestamp,
             &self.assets,
             &self.manifest,
+            &self.signature,
         );
         let json = serde_json::to_vec(&payload).unwrap_or_default();
         let mut hasher = Sha256::new();
