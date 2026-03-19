@@ -12,6 +12,22 @@ use crate::kernel::state::KernelState;
 use crate::kernel::step::Next;
 use crate::kernel::KernelError;
 
+/// Version identifier for ExecutionStep contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionStepVersion {
+    V1,
+}
+
+impl ExecutionStepVersion {
+    pub fn as_str(&self) -> &'static str {
+        match self { ExecutionStepVersion::V1 => "1.0" }
+    }
+}
+
+impl Default for ExecutionStepVersion {
+    fn default() -> Self { ExecutionStepVersion::V1 }
+}
+
 /// Explicit input for one execution step.
 ///
 /// All inputs to a step are declared here so the boundary is pure and replayable.
@@ -78,6 +94,27 @@ where
         self.next(state)
     }
 }
+
+/// Versioned execution step.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionStepV1<S: KernelState> {
+    pub version: ExecutionStepVersion,
+    pub step_id: Option<String>,
+    pub input: ExecutionStepInput,
+    #[serde(skip)]
+    _phantom: std::marker::PhantomData<S>,
+}
+
+impl<S: KernelState> ExecutionStepV1<S> {
+    pub fn new(step_id: Option<String>, input: ExecutionStepInput) -> Self {
+        Self { version: ExecutionStepVersion::V1, step_id, input, _phantom: std::marker::PhantomData }
+    }
+    pub fn initial(step_id: Option<String>) -> Self {
+        Self { version: ExecutionStepVersion::V1, step_id, input: ExecutionStepInput::Initial, _phantom: std::marker::PhantomData }
+    }
+}
+
+pub type LatestExecutionStep<S> = ExecutionStepV1<S>;
 
 #[cfg(test)]
 mod tests {

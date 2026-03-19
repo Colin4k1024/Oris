@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 
 use oris_kernel::event::KernelError;
 
-use super::models::LeaseRecord;
+use super::models::{LeaseRecord, LeaseTerminalState};
 use super::repository::RuntimeRepository;
 
 /// Strict single-owner execution guard for a lease. Verify ownership and expiry before executing.

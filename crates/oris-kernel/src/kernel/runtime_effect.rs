@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::kernel::identity::RunId;
+use crate::kernel::identity::{RunId, Seq};
 
 /// A single runtime side effect that the kernel (or adapters) must capture.
 ///
@@ -27,6 +27,27 @@ pub enum RuntimeEffect {
     },
     /// An interrupt was raised (e.g. human-in-the-loop; value for resolver).
     InterruptRaise { value: Value },
+}
+
+/// A log entry capturing runtime effects for audit and replay.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EffectLog {
+    pub run_id: RunId,
+    pub seq: Seq,
+    pub effect: RuntimeEffect,
+    pub timestamp_ms: Option<i64>,
+}
+
+impl EffectLog {
+    pub fn new(run_id: RunId, seq: Seq, effect: RuntimeEffect) -> Self {
+        Self { run_id, seq, effect, timestamp_ms: None }
+    }
+    pub fn is_llm_call(&self) -> bool {
+        matches!(self.effect, RuntimeEffect::LLMCall { .. })
+    }
+    pub fn is_tool_call(&self) -> bool {
+        matches!(self.effect, RuntimeEffect::ToolCall { .. })
+    }
 }
 
 /// Sink for recording runtime effects for the active thread/run.

@@ -31,6 +31,33 @@ impl KernelMode {
     }
 }
 
+/// High-level execution mode that controls determinism guarantees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DeterministicMode {
+    /// Deterministic execution - replay-safe
+    Deterministic,
+    /// Live execution - full system access
+    Live,
+}
+
+impl Default for DeterministicMode {
+    fn default() -> Self { DeterministicMode::Live }
+}
+
+impl DeterministicMode {
+    pub fn traps_nondeterminism(self) -> bool {
+        matches!(self, DeterministicMode::Deterministic)
+    }
+    pub fn to_kernel_mode(self) -> KernelMode {
+        match self {
+            DeterministicMode::Deterministic => KernelMode::Replay,
+            DeterministicMode::Live => KernelMode::Normal,
+        }
+    }
+}
+
+pub type LiveMode = DeterministicMode;
+
 #[cfg(test)]
 mod tests {
     use super::*;
