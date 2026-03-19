@@ -3281,8 +3281,14 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/organism/:id", get(evomap_organism_get))
         // EvoMap service/bid/dispute extensions
         .route("/a2a/service/publish", post(evomap_service_publish))
+        .route("/a2a/service/register", post(evomap_service_register))
+        .route("/a2a/service/list", get(evomap_service_list))
+        .route("/a2a/service/:id", get(evomap_service_get))
         .route("/a2a/bid/create", post(evomap_bid_create))
+        .route("/a2a/bid/submit", post(evomap_bid_submit))
+        .route("/a2a/bid/evaluate", post(evomap_bid_evaluate))
         .route("/a2a/bid/list", get(evomap_bid_list))
+        .route("/a2a/bid/:id", get(evomap_bid_get))
         .route("/a2a/bid/:id/accept", post(evomap_bid_accept))
         // EvoMap: Session endpoints
         .route("/a2a/session/join", post(evomap_session_join))
@@ -3291,7 +3297,10 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         // EvoMap: Dispute endpoints
         .route("/a2a/dispute/open", post(evomap_dispute_open))
         .route("/a2a/dispute/evidence", post(evomap_dispute_evidence))
-        .route("/a2a/dispute/rule", post(evomap_dispute_rule))
+        .route(
+            "/a2a/dispute/rule",
+            get(evomap_dispute_rule_get).post(evomap_dispute_rule),
+        )
         .route("/a2a/dispute/resolve", post(evomap_dispute_resolve))
         // EvoMap governance/project surface
         .route("/a2a/stats", get(evomap_stats))
@@ -21172,6 +21181,796 @@ mod tests {
         assert_eq!(json["error"]["code"], "forbidden");
     }
 
+    // ─── Economic Lifecycle: service, bid, dispute rule ─────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_register_returns_service() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-owner",
+                    "service_id": "svc-reg-001",
+                    "title": "Data Ingestion Service",
+                    "category": "data",
+                    "price": 50.0,
+                    "currency": "USD"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["service"]["service_id"], "svc-reg-001");
+        assert_eq!(j["data"]["service"]["status"], "open");
+        assert_eq!(j["data"]["service"]["published_by"], "node-owner");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_register_missing_title_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "sender_id": "node-owner" }).to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_get_returns_service() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "node-owner",
+                            "service_id": "svc-get-001",
+                            "title": "Processing Service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/svc-get-001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["service"]["service_id"], "svc-get-001");
+        assert_eq!(j["data"]["service"]["title"], "Processing Service");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_get_unknown_returns_404() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/svc-does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_list_returns_services() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        for (id, title, cat) in [
+            ("svc-lst-001", "Alpha Service", "compute"),
+            ("svc-lst-002", "Beta Service", "data"),
+        ] {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/service/register")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "sender_id": "list-owner",
+                                "service_id": id,
+                                "title": title,
+                                "category": cat
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/list")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(j["data"]["total"].as_u64().unwrap_or(0) >= 2);
+        assert!(j["data"]["services"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_list_category_filter() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "filter-owner",
+                            "service_id": "svc-cat-001",
+                            "title": "Analytics Service",
+                            "category": "analytics"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/list?category=analytics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(j["data"]["total"].as_u64().unwrap_or(0) >= 1);
+        let services = j["data"]["services"].as_array().unwrap();
+        assert!(services
+            .iter()
+            .all(|s| s["category"].as_str() == Some("analytics")));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_submit_returns_bid() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "service-owner",
+                            "service_id": "svc-bid-001",
+                            "title": "Analytics Service",
+                            "price": 100.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "bidder-agent",
+                    "bid_id": "bid-sub-001",
+                    "service_id": "svc-bid-001",
+                    "amount": 95.0,
+                    "currency": "USD"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["bid"]["bid_id"], "bid-sub-001");
+        assert_eq!(j["data"]["bid"]["status"], "open");
+        assert_eq!(j["data"]["bid"]["bidder_id"], "bidder-agent");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_get_returns_bid() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "service-owner",
+                            "service_id": "svc-bget-001",
+                            "title": "BGet service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "bidder-get-agent",
+                            "bid_id": "bid-bget-001",
+                            "service_id": "svc-bget-001",
+                            "amount": 80.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/bid/bid-bget-001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["bid"]["bid_id"], "bid-bget-001");
+        assert_eq!(j["data"]["bid"]["amount"], 80.0);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_get_unknown_returns_404() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/bid/bid-does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_returns_winner() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "eval-owner",
+                            "service_id": "svc-eval-001",
+                            "title": "Evaluation service",
+                            "price": 200.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for (bid_id, bidder, amount) in [
+            ("bid-eval-low", "bidder-low", 90.0),
+            ("bid-eval-high", "bidder-high", 150.0),
+        ] {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/bid/submit")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "sender_id": bidder,
+                                "bid_id": bid_id,
+                                "service_id": "svc-eval-001",
+                                "amount": amount
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "eval-owner",
+                            "service_id": "svc-eval-001",
+                            "strategy": "highest_bid"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["winner"]["bid_id"], "bid-eval-high");
+        assert_eq!(j["data"]["strategy"], "highest_bid");
+        assert_eq!(j["data"]["evaluation"], "deterministic");
+        assert_eq!(j["data"]["candidates"], 2);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_lowest_bid_strategy() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "lowest-owner",
+                            "service_id": "svc-eval-002",
+                            "title": "Cost-optimised service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for (bid_id, bidder, amount) in [
+            ("bid-low-a", "bidder-a", 200.0),
+            ("bid-low-b", "bidder-b", 50.0),
+        ] {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/bid/submit")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "sender_id": bidder,
+                                "bid_id": bid_id,
+                                "service_id": "svc-eval-002",
+                                "amount": amount
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "lowest-owner",
+                            "service_id": "svc-eval-002",
+                            "strategy": "lowest_bid"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["winner"]["bid_id"], "bid-low-b");
+        assert_eq!(j["data"]["strategy"], "lowest_bid");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_non_owner_forbidden() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "real-owner",
+                            "service_id": "svc-eval-003",
+                            "title": "Ownership check service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "intruder-agent",
+                            "service_id": "svc-eval-003",
+                            "strategy": "highest_bid"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_invalid_strategy_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "strat-owner",
+                            "service_id": "svc-eval-004",
+                            "title": "Strategy validation service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "strat-owner",
+                            "service_id": "svc-eval-004",
+                            "strategy": "random_selection"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_no_open_bids_returns_no_open_bids() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "empty-owner",
+                            "service_id": "svc-eval-005",
+                            "title": "Empty bid service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "empty-owner",
+                            "service_id": "svc-eval-005"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["evaluation"], "no_open_bids");
+        assert!(j["data"]["winner"].is_null());
+        assert_eq!(j["data"]["candidates"], 0);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_dispute_rule_get_returns_ruleset() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/dispute/rule")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["ruleset"]["schema_version"], "v1");
+        let decisions = j["data"]["ruleset"]["decisions"].as_array().unwrap();
+        assert_eq!(decisions.len(), 4);
+        let decision_names: Vec<&str> = decisions
+            .iter()
+            .filter_map(|d| d["decision"].as_str())
+            .collect();
+        assert!(decision_names.contains(&"uphold_bid"));
+        assert!(decision_names.contains(&"refund_buyer"));
+        assert!(decision_names.contains(&"split_award"));
+        assert!(decision_names.contains(&"slash_provider"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_dispute_rule_get_by_id_returns_stored_rule() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // First register a service and bid, then post a dispute rule
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "dispute-owner",
+                            "service_id": "svc-drule-001",
+                            "title": "Dispute service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "dispute-bidder",
+                            "bid_id": "bid-drule-001",
+                            "service_id": "svc-drule-001",
+                            "amount": 75.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/dispute/rule")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "arbiter-agent",
+                            "dispute_id": "dispute-drule-001",
+                            "bid_id": "bid-drule-001",
+                            "decision": "refund_buyer",
+                            "note": "evidence of breach"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/dispute/rule?dispute_id=dispute-drule-001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["rule"]["dispute_id"], "dispute-drule-001");
+        assert_eq!(j["data"]["rule"]["decision"], "refund_buyer");
+        assert_eq!(j["data"]["rule"]["ruled_by"], "arbiter-agent");
+    }
+
     #[cfg(all(
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
@@ -27213,6 +28012,78 @@ struct EvomapDisputeRuleRequest {
     idempotency_key: Option<String>,
 }
 
+// ── New request types for economic lifecycle endpoints ─────────────────────
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapServiceRegisterRequest {
+    sender_id: Option<String>,
+    service_id: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    category: Option<String>,
+    tags: Option<Vec<String>>,
+    price: Option<f64>,
+    currency: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapServiceListQuery {
+    sender_id: Option<String>,
+    category: Option<String>,
+    status: Option<String>,
+    owner_id: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapBidSubmitRequest {
+    sender_id: Option<String>,
+    bid_id: Option<String>,
+    service_id: Option<String>,
+    amount: Option<f64>,
+    currency: Option<String>,
+    note: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapBidEvaluateRequest {
+    sender_id: Option<String>,
+    service_id: Option<String>,
+    strategy: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapDisputeRuleGetQuery {
+    sender_id: Option<String>,
+    dispute_id: Option<String>,
+}
+
 #[cfg(all(
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
@@ -32211,6 +33082,600 @@ pub async fn evomap_dispute_rule(
             .insert(key, data.clone());
     }
     Ok(evomap_value_response(rid, data))
+}
+
+// ── Economic lifecycle: new endpoints (issue #334) ─────────────────────────
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_service_register(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapServiceRegisterRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/service/register",
+    )?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("title is required for /a2a/service/register")
+                .with_request_id(rid.clone())
+        })?
+        .to_string();
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|v| evomap_normalize_service_id(v, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("service-{}", uuid::Uuid::new_v4()));
+    let summary = req
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let category = req
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_lowercase())
+        .unwrap_or_else(|| "general".to_string());
+    let price = req.price.unwrap_or(0.0);
+    if !price.is_finite() || price < 0.0 {
+        return Err(
+            ApiError::bad_request("price must be a finite number >= 0").with_request_id(rid)
+        );
+    }
+    let currency = req
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_uppercase())
+        .unwrap_or_else(|| "USD".to_string());
+    let mut tags = req.tags.unwrap_or_default();
+    tags = tags
+        .into_iter()
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|k| format!("market.service.register:{k}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            let mut cached = cached;
+            if let Some(obj) = cached.as_object_mut() {
+                obj.insert("idempotent".to_string(), Value::Bool(true));
+            }
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let service = {
+        let mut services = state.evomap_services.write().await;
+        if let Some(existing) = services.get(&service_id).cloned() {
+            let same_price = (existing.price - price).abs() < f64::EPSILON;
+            if existing.published_by == sender_id
+                && existing.title == title
+                && existing.summary == summary
+                && existing.category == category
+                && existing.tags == tags
+                && existing.currency == currency
+                && same_price
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "service_id already exists with different payload: {service_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let svc = EvomapServiceRecord {
+                service_id: service_id.clone(),
+                title,
+                summary,
+                category,
+                tags,
+                status: "open".to_string(),
+                price,
+                currency,
+                published_by: sender_id.clone(),
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+            };
+            services.insert(service_id.clone(), svc.clone());
+            svc
+        }
+    };
+
+    let data = serde_json::json!({
+        "service": evomap_service_json(&service),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_service_list(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapServiceListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let status_filter = q.status.as_deref().map(|s| s.to_ascii_lowercase());
+    let category_filter = q.category.as_deref().map(|s| s.to_ascii_lowercase());
+    let owner_filter = q.owner_id.as_deref();
+    let query_tokens: Vec<String> = q
+        .query
+        .as_deref()
+        .map(|raw| {
+            raw.split_whitespace()
+                .map(|t| t.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let services = state.evomap_services.read().await;
+    let mut matched: Vec<&EvomapServiceRecord> = services
+        .values()
+        .filter(|svc| {
+            if let Some(st) = &status_filter {
+                if &svc.status != st {
+                    return false;
+                }
+            }
+            if let Some(cat) = &category_filter {
+                if &svc.category != cat {
+                    return false;
+                }
+            }
+            if let Some(owner) = owner_filter {
+                if svc.published_by != owner {
+                    return false;
+                }
+            }
+            if !query_tokens.is_empty() {
+                let haystack = format!(
+                    "{} {} {}",
+                    svc.title.to_ascii_lowercase(),
+                    svc.summary.as_deref().unwrap_or("").to_ascii_lowercase(),
+                    svc.category
+                );
+                if !query_tokens
+                    .iter()
+                    .any(|tok| haystack.contains(tok.as_str()))
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let sort = q.sort.as_deref().unwrap_or("created_desc");
+    match sort {
+        "price_asc" => matched.sort_by(|a, b| {
+            a.price
+                .partial_cmp(&b.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        "price_desc" => matched.sort_by(|a, b| {
+            b.price
+                .partial_cmp(&a.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        "created_asc" => matched.sort_by_key(|s| s.created_at_ms),
+        _ => matched.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms)),
+    }
+
+    let total = matched.len();
+    let page: Vec<Value> = matched
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(evomap_service_json)
+        .collect();
+
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "services": page,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_service_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(service_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let service_id = evomap_normalize_service_id(&service_id, &rid)?;
+    let services = state.evomap_services.read().await;
+    let service = services.get(&service_id).ok_or_else(|| {
+        ApiError::not_found(format!("service not found: {service_id}")).with_request_id(rid.clone())
+    })?;
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({ "service": evomap_service_json(service) }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_submit(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapBidSubmitRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/bid/submit",
+    )?;
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|v| evomap_normalize_service_id(v, &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("service_id is required for /a2a/bid/submit")
+                .with_request_id(rid.clone())
+        })?;
+    {
+        let services = state.evomap_services.read().await;
+        if !services.contains_key(&service_id) {
+            return Err(
+                ApiError::not_found(format!("service not found: {service_id}"))
+                    .with_request_id(rid),
+            );
+        }
+    }
+    let amount = req.amount.ok_or_else(|| {
+        ApiError::bad_request("amount is required for /a2a/bid/submit").with_request_id(rid.clone())
+    })?;
+    if !amount.is_finite() || amount < 0.0 {
+        return Err(
+            ApiError::bad_request("amount must be a finite number >= 0").with_request_id(rid)
+        );
+    }
+    let currency = req
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_uppercase())
+        .unwrap_or_else(|| "USD".to_string());
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let bid_id = req
+        .bid_id
+        .as_deref()
+        .map(|v| evomap_normalize_bid_id(v, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("bid-{}", uuid::Uuid::new_v4()));
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|k| format!("market.bid.submit:{k}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            let mut cached = cached;
+            if let Some(obj) = cached.as_object_mut() {
+                obj.insert("idempotent".to_string(), Value::Bool(true));
+            }
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let bid = {
+        let mut bids = state.evomap_bids.write().await;
+        if let Some(existing) = bids.get(&bid_id).cloned() {
+            let same_amount = (existing.amount - amount).abs() < f64::EPSILON;
+            if existing.bidder_id == sender_id
+                && existing.service_id == service_id
+                && same_amount
+                && existing.currency == currency
+                && existing.note == note
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "bid_id already exists with different payload: {bid_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let b = EvomapBidRecord {
+                bid_id: bid_id.clone(),
+                service_id,
+                bidder_id: sender_id.clone(),
+                amount,
+                currency,
+                note,
+                status: EvomapBidStatus::Open,
+                accepted_by: None,
+                rejected_reason: None,
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                accepted_at_ms: None,
+            };
+            bids.insert(bid_id.clone(), b.clone());
+            b
+        }
+    };
+
+    let data = serde_json::json!({
+        "bid": evomap_bid_json(&bid),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(bid_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let bid_id = evomap_normalize_bid_id(&bid_id, &rid)?;
+    let bids = state.evomap_bids.read().await;
+    let bid = bids.get(&bid_id).ok_or_else(|| {
+        ApiError::not_found(format!("bid not found: {bid_id}")).with_request_id(rid.clone())
+    })?;
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({ "bid": evomap_bid_json(bid) }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_evaluate(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapBidEvaluateRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/bid/evaluate",
+    )?;
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|v| evomap_normalize_service_id(v, &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("service_id is required for /a2a/bid/evaluate")
+                .with_request_id(rid.clone())
+        })?;
+
+    let service = {
+        let services = state.evomap_services.read().await;
+        services.get(&service_id).cloned().ok_or_else(|| {
+            ApiError::not_found(format!("service not found: {service_id}"))
+                .with_request_id(rid.clone())
+        })?
+    };
+    if service.published_by != sender_id {
+        return Err(
+            ApiError::forbidden("only service publisher can evaluate bids")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "service_id": service_id,
+                    "published_by": service.published_by,
+                    "reason": "service_owner_required"
+                })),
+        );
+    }
+
+    // Deterministic evaluation: strategy defaults to "highest_bid"
+    let strategy = req.strategy.as_deref().unwrap_or("highest_bid");
+    let valid_strategies = ["highest_bid", "lowest_bid"];
+    if !valid_strategies.contains(&strategy) {
+        return Err(ApiError::bad_request(format!(
+            "strategy must be one of: {}",
+            valid_strategies.join("|")
+        ))
+        .with_request_id(rid));
+    }
+
+    let bids = state.evomap_bids.read().await;
+    let mut open_bids: Vec<&EvomapBidRecord> = bids
+        .values()
+        .filter(|b| b.service_id == service_id && b.status == EvomapBidStatus::Open)
+        .collect();
+
+    if open_bids.is_empty() {
+        return Ok(evomap_value_response(
+            rid,
+            serde_json::json!({
+                "service_id": service_id,
+                "strategy": strategy,
+                "winner": null,
+                "candidates": 0,
+                "evaluation": "no_open_bids"
+            }),
+        ));
+    }
+
+    match strategy {
+        "lowest_bid" => open_bids.sort_by(|a, b| {
+            a.amount
+                .partial_cmp(&b.amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.created_at_ms.cmp(&b.created_at_ms))
+        }),
+        _ => open_bids.sort_by(|a, b| {
+            b.amount
+                .partial_cmp(&a.amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.created_at_ms.cmp(&b.created_at_ms))
+        }),
+    }
+
+    let winner = open_bids[0];
+    let candidates: Vec<Value> = open_bids.iter().map(|b| evomap_bid_json(b)).collect();
+
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "service_id": service_id,
+            "strategy": strategy,
+            "winner": evomap_bid_json(winner),
+            "candidates": candidates.len(),
+            "bids": candidates,
+            "evaluation": "deterministic",
+            "schema_version": "v1"
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_dispute_rule_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapDisputeRuleGetQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+
+    // If dispute_id provided, return the specific stored rule
+    if let Some(dispute_id_raw) = q.dispute_id.as_deref() {
+        let dispute_id = evomap_normalize_dispute_id(dispute_id_raw, &rid)?;
+        let rules = state.evomap_dispute_rules.read().await;
+        let rule = rules.get(&dispute_id).ok_or_else(|| {
+            ApiError::not_found(format!("dispute rule not found: {dispute_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        return Ok(evomap_value_response(
+            rid,
+            serde_json::json!({
+                "rule": evomap_dispute_rule_json(rule),
+                "total_rules": rules.len()
+            }),
+        ));
+    }
+
+    // Otherwise return the canonical ruleset definition
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "ruleset": {
+                "schema_version": "v1",
+                "decisions": [
+                    {
+                        "decision": "uphold_bid",
+                        "description": "Bid is upheld; payment proceeds as agreed",
+                        "aliases": ["uphold", "accept_bid"]
+                    },
+                    {
+                        "decision": "refund_buyer",
+                        "description": "Full or partial refund issued to the buyer",
+                        "aliases": ["refund"]
+                    },
+                    {
+                        "decision": "split_award",
+                        "description": "Award is split between parties",
+                        "aliases": ["split"]
+                    },
+                    {
+                        "decision": "slash_provider",
+                        "description": "Provider is penalised; penalty_pct deducted",
+                        "aliases": ["slash"]
+                    }
+                ],
+                "penalty_pct_range": [0, 100]
+            },
+            "total_rules": state.evomap_dispute_rules.read().await.len()
+        }),
+    ))
 }
 
 #[cfg(all(
