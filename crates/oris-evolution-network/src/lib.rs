@@ -1,9 +1,21 @@
 //! Protocol contracts for the Oris Evolution Network (OEN).
 
 pub mod gossip;
+pub mod rate_limiter;
+pub mod signing;
 pub mod sync;
 
-pub use sync::{GossipSyncEngine, QuarantineEntry, QuarantineState, QuarantineStore, SyncStats};
+pub use gossip::{
+    GossipConfig, GossipDigest, GossipDigestEntry, GossipSyncEngine as PushPullGossipSyncEngine,
+    GossipSyncReport, PeerAddress,
+};
+pub use rate_limiter::{PeerRateLimitConfig, PeerRateLimiter};
+pub use signing::{sign_envelope, verify_envelope, NodeKeypair, SignedEnvelope};
+pub use sync::{
+    CapsuleDisposition, GossipSyncEngine, NetworkAuditDisposition, NetworkAuditEntry,
+    QuarantineEntry, QuarantineReason, QuarantineState, QuarantineStore, RejectionReason,
+    RemoteCapsuleReceiver, SyncStats, PROMOTE_THRESHOLD,
+};
 
 use std::collections::BTreeSet;
 
@@ -12,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use oris_evolution::{Capsule, EvolutionEvent, Gene};
+
+pub type Ed25519Signature = String;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MessageType {
@@ -40,6 +54,8 @@ pub struct EvolutionEnvelope {
     pub assets: Vec<NetworkAsset>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<EnvelopeManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Ed25519Signature>,
     pub content_hash: String,
 }
 
@@ -119,6 +135,7 @@ impl EvolutionEnvelope {
             timestamp: Utc::now().to_rfc3339(),
             assets,
             manifest,
+            signature: None,
             content_hash: String::new(),
         };
         envelope.content_hash = envelope.compute_content_hash();
@@ -219,6 +236,10 @@ impl EvolutionEnvelope {
         }
 
         Ok(())
+    }
+
+    pub fn verify_signature(&self, public_key_hex: &str) -> bool {
+        crate::signing::verify_envelope(public_key_hex, self).is_ok()
     }
 }
 

@@ -75,6 +75,9 @@ pub fn demo_sandbox_policy() -> SandboxPolicy {
         max_duration_ms: 180_000,
         max_output_bytes: 1_048_576,
         denied_env_prefixes: vec!["TOKEN".into(), "KEY".into(), "SECRET".into()],
+        max_memory_bytes: None,
+        max_cpu_secs: None,
+        use_process_group: false,
     }
 }
 

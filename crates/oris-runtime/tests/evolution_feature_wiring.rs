@@ -14,6 +14,8 @@ fn assert_type<T>() {}
 #[test]
 fn full_evolution_experimental_paths_resolve() {
     let _ = oris_runtime::evolution::extract_deterministic_signals;
+    let _ = oris_runtime::evolution::detect_from_intake_events;
+    let _ = oris_runtime::evolution::intake_events_to_extractor_input;
     let _ = oris_runtime::evolution::prepare_mutation;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::capture_from_proposal;
     let _ = oris_runtime::evolution::EvoKernel::<FeatureState>::feedback_for_agent;

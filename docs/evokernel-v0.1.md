@@ -1,7 +1,6 @@
 # Oris EvoKernel - Self-Evolving Agent System Design Document
 
-Local mirror of the Notion source:
-https://www.notion.so/317e8a70eec5809c85e1f52aa03870e4
+Local mirror of earlier internal planning notes.
 
 Last synced: March 2, 2026
 

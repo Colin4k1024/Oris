@@ -184,7 +184,7 @@ cargo run -p evo_oris_repo --bin evo_vs_non_evo_benchmark -- \
   --planner openai-compatible \
   --iterations 10 \
   --model qwen3-235b-a22b \
-  --planner-base-url https://mgallery.haier.net/v1 \
+  --planner-base-url https://api.openai.com/v1 \
   --output-json target/evo_bench/report.json \
   --output-md target/evo_bench/report.md \
   --output-assets-json target/evo_bench/shareable_assets.json \
@@ -200,7 +200,7 @@ OPENAI_COMPAT_API_KEY=... cargo run -p evo_oris_repo --bin evo_vs_non_evo_benchm
   --planner openai-compatible \
   --iterations 1 \
   --model qwen3-235b-a22b \
-  --planner-base-url https://mgallery.haier.net/v1 \
+  --planner-base-url https://api.openai.com/v1 \
   --output-assets-json target/evo_bench/shareable_assets.json \
   --log-file target/evo_bench/benchmark.log \
   --allow-skip-non-evo true \

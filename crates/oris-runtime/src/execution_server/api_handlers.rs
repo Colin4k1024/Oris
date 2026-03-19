@@ -688,6 +688,7 @@ struct EvomapProjectRecord {
     created_at_ms: i64,
     updated_at_ms: i64,
     merged_at_ms: Option<i64>,
+    lifecycle_state: Option<String>,
 }
 
 #[cfg(all(
@@ -2824,6 +2825,8 @@ pub struct ExecutionApiState {
     pub idempotency_store: Option<SqliteIdempotencyStore>,
     #[cfg(feature = "sqlite-persistence")]
     pub runtime_repo: Option<SqliteRuntimeRepository>,
+    #[cfg(feature = "kernel-postgres")]
+    pub pg_idempotency_store: Option<crate::execution_runtime::PostgresIdempotencyStore>,
     pub runtime_metrics: RuntimeMetrics,
     pub worker_poll_limit: usize,
     pub max_active_leases_per_worker: usize,
@@ -2958,6 +2961,8 @@ impl ExecutionApiState {
             idempotency_store: None,
             #[cfg(feature = "sqlite-persistence")]
             runtime_repo: None,
+            #[cfg(feature = "kernel-postgres")]
+            pg_idempotency_store: None,
             runtime_metrics: RuntimeMetrics::default(),
             worker_poll_limit: 1,
             max_active_leases_per_worker: 8,
@@ -3193,7 +3198,7 @@ pub fn build_router(state: ExecutionApiState) -> Router {
     feature = "evolution-network-experimental"
 ))]
 fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
-    router
+    let router = router
         .route("/a2a/hello", post(evolution_a2a_hello_compat))
         .route("/a2a/fetch", post(evolution_a2a_fetch_compat))
         .route(
@@ -3276,8 +3281,14 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/organism/:id", get(evomap_organism_get))
         // EvoMap service/bid/dispute extensions
         .route("/a2a/service/publish", post(evomap_service_publish))
+        .route("/a2a/service/register", post(evomap_service_register))
+        .route("/a2a/service/list", get(evomap_service_list))
+        .route("/a2a/service/:id", get(evomap_service_get))
         .route("/a2a/bid/create", post(evomap_bid_create))
+        .route("/a2a/bid/submit", post(evomap_bid_submit))
+        .route("/a2a/bid/evaluate", post(evomap_bid_evaluate))
         .route("/a2a/bid/list", get(evomap_bid_list))
+        .route("/a2a/bid/:id", get(evomap_bid_get))
         .route("/a2a/bid/:id/accept", post(evomap_bid_accept))
         // EvoMap: Session endpoints
         .route("/a2a/session/join", post(evomap_session_join))
@@ -3286,7 +3297,10 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         // EvoMap: Dispute endpoints
         .route("/a2a/dispute/open", post(evomap_dispute_open))
         .route("/a2a/dispute/evidence", post(evomap_dispute_evidence))
-        .route("/a2a/dispute/rule", post(evomap_dispute_rule))
+        .route(
+            "/a2a/dispute/rule",
+            get(evomap_dispute_rule_get).post(evomap_dispute_rule),
+        )
         .route("/a2a/dispute/resolve", post(evomap_dispute_resolve))
         // EvoMap governance/project surface
         .route("/a2a/stats", get(evomap_stats))
@@ -3297,12 +3311,22 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route("/a2a/council/execute", post(evomap_council_execute))
         .route("/a2a/council/session", post(evomap_council_session))
         .route("/a2a/project/propose", post(evomap_project_propose))
+        .route("/a2a/project/create", post(evomap_project_create))
+        .route(
+            "/a2a/project/list",
+            get(evomap_project_list_get).post(evomap_project_list),
+        )
+        .route("/a2a/project/suggestions", get(evomap_project_suggestions))
+        .route("/a2a/project/:id", get(evomap_project_get))
         .route("/a2a/project/:id/claim", post(evomap_project_claim))
         .route("/a2a/project/:id/progress", post(evomap_project_progress))
         .route("/a2a/project/:id/review", post(evomap_project_review))
         .route("/a2a/project/:id/merge", post(evomap_project_merge))
-        .route("/a2a/project/list", post(evomap_project_list))
-        .route("/a2a/project/suggestions", get(evomap_project_suggestions))
+        .route("/a2a/project/:id/state", post(evomap_project_state))
+        .route(
+            "/a2a/project/:id/suggestions",
+            get(evomap_project_id_suggestions),
+        )
         .route(
             "/a2a/governance/principles",
             post(evomap_governance_principles),
@@ -3310,7 +3334,16 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
         .route(
             "/a2a/community/governance",
             post(evomap_governance_principles),
-        )
+        );
+    // Lifecycle query is exposed here only when full-evolution-experimental is
+    // NOT active. When it is active, with_evolution_routes already registers the
+    // same path and a duplicate would panic.
+    #[cfg(not(feature = "full-evolution-experimental"))]
+    let router = router.route(
+        "/v1/evolution/a2a/tasks/:task_id/lifecycle",
+        get(evolution_a2a_task_lifecycle),
+    );
+    router
 }
 
 #[cfg(not(all(
@@ -8386,6 +8419,46 @@ pub async fn run_job(
         }
     }
 
+    #[cfg(feature = "kernel-postgres")]
+    if let (Some(key), Some(store)) = (
+        req.idempotency_key.clone(),
+        state.pg_idempotency_store.as_ref(),
+    ) {
+        if key.trim().is_empty() {
+            return Err(ApiError::bad_request("idempotency_key must not be empty")
+                .with_request_id(rid.clone()));
+        }
+        if let Some(existing) = store
+            .get(&key)
+            .map_err(|e| ApiError::internal(e).with_request_id(rid.clone()))?
+        {
+            if existing.operation == "run"
+                && existing.thread_id == req.thread_id
+                && existing.payload_hash == request_payload_hash
+            {
+                let mut response: RunJobResponse = serde_json::from_str(&existing.response_json)
+                    .map_err(|e| {
+                        ApiError::internal(format!("decode idempotent response failed: {}", e))
+                            .with_request_id(rid.clone())
+                    })?;
+                response.idempotent_replay = true;
+                return Ok(Json(ApiEnvelope {
+                    meta: ApiMeta::ok(),
+                    request_id: rid,
+                    data: response,
+                }));
+            }
+            return Err(ApiError::conflict(
+                "idempotency_key already exists with different request payload",
+            )
+            .with_request_id(rid.clone())
+            .with_details(serde_json::json!({
+                "idempotency_key": key,
+                "operation": existing.operation
+            })));
+        }
+    }
+
     record_task_queued(
         &state,
         &req.thread_id,
@@ -8505,6 +8578,25 @@ pub async fn run_job(
         state.idempotency_store.as_ref(),
     ) {
         let record = IdempotencyRecord {
+            operation: "run".to_string(),
+            thread_id: req.thread_id.clone(),
+            payload_hash: request_payload_hash.clone(),
+            response_json: serde_json::to_string(&response).map_err(|e| {
+                ApiError::internal(format!("encode idempotent response failed: {}", e))
+                    .with_request_id(rid.clone())
+            })?,
+        };
+        store
+            .put(&key, &record)
+            .map_err(|e| ApiError::internal(e).with_request_id(rid.clone()))?;
+    }
+
+    #[cfg(feature = "kernel-postgres")]
+    if let (Some(key), Some(store)) = (
+        req.idempotency_key.clone(),
+        state.pg_idempotency_store.as_ref(),
+    ) {
+        let record = crate::execution_runtime::PostgresIdempotencyRecord {
             operation: "run".to_string(),
             thread_id: req.thread_id.clone(),
             payload_hash: request_payload_hash,
@@ -10791,7 +10883,7 @@ mod tests {
             ))
             .unwrap();
 
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -13532,7 +13624,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -13706,7 +13798,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         let fetch_req = Request::builder()
@@ -13721,7 +13813,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let fetch_resp = router.oneshot(fetch_req).await.unwrap();
+        let fetch_resp = router.clone().oneshot(fetch_req).await.unwrap();
         assert_eq!(fetch_resp.status(), StatusCode::NOT_FOUND);
 
         let claim_req = Request::builder()
@@ -13735,7 +13827,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let claim_resp = router.oneshot(claim_req).await.unwrap();
+        let claim_resp = router.clone().oneshot(claim_req).await.unwrap();
         assert_eq!(claim_resp.status(), StatusCode::NOT_FOUND);
 
         let complete_req = Request::builder()
@@ -13750,7 +13842,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let complete_resp = router.oneshot(complete_req).await.unwrap();
+        let complete_resp = router.clone().oneshot(complete_req).await.unwrap();
         assert_eq!(complete_resp.status(), StatusCode::NOT_FOUND);
 
         let work_claim_req = Request::builder()
@@ -13764,7 +13856,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let work_claim_resp = router.oneshot(work_claim_req).await.unwrap();
+        let work_claim_resp = router.clone().oneshot(work_claim_req).await.unwrap();
         assert_eq!(work_claim_resp.status(), StatusCode::NOT_FOUND);
 
         let work_complete_req = Request::builder()
@@ -13779,7 +13871,7 @@ mod tests {
                 .to_string(),
             ))
             .unwrap();
-        let work_complete_resp = router.oneshot(work_complete_req).await.unwrap();
+        let work_complete_resp = router.clone().oneshot(work_complete_req).await.unwrap();
         assert_eq!(work_complete_resp.status(), StatusCode::NOT_FOUND);
 
         let heartbeat_req = Request::builder()
@@ -21089,6 +21181,796 @@ mod tests {
         assert_eq!(json["error"]["code"], "forbidden");
     }
 
+    // ─── Economic Lifecycle: service, bid, dispute rule ─────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_register_returns_service() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "node-owner",
+                    "service_id": "svc-reg-001",
+                    "title": "Data Ingestion Service",
+                    "category": "data",
+                    "price": 50.0,
+                    "currency": "USD"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["service"]["service_id"], "svc-reg-001");
+        assert_eq!(j["data"]["service"]["status"], "open");
+        assert_eq!(j["data"]["service"]["published_by"], "node-owner");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_register_missing_title_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/service/register")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "sender_id": "node-owner" }).to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_get_returns_service() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "node-owner",
+                            "service_id": "svc-get-001",
+                            "title": "Processing Service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/svc-get-001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["service"]["service_id"], "svc-get-001");
+        assert_eq!(j["data"]["service"]["title"], "Processing Service");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_get_unknown_returns_404() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/svc-does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_list_returns_services() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        for (id, title, cat) in [
+            ("svc-lst-001", "Alpha Service", "compute"),
+            ("svc-lst-002", "Beta Service", "data"),
+        ] {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/service/register")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "sender_id": "list-owner",
+                                "service_id": id,
+                                "title": title,
+                                "category": cat
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/list")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(j["data"]["total"].as_u64().unwrap_or(0) >= 2);
+        assert!(j["data"]["services"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_service_list_category_filter() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "filter-owner",
+                            "service_id": "svc-cat-001",
+                            "title": "Analytics Service",
+                            "category": "analytics"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/service/list?category=analytics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(j["data"]["total"].as_u64().unwrap_or(0) >= 1);
+        let services = j["data"]["services"].as_array().unwrap();
+        assert!(services
+            .iter()
+            .all(|s| s["category"].as_str() == Some("analytics")));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_submit_returns_bid() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "service-owner",
+                            "service_id": "svc-bid-001",
+                            "title": "Analytics Service",
+                            "price": 100.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/bid/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "bidder-agent",
+                    "bid_id": "bid-sub-001",
+                    "service_id": "svc-bid-001",
+                    "amount": 95.0,
+                    "currency": "USD"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["bid"]["bid_id"], "bid-sub-001");
+        assert_eq!(j["data"]["bid"]["status"], "open");
+        assert_eq!(j["data"]["bid"]["bidder_id"], "bidder-agent");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_get_returns_bid() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "service-owner",
+                            "service_id": "svc-bget-001",
+                            "title": "BGet service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "bidder-get-agent",
+                            "bid_id": "bid-bget-001",
+                            "service_id": "svc-bget-001",
+                            "amount": 80.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/bid/bid-bget-001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["bid"]["bid_id"], "bid-bget-001");
+        assert_eq!(j["data"]["bid"]["amount"], 80.0);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_get_unknown_returns_404() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/bid/bid-does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_returns_winner() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "eval-owner",
+                            "service_id": "svc-eval-001",
+                            "title": "Evaluation service",
+                            "price": 200.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for (bid_id, bidder, amount) in [
+            ("bid-eval-low", "bidder-low", 90.0),
+            ("bid-eval-high", "bidder-high", 150.0),
+        ] {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/bid/submit")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "sender_id": bidder,
+                                "bid_id": bid_id,
+                                "service_id": "svc-eval-001",
+                                "amount": amount
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "eval-owner",
+                            "service_id": "svc-eval-001",
+                            "strategy": "highest_bid"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["winner"]["bid_id"], "bid-eval-high");
+        assert_eq!(j["data"]["strategy"], "highest_bid");
+        assert_eq!(j["data"]["evaluation"], "deterministic");
+        assert_eq!(j["data"]["candidates"], 2);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_lowest_bid_strategy() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "lowest-owner",
+                            "service_id": "svc-eval-002",
+                            "title": "Cost-optimised service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        for (bid_id, bidder, amount) in [
+            ("bid-low-a", "bidder-a", 200.0),
+            ("bid-low-b", "bidder-b", 50.0),
+        ] {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/bid/submit")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "sender_id": bidder,
+                                "bid_id": bid_id,
+                                "service_id": "svc-eval-002",
+                                "amount": amount
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "lowest-owner",
+                            "service_id": "svc-eval-002",
+                            "strategy": "lowest_bid"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["winner"]["bid_id"], "bid-low-b");
+        assert_eq!(j["data"]["strategy"], "lowest_bid");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_non_owner_forbidden() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "real-owner",
+                            "service_id": "svc-eval-003",
+                            "title": "Ownership check service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "intruder-agent",
+                            "service_id": "svc-eval-003",
+                            "strategy": "highest_bid"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_invalid_strategy_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "strat-owner",
+                            "service_id": "svc-eval-004",
+                            "title": "Strategy validation service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "strat-owner",
+                            "service_id": "svc-eval-004",
+                            "strategy": "random_selection"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_bid_evaluate_no_open_bids_returns_no_open_bids() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "empty-owner",
+                            "service_id": "svc-eval-005",
+                            "title": "Empty bid service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "empty-owner",
+                            "service_id": "svc-eval-005"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["evaluation"], "no_open_bids");
+        assert!(j["data"]["winner"].is_null());
+        assert_eq!(j["data"]["candidates"], 0);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_dispute_rule_get_returns_ruleset() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/dispute/rule")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["ruleset"]["schema_version"], "v1");
+        let decisions = j["data"]["ruleset"]["decisions"].as_array().unwrap();
+        assert_eq!(decisions.len(), 4);
+        let decision_names: Vec<&str> = decisions
+            .iter()
+            .filter_map(|d| d["decision"].as_str())
+            .collect();
+        assert!(decision_names.contains(&"uphold_bid"));
+        assert!(decision_names.contains(&"refund_buyer"));
+        assert!(decision_names.contains(&"split_award"));
+        assert!(decision_names.contains(&"slash_provider"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_dispute_rule_get_by_id_returns_stored_rule() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // First register a service and bid, then post a dispute rule
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/service/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "dispute-owner",
+                            "service_id": "svc-drule-001",
+                            "title": "Dispute service"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/bid/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "dispute-bidder",
+                            "bid_id": "bid-drule-001",
+                            "service_id": "svc-drule-001",
+                            "amount": 75.0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/dispute/rule")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "arbiter-agent",
+                            "dispute_id": "dispute-drule-001",
+                            "bid_id": "bid-drule-001",
+                            "decision": "refund_buyer",
+                            "note": "evidence of breach"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/dispute/rule?dispute_id=dispute-drule-001")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["rule"]["dispute_id"], "dispute-drule-001");
+        assert_eq!(j["data"]["rule"]["decision"], "refund_buyer");
+        assert_eq!(j["data"]["rule"]["ruled_by"], "arbiter-agent");
+    }
+
     #[cfg(all(
         feature = "agent-contract-experimental",
         feature = "evolution-network-experimental"
@@ -22405,6 +23287,3555 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&store_root);
     }
+
+    // ── /a2a/validate tests (issue #328) ─────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_accepted_with_default_tier() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "agent-validate-1",
+                    "model_tier": "A3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["accepted"], true);
+        assert!(json["data"]["capabilities"].is_array());
+        assert_eq!(json["data"]["tier_gate"]["allowed"], true);
+        assert_eq!(json["data"]["tier_gate"]["reason"], "ok");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_rejected_when_model_tier_insufficient() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "agent-validate-2",
+                    "required_model_tier": "A5",
+                    "model_tier": "A3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["accepted"], true);
+        assert_eq!(json["data"]["tier_gate"]["allowed"], false);
+        assert_eq!(
+            json["data"]["tier_gate"]["reason"],
+            "insufficient_model_tier"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_filters_requested_capabilities() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "agent-validate-3",
+                    "model_tier": "A3",
+                    "requested_capabilities": ["Coordination", "UnknownCap"]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let accepted_caps = json["data"]["accepted_capabilities"]
+            .as_array()
+            .expect("accepted_capabilities array");
+        assert!(accepted_caps.iter().any(|v| v == "Coordination"));
+        // "UnknownCap" must be filtered out
+        assert!(!accepted_caps.iter().any(|v| v == "UnknownCap"));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_accepts_arbitrary_sender_id() {
+        // sender_id is stored as-is; the handler does not enforce format restrictions.
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "not valid id!@#$",
+                    "model_tier": "A3"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "sender_id format is not validated by the handler"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_validate_succeeds_without_optional_fields() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({}).to_string()))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["accepted"], true);
+    }
+
+    // ── /a2a/report tests (issue #328) ───────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_submits_to_open_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // First create a task to report against
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-task-1",
+                    "sender_id": "report-agent",
+                    "title": "Task for report tests"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let submit_resp = router.clone().oneshot(submit_req).await.unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+
+        let report_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-task-1",
+                    "sender_id": "report-agent",
+                    "summary": "work completed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let report_resp = router.clone().oneshot(report_req).await.unwrap();
+        assert_eq!(report_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["task_id"], "report-task-1");
+        assert_eq!(json["data"]["status"], "submitted");
+        assert!(json["data"]["submission_id"].is_string());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_idempotency_key_returns_cached_response() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-idem-task",
+                    "sender_id": "report-idem-agent",
+                    "title": "Idempotency test task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let _ = router.clone().oneshot(submit_req).await.unwrap();
+
+        let report_body = serde_json::json!({
+            "task_id": "report-idem-task",
+            "sender_id": "report-idem-agent",
+            "summary": "first submission",
+            "idempotency_key": "idem-key-report-42"
+        })
+        .to_string();
+
+        let first_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(report_body.clone()))
+            .unwrap();
+        let first_resp = router.clone().oneshot(first_req).await.unwrap();
+        assert_eq!(first_resp.status(), StatusCode::OK);
+        let first_body = axum::body::to_bytes(first_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        let first_submission_id = first_json["data"]["submission_id"]
+            .as_str()
+            .expect("first submission_id")
+            .to_string();
+
+        // Second request with same idempotency key and different task state
+        // (task is now Submitted, but the cached response must be returned)
+        let second_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(report_body))
+            .unwrap();
+        let second_resp = router.clone().oneshot(second_req).await.unwrap();
+        assert_eq!(second_resp.status(), StatusCode::OK);
+        let second_body = axum::body::to_bytes(second_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+        // Idempotent: same submission_id must be returned
+        assert_eq!(
+            second_json["data"]["submission_id"].as_str().unwrap(),
+            first_submission_id,
+            "idempotency key must return the same submission_id"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_returns_404_for_unknown_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "nonexistent-task-xyz",
+                    "sender_id": "report-agent-x",
+                    "summary": "should 404"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_report_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // Submit a task first
+        let submit_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-no-sender-task",
+                    "sender_id": "creator-agent",
+                    "title": "task without sender in report"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let _ = router.clone().oneshot(submit_req).await.unwrap();
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/report")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "report-no-sender-task",
+                    "summary": "no sender provided"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx when sender_id is missing, got {}",
+            resp.status()
+        );
+    }
+
+    // ── /a2a/decision tests (issue #328) ─────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_decision_accepts_submitted_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // submit + report to reach Submitted state
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-task-1","sender_id":"decision-agent","title":"Decision task"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-task-1","sender_id":"decision-agent","summary":"done"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report_json: serde_json::Value = serde_json::from_slice(&report_body).unwrap();
+        let submission_id = report_json["data"]["submission_id"]
+            .as_str()
+            .expect("submission_id")
+            .to_string();
+
+        let decision_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "decision-task-1",
+                    "submission_id": submission_id,
+                    "decision": "accept",
+                    "decided_by": "decision-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(decision_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["decision"], "accept");
+        assert_eq!(json["data"]["status"], "recorded");
+        assert_eq!(json["data"]["task_status"], "accepted");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_decision_rejects_invalid_decision_value() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // Build a submitted task first
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-bad-task","sender_id":"agent","title":"bad"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-bad-task","sender_id":"agent","summary":"done"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/decision")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "decision-bad-task",
+                    "decision": "maybe",
+                    "decided_by": "agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_decision_idempotency_key_returns_same_decision_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-idem-task","sender_id":"agent","title":"idem"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/report")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"task_id":"decision-idem-task","sender_id":"agent","summary":"done"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let report_body = axum::body::to_bytes(report_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report_json: serde_json::Value = serde_json::from_slice(&report_body).unwrap();
+        let subid = report_json["data"]["submission_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let decision_payload = serde_json::json!({
+            "task_id": "decision-idem-task",
+            "submission_id": subid,
+            "decision": "reject",
+            "decided_by": "agent",
+            "idempotency_key": "decision-idem-key-99"
+        })
+        .to_string();
+        let first_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/decision")
+                    .header("content-type", "application/json")
+                    .body(Body::from(decision_payload.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let first_body = axum::body::to_bytes(first_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let first_json: serde_json::Value = serde_json::from_slice(&first_body).unwrap();
+        let first_decision_id = first_json["data"]["decision_id"]
+            .as_str()
+            .expect("decision_id")
+            .to_string();
+
+        let second_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/decision")
+                    .header("content-type", "application/json")
+                    .body(Body::from(decision_payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let second_body = axum::body::to_bytes(second_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let second_json: serde_json::Value = serde_json::from_slice(&second_body).unwrap();
+        assert_eq!(
+            second_json["data"]["decision_id"].as_str().unwrap(),
+            first_decision_id,
+            "idempotency must return same decision_id"
+        );
+    }
+
+    // ── /a2a/revoke tests (issue #328) ────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_revoke_rejects_empty_asset_ids() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "asset_ids": [],
+                    "revoked_by": "revoker-agent",
+                    "reason": "test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx for empty asset_ids, got {}",
+            resp.status()
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_revoke_rejects_invalid_payload() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from("not-valid-json"))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    // ── /a2a/policy/model-tiers tests (issue #328) ────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_model_tiers_returns_tier_list() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/policy/model-tiers")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let tiers = json["data"]["tiers"].as_array().expect("tiers array");
+        assert!(!tiers.is_empty(), "tiers must not be empty");
+        assert!(json["data"]["default_tier"].is_string());
+        // All required tiers must be present
+        let tier_names: Vec<&str> = tiers.iter().filter_map(|t| t["tier"].as_str()).collect();
+        assert!(tier_names.contains(&"A1"), "A1 must be present");
+        assert!(tier_names.contains(&"A3"), "A3 must be present");
+        assert!(tier_names.contains(&"A5"), "A5 must be present");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_model_tiers_deterministic_shape() {
+        // Same request twice must return identical response shape
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let make_req = || {
+            Request::builder()
+                .method(Method::GET)
+                .uri("/a2a/policy/model-tiers")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        let r2 = router.oneshot(make_req()).await.unwrap();
+        assert_eq!(r1.status(), r2.status());
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j1["data"]["tiers"], j2["data"]["tiers"],
+            "model-tiers endpoint must be deterministic"
+        );
+    }
+
+    // ── /a2a/task/submit tests (issue #329) ──────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_creates_open_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "task-submit-agent",
+                    "title": "My first task",
+                    "summary": "A test task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["data"]["state"], "created");
+        let task = &json["data"]["task"];
+        assert_eq!(task["status"], "open");
+        assert_eq!(task["created_by"], "task-submit-agent");
+        assert_eq!(task["title"], "My first task");
+        assert!(task["task_id"].is_string());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_uses_explicit_task_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "explicit-task-id-1",
+                    "sender_id": "task-submit-agent-2",
+                    "title": "Explicit ID task"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["task_id"], "explicit-task-id-1");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_requires_sender_or_created_by() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"title": "no sender"}).to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx when sender_id absent, got {}",
+            resp.status()
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_submit_accepts_created_by_field() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/submit")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "created_by": "creator-agent",
+                    "title": "Created by test"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["created_by"], "creator-agent");
+    }
+
+    // ── /a2a/task/list tests (issue #329) ────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_list_returns_submitted_tasks() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        for i in 0..3u8 {
+            let _ = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/a2a/task/submit")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "task_id": format!("list-task-{i}"),
+                                "sender_id": "list-agent",
+                                "title": format!("Task {i}")
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+        }
+
+        let list_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/list")
+            .body(Body::empty())
+            .unwrap();
+        let list_resp = router.oneshot(list_req).await.unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks array");
+        assert!(tasks.len() >= 3);
+        assert!(json["data"]["total"].as_u64().unwrap() >= 3);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_list_filters_by_status() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        // Directly populate with known statuses
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            tasks.insert(
+                "filter-open-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "filter-open-1".to_string(),
+                    title: "Open Task".to_string(),
+                    summary: "open".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "filter-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "filter-released-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "filter-released-1".to_string(),
+                    title: "Released Task".to_string(),
+                    summary: "released".to_string(),
+                    status: EvomapSemanticTaskStatus::Released,
+                    created_by: "filter-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 2,
+                    updated_at_ms: 2,
+                    last_submission_id: None,
+                },
+            );
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/list?status=Open")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks");
+        assert!(tasks.iter().all(|t| t["status"] == "open"));
+        let ids: Vec<&str> = tasks.iter().filter_map(|t| t["task_id"].as_str()).collect();
+        assert!(ids.contains(&"filter-open-1"), "open task must appear");
+        assert!(
+            !ids.contains(&"filter-released-1"),
+            "released must not appear"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_list_pagination_respects_limit_and_offset() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            for i in 0..5u64 {
+                tasks.insert(
+                    format!("page-task-{i}"),
+                    EvomapSemanticTaskRecord {
+                        task_id: format!("page-task-{i}"),
+                        title: format!("Page Task {i}"),
+                        summary: "paging test".to_string(),
+                        status: EvomapSemanticTaskStatus::Open,
+                        created_by: "page-agent".to_string(),
+                        claimed_by: None,
+                        created_at_ms: i as i64,
+                        updated_at_ms: i as i64,
+                        last_submission_id: None,
+                    },
+                );
+            }
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/list?limit=2&offset=1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 2, "limit=2 must return exactly 2 tasks");
+        assert!(json["data"]["total"].as_u64().unwrap() >= 5);
+    }
+
+    // ── /a2a/task/:id tests (issue #329) ─────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_get_returns_task_detail() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "detail-task-1",
+                            "sender_id": "detail-agent",
+                            "title": "Detail Task"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/detail-task-1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["task_id"], "detail-task-1");
+        assert_eq!(json["data"]["task"]["title"], "Detail Task");
+        assert_eq!(json["data"]["task"]["status"], "open");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_get_returns_404_for_unknown_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/nonexistent-task-xyz-999")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── /a2a/task/my tests (issue #329) ──────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_my_returns_own_tasks_only() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            tasks.insert(
+                "my-task-a".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "my-task-a".to_string(),
+                    title: "My Task A".to_string(),
+                    summary: "a".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "my-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 100,
+                    updated_at_ms: 100,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "other-task-b".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "other-task-b".to_string(),
+                    title: "Other Task B".to_string(),
+                    summary: "b".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "other-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 200,
+                    updated_at_ms: 200,
+                    last_submission_id: None,
+                },
+            );
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/my?sender_id=my-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let tasks = json["data"]["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 1, "only my-agent's tasks must appear");
+        assert_eq!(tasks[0]["task_id"], "my-task-a");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_my_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/my")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx without sender_id, got {}",
+            resp.status()
+        );
+    }
+
+    // ── /a2a/task/eligible-count tests (issue #329) ───────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_eligible_count_reflects_open_and_released_tasks() {
+        let state = ExecutionApiState::new(build_test_graph().await);
+        {
+            let mut tasks = state.evomap_semantic_tasks.write().await;
+            use super::{EvomapSemanticTaskRecord, EvomapSemanticTaskStatus};
+            tasks.insert(
+                "elig-open-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "elig-open-1".to_string(),
+                    title: "Eligible Open".to_string(),
+                    summary: "open".to_string(),
+                    status: EvomapSemanticTaskStatus::Open,
+                    created_by: "elig-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 1,
+                    updated_at_ms: 1,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "elig-released-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "elig-released-1".to_string(),
+                    title: "Eligible Released".to_string(),
+                    summary: "released".to_string(),
+                    status: EvomapSemanticTaskStatus::Released,
+                    created_by: "elig-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 2,
+                    updated_at_ms: 2,
+                    last_submission_id: None,
+                },
+            );
+            tasks.insert(
+                "elig-accepted-1".to_string(),
+                EvomapSemanticTaskRecord {
+                    task_id: "elig-accepted-1".to_string(),
+                    title: "Non-Eligible Accepted".to_string(),
+                    summary: "accepted".to_string(),
+                    status: EvomapSemanticTaskStatus::Accepted,
+                    created_by: "elig-agent".to_string(),
+                    claimed_by: None,
+                    created_at_ms: 3,
+                    updated_at_ms: 3,
+                    last_submission_id: None,
+                },
+            );
+        }
+        let router = build_router(state);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/eligible-count")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // At least open + released (2), accepted does NOT count
+        let count = json["data"]["eligible_count"].as_u64().expect("count");
+        assert!(
+            count >= 2,
+            "eligible count must include open + released, got {count}"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_eligible_count_zero_when_no_tasks() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/task/eligible-count")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["eligible_count"], 0);
+    }
+
+    // ── /a2a/task/release tests (issue #329) ─────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_release_transitions_to_released_status() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let _ = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "release-task-1",
+                            "sender_id": "release-agent",
+                            "title": "To be released"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let release_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/release")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "release-task-1",
+                    "sender_id": "release-agent",
+                    "reason": "no longer needed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.clone().oneshot(release_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["task"]["status"], "released");
+        assert_eq!(json["data"]["reason"], "no longer needed");
+
+        // Verify eligible count increases after release
+        let count_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/eligible-count")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let count_body = axum::body::to_bytes(count_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let count_json: serde_json::Value = serde_json::from_slice(&count_body).unwrap();
+        assert!(count_json["data"]["eligible_count"].as_u64().unwrap() >= 1);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_release_returns_404_for_unknown_task() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/task/release")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "task_id": "no-such-task-release",
+                    "sender_id": "release-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── /a2a/ask tests (issue #329) ──────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_ask_creates_queued_question() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/ask")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "ask-agent",
+                    "question": "What is the expected output format?",
+                    "details": "Need format clarification for the downstream consumer"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["data"]["status"], "queued");
+        assert!(json["data"]["question_id"].is_string());
+        let task = &json["data"]["task"];
+        assert_eq!(task["status"], "open");
+        assert_eq!(task["created_by"], "ask-agent");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_ask_question_appears_in_task_list() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let ask_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/ask")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "ask-list-agent",
+                            "question": "How should errors be handled?"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ask_body = axum::body::to_bytes(ask_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let ask_json: serde_json::Value = serde_json::from_slice(&ask_body).unwrap();
+        let created_task_id = ask_json["data"]["task"]["task_id"]
+            .as_str()
+            .expect("task_id")
+            .to_string();
+
+        // Verify the question task appears in the /a2a/task/my list
+        let my_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/my?sender_id=ask-list-agent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let my_body = axum::body::to_bytes(my_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let my_json: serde_json::Value = serde_json::from_slice(&my_body).unwrap();
+        let task_ids: Vec<&str> = my_json["data"]["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .filter_map(|t| t["task_id"].as_str())
+            .collect();
+        assert!(
+            task_ids.contains(&created_task_id.as_str()),
+            "ask task must appear in my tasks list"
+        );
+    }
+
+    // ── Full lifecycle (submit → list → detail → eligible → release) ─────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_task_full_lifecycle_submit_detail_release_eligible() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        // submit
+        let submit_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/submit")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "lifecycle-full-1",
+                            "sender_id": "lifecycle-agent",
+                            "title": "Full lifecycle task"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(submit_resp.status(), StatusCode::OK);
+
+        // detail
+        let detail_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/lifecycle-full-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = axum::body::to_bytes(detail_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail_json: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+        assert_eq!(detail_json["data"]["task"]["status"], "open");
+
+        // eligible count = 1
+        let count_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/eligible-count")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let count_body = axum::body::to_bytes(count_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let count_json: serde_json::Value = serde_json::from_slice(&count_body).unwrap();
+        let count_before = count_json["data"]["eligible_count"].as_u64().unwrap();
+        assert!(count_before >= 1);
+
+        // release
+        let release_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/task/release")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "task_id": "lifecycle-full-1",
+                            "sender_id": "lifecycle-agent"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(release_resp.status(), StatusCode::OK);
+        let release_body = axum::body::to_bytes(release_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let release_json: serde_json::Value = serde_json::from_slice(&release_body).unwrap();
+        assert_eq!(release_json["data"]["task"]["status"], "released");
+
+        // eligible count still >= 1 (released still counts)
+        let count2_resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/a2a/task/eligible-count")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let count2_body = axum::body::to_bytes(count2_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let count2_json: serde_json::Value = serde_json::from_slice(&count2_body).unwrap();
+        assert!(count2_json["data"]["eligible_count"].as_u64().unwrap() >= 1);
+    }
+
+    // ── /a2a/assets/* tests (issue #330) ──────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_empty_sender_id_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_requires_handshake() {
+        // No prior handshake — expect 403 Forbidden
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=unauthenticated-discovery-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_returns_results_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-search-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=asset-search-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "search");
+        assert!(j["data"]["results"].is_array());
+        assert!(j["data"]["total"].is_number());
+        assert!(j["data"]["limit"].is_number());
+        assert!(j["data"]["offset"].is_number());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_mode_field_is_search() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-search-mode-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/search?sender_id=asset-search-mode-agent&q=rust")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            j["data"]["mode"], "search",
+            "mode must be 'search' for the search endpoint"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_ranked_returns_ranked_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-ranked-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=asset-ranked-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "ranked");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_explore_returns_explore_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-explore-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/explore?sender_id=asset-explore-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "explore");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_recommended_returns_recommended_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-recommended-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/recommended?sender_id=asset-recommended-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "recommended");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_trending_returns_trending_mode() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-trending-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/trending?sender_id=asset-trending-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "trending");
+        assert!(j["data"]["results"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_categories_returns_categories_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-categories-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/categories?sender_id=asset-categories-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["mode"], "categories");
+        assert!(j["data"]["categories"].is_array());
+        assert!(j["data"]["total_categories"].is_number());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_pagination_limit_respected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-pagination-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/ranked?sender_id=asset-pagination-agent&limit=1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let results = j["data"]["results"].as_array().unwrap();
+        assert!(
+            results.len() <= 1,
+            "limit=1 must return at most one result, got {}",
+            results.len()
+        );
+        assert_eq!(j["data"]["limit"], 1);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_ranked_deterministic_for_same_inputs() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-determinism-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        let make_req = || {
+            Request::builder()
+                .method(Method::GET)
+                .uri("/a2a/assets/ranked?sender_id=asset-determinism-agent")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let r2 = router.clone().oneshot(make_req()).await.unwrap();
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j1["data"]["results"], j2["data"]["results"],
+            "ranked asset discovery must be deterministic for the same inputs"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_assets_search_idempotent_flag_is_true() {
+        // All discovery modes must advertise idempotent = true
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let handshake = handshake_agent_with_caps_and_protocols(
+            &router,
+            "/a2a/hello",
+            "asset-idempotent-agent",
+            "A4",
+            &["EvolutionFetch"],
+            &[crate::agent_contract::A2A_PROTOCOL_VERSION_V1],
+        )
+        .await;
+        assert_eq!(handshake["data"]["accepted"], true);
+
+        for endpoint in &[
+            "/a2a/assets/search?sender_id=asset-idempotent-agent",
+            "/a2a/assets/ranked?sender_id=asset-idempotent-agent",
+            "/a2a/assets/explore?sender_id=asset-idempotent-agent",
+            "/a2a/assets/recommended?sender_id=asset-idempotent-agent",
+            "/a2a/assets/trending?sender_id=asset-idempotent-agent",
+            "/a2a/assets/categories?sender_id=asset-idempotent-agent",
+        ] {
+            let req = Request::builder()
+                .method(Method::GET)
+                .uri(*endpoint)
+                .body(Body::empty())
+                .unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "endpoint {endpoint} must return 200"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                j["data"]["idempotent"], true,
+                "endpoint {endpoint} must advertise idempotent=true"
+            );
+        }
+    }
+
+    // ── /a2a/assets/:id (detail + governance) tests (issue #331) ─────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_requires_sender_id() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_unknown_asset_returns_404() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/completely-unknown-asset-id-xyz?sender_id=detail-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_returns_full_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1?sender_id=detail-shape-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            j["data"]["asset"]["asset_id"].is_string(),
+            "asset.asset_id must be present"
+        );
+        assert!(
+            j["data"]["governance"]["verification"]["total"].is_number(),
+            "governance.verification.total must be present"
+        );
+        assert!(
+            j["data"]["governance"]["votes"]["total"].is_number(),
+            "governance.votes.total must be present"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_verify_records_verification() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-verify-agent",
+                    "status": "verified",
+                    "note": "looks good"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["verification"]["status"], "verified");
+        assert_eq!(j["data"]["summary"]["total"], 1);
+        assert_eq!(j["data"]["summary"]["verified"], 1);
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_verify_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let body = serde_json::json!({
+            "sender_id": "detail-verify-idem-agent",
+            "status": "verified",
+            "note": "stable"
+        })
+        .to_string();
+        let make_req = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        // First call — not idempotent
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        assert_eq!(j1["data"]["idempotent"], false);
+        // Second identical call — must be idempotent
+        let r2 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j2["data"]["idempotent"], true,
+            "repeated identical verify must be idempotent"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_verify_rejects_invalid_status() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-verify-invalid-agent",
+                    "status": "maybe"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["code"], "invalid_argument");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_vote_records_vote() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-vote-agent",
+                    "vote": "up",
+                    "reason": "solid implementation"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["vote"]["vote"], "up");
+        assert_eq!(j["data"]["summary"]["up"], 1);
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_vote_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let body = serde_json::json!({
+            "sender_id": "detail-vote-idem-agent",
+            "vote": "down",
+            "reason": "needs more work"
+        })
+        .to_string();
+        let make_req = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap()
+        };
+        let r1 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        assert_eq!(j1["data"]["idempotent"], false);
+
+        let r2 = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(
+            j2["data"]["idempotent"], true,
+            "repeated identical vote must be idempotent"
+        );
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_vote_rejects_invalid_vote_value() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "detail-vote-invalid-agent",
+                    "vote": "maybe"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["code"], "invalid_argument");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_audit_trail_reflects_governance_events() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // Perform a verify + vote so audit trail has >= 2 events
+        let verify_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "audit-trail-agent",
+                    "status": "verified"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(verify_req).await.unwrap();
+
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "audit-trail-agent",
+                    "vote": "up"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(vote_req).await.unwrap();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/audit-trail?sender_id=audit-trail-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            j["data"]["total"].as_u64().unwrap_or(0) >= 2,
+            "audit trail must contain at least the verify and vote events"
+        );
+        assert!(j["data"]["trail"].is_array());
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_reviews_returns_reviews_shape() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // Add a verify and a vote so reviews is non-empty
+        let verify_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "reviews-shape-agent",
+                    "status": "verified",
+                    "note": "solid"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(verify_req).await.unwrap();
+
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "reviews-shape-agent",
+                    "vote": "up"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(vote_req).await.unwrap();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/reviews?sender_id=reviews-shape-agent")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(j["data"]["reviews"].is_array());
+        assert!(
+            j["data"]["total"].as_u64().unwrap_or(0) >= 2,
+            "reviews must contain verification and vote entries"
+        );
+        // Spot-check first review has expected fields
+        if let Some(first) = j["data"]["reviews"].as_array().and_then(|arr| arr.first()) {
+            assert!(first["review_id"].is_string());
+            assert!(first["reviewer_id"].is_string());
+            assert!(first["type"].is_string());
+        }
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_governance_worker_role_rejected_on_verify() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "governance-worker-key",
+                "governance-worker-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/verify")
+            .header("x-api-key-id", "governance-worker-key")
+            .header("x-api-key", "governance-worker-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "governance-worker-agent",
+                    "status": "verified"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_asset_detail_governance_worker_role_rejected_on_vote() {
+        let router = build_router(
+            ExecutionApiState::new(build_test_graph().await).with_static_api_key_record_with_role(
+                "vote-worker-key",
+                "vote-worker-secret",
+                true,
+                ApiRole::Worker,
+            ),
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/assets/builtin-experience-ci-fix-v1/vote")
+            .header("x-api-key-id", "vote-worker-key")
+            .header("x-api-key", "vote-worker-secret")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "vote-worker-agent",
+                    "vote": "up"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ─── Council Session ────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_open_returns_ok() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "open",
+                    "session_id": "c-sess-t001",
+                    "quorum": 1,
+                    "min_yes": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["action"], "open");
+        assert_eq!(j["data"]["session"]["session_id"], "c-sess-t001");
+        assert_eq!(j["data"]["session"]["status"], "open");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_open_idempotent_same_settings() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let payload = serde_json::json!({
+            "sender_id": "council-agent",
+            "action": "open",
+            "session_id": "c-sess-t002",
+            "quorum": 2,
+            "min_yes": 1
+        })
+        .to_string();
+        let req1 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.clone()))
+            .unwrap();
+        router.clone().oneshot(req1).await.unwrap();
+        let req2 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(payload))
+            .unwrap();
+        let resp = router.oneshot(req2).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["session"]["session_id"], "c-sess-t002");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_invalid_action_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "restart"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_session_close_returns_ok() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let open_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "open",
+                    "session_id": "c-sess-t004",
+                    "quorum": 1,
+                    "min_yes": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(open_req).await.unwrap();
+        let close_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "council-agent",
+                    "action": "close",
+                    "session_id": "c-sess-t004"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(close_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["action"], "close");
+        assert_eq!(j["data"]["session"]["status"], "closed");
+    }
+
+    // ─── Council Propose ────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_propose_missing_title_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "proposer-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_propose_records_proposal() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "proposer-agent",
+                    "title": "Adopt unified deployment policy",
+                    "proposal_id": "c-prop-t006"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["proposal"]["proposal_id"], "c-prop-t006");
+        assert_eq!(j["data"]["proposal"]["status"], "proposed");
+        assert_eq!(j["data"]["proposal"]["proposer_id"], "proposer-agent");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_propose_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let open_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/session")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "proposer-agent",
+                    "action": "open",
+                    "session_id": "c-sess-t007",
+                    "quorum": 1,
+                    "min_yes": 1
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(open_req).await.unwrap();
+        let payload = serde_json::json!({
+            "sender_id": "proposer-agent",
+            "title": "Idempotent proposal",
+            "proposal_id": "c-prop-t007",
+            "session_id": "c-sess-t007"
+        })
+        .to_string();
+        let req1 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.clone()))
+            .unwrap();
+        router.clone().oneshot(req1).await.unwrap();
+        let req2 = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/propose")
+            .header("content-type", "application/json")
+            .body(Body::from(payload))
+            .unwrap();
+        let resp = router.oneshot(req2).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["proposal"]["proposal_id"], "c-prop-t007");
+    }
+
+    // ─── Council Vote ───────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_vote_records_vote() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t008",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Vote-test proposal",
+                            "proposal_id": "c-prop-t008",
+                            "session_id": "c-sess-t008"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let vote_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "voter-agent",
+                    "proposal_id": "c-prop-t008",
+                    "vote": "yes"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(vote_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["vote"], "yes");
+        assert_eq!(j["data"]["proposal"]["votes"]["yes"], 1);
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_vote_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t009",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Idempotent-vote proposal",
+                            "proposal_id": "c-prop-t009",
+                            "session_id": "c-sess-t009"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let vote_payload = serde_json::json!({
+            "sender_id": "voter-agent",
+            "proposal_id": "c-prop-t009",
+            "vote": "yes"
+        })
+        .to_string();
+        let make_vote = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/council/vote")
+                .header("content-type", "application/json")
+                .body(Body::from(vote_payload.clone()))
+                .unwrap()
+        };
+        router.clone().oneshot(make_vote()).await.unwrap();
+        let resp = router.oneshot(make_vote()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["proposal"]["votes"]["yes"], 1);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_vote_conflict_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t010",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Conflict-vote proposal",
+                            "proposal_id": "c-prop-t010",
+                            "session_id": "c-sess-t010"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/vote")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "voter-agent",
+                            "proposal_id": "c-prop-t010",
+                            "vote": "yes"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let conflict_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/vote")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "voter-agent",
+                    "proposal_id": "c-prop-t010",
+                    "vote": "no"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(conflict_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["details"]["reason"], "vote_conflict");
+    }
+
+    // ─── Council Execute ────────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_execute_insufficient_quorum_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        // session with quorum=2 so zero votes will not reach quorum
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t011",
+                            "quorum": 2,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Quorum-test proposal",
+                            "proposal_id": "c-prop-t011",
+                            "session_id": "c-sess-t011"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exec_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "exec-agent",
+                    "proposal_id": "c-prop-t011"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(exec_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["error"]["details"]["reason"], "insufficient_quorum");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_execute_approved_proposal_succeeds() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t012",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Approved proposal",
+                            "proposal_id": "c-prop-t012",
+                            "session_id": "c-sess-t012"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/vote")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "proposal_id": "c-prop-t012",
+                            "vote": "yes"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exec_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/council/execute")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "exec-agent",
+                    "proposal_id": "c-prop-t012"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(exec_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["proposal"]["status"], "executed");
+        assert_eq!(j["data"]["executed_by"], "exec-agent");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_council_execute_idempotent_on_repeat() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "action": "open",
+                            "session_id": "c-sess-t013",
+                            "quorum": 1,
+                            "min_yes": 1
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/propose")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "proposer-agent",
+                            "title": "Idempotent-execute proposal",
+                            "proposal_id": "c-prop-t013",
+                            "session_id": "c-sess-t013"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/council/vote")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "exec-agent",
+                            "proposal_id": "c-prop-t013",
+                            "vote": "yes"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exec_payload = serde_json::json!({
+            "sender_id": "exec-agent",
+            "proposal_id": "c-prop-t013"
+        })
+        .to_string();
+        let make_exec = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/a2a/council/execute")
+                .header("content-type", "application/json")
+                .body(Body::from(exec_payload.clone()))
+                .unwrap()
+        };
+        router.clone().oneshot(make_exec()).await.unwrap();
+        let resp = router.oneshot(make_exec()).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["idempotent"], true);
+        assert_eq!(j["data"]["proposal"]["status"], "executed");
+    }
+
+    // ─── Project Workflow ───────────────────────────────────────────────────────
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_create_returns_project() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/create")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "creator-agent",
+                    "title": "Build unified deployment pipeline",
+                    "project_id": "proj-t001"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["project"]["project_id"], "proj-t001");
+        assert_eq!(j["data"]["project"]["status"], "proposed");
+        assert_eq!(j["data"]["project"]["lifecycle_state"], "active");
+        assert_eq!(j["data"]["project"]["proposed_by"], "creator-agent");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_create_missing_title_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/create")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "creator-agent"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_get_returns_project() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let create_req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/create")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "creator-agent",
+                    "title": "Get-test project",
+                    "project_id": "proj-t003"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        router.clone().oneshot(create_req).await.unwrap();
+        let get_req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/project/proj-t003")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(get_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["project"]["project_id"], "proj-t003");
+        assert_eq!(j["data"]["project"]["title"], "Get-test project");
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_get_unknown_returns_404() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/project/proj-does-not-exist")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_state_active() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "owner-agent",
+                            "title": "State-active project",
+                            "project_id": "proj-t005a"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/proj-t005a/state")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "owner-agent",
+                    "state": "active"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["lifecycle_state"], "active");
+        assert_eq!(j["data"]["project"]["lifecycle_state"], "active");
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_state_paused() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "owner-agent",
+                            "title": "State-paused project",
+                            "project_id": "proj-t005b"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/proj-t005b/state")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "owner-agent",
+                    "state": "paused"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["lifecycle_state"], "paused");
+        assert_eq!(j["data"]["project"]["lifecycle_state"], "paused");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_state_completed() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "owner-agent",
+                            "title": "State-completed project",
+                            "project_id": "proj-t005c"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/proj-t005c/state")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "owner-agent",
+                    "state": "completed"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["lifecycle_state"], "completed");
+        assert_eq!(j["data"]["project"]["lifecycle_state"], "completed");
+        assert_eq!(j["data"]["idempotent"], false);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_state_invalid_rejected() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "owner-agent",
+                            "title": "State-invalid project",
+                            "project_id": "proj-t005d"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/a2a/project/proj-t005d/state")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "sender_id": "owner-agent",
+                    "state": "running"
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_list_get_returns_list() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "list-owner",
+                            "title": "List-test project A",
+                            "project_id": "proj-t006a"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "list-owner",
+                            "title": "List-test project B",
+                            "project_id": "proj-t006b"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/project/list")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            j["data"]["total"].as_u64().unwrap_or(0) >= 2,
+            "list must return at least the 2 created projects"
+        );
+        assert!(j["data"]["projects"].is_array());
+        assert_eq!(j["data"]["idempotent"], true);
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_list_get_status_filter() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "filter-owner",
+                            "title": "Filter-test proposed project",
+                            "project_id": "proj-t007"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/project/list?status=proposed")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(j["data"]["total"].as_u64().unwrap_or(0) >= 1);
+        let projects = j["data"]["projects"].as_array().unwrap();
+        assert!(projects
+            .iter()
+            .all(|p| p["status"].as_str() == Some("proposed")));
+    }
+
+    #[cfg(all(
+        feature = "agent-contract-experimental",
+        feature = "evolution-network-experimental"
+    ))]
+    #[tokio::test]
+    async fn a2a_project_id_suggestions_returns_suggestions() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/a2a/project/create")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "sender_id": "suggest-owner",
+                            "title": "Suggestions-test project",
+                            "project_id": "proj-t008"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/a2a/project/proj-t008/suggestions?sender_id=suggest-owner")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(j["data"]["project_id"], "proj-t008");
+        assert_eq!(j["data"]["count"], 1);
+        assert!(j["data"]["suggestions"].is_array());
+        let suggestion = &j["data"]["suggestions"][0];
+        assert_eq!(suggestion["project"]["project_id"], "proj-t008");
+        assert!(suggestion["reason"].as_str().is_some());
+    }
 }
 
 // ===================================================================
@@ -23463,6 +27894,55 @@ struct EvomapProjectSuggestionsQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectCreateRequest {
+    sender_id: Option<String>,
+    project_id: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    tags: Option<Vec<String>>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectStateRequest {
+    sender_id: Option<String>,
+    state: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectGetListQuery {
+    sender_id: Option<String>,
+    status: Option<String>,
+    owner_id: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapProjectIdSuggestionsQuery {
+    sender_id: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
 struct EvomapServicePublishRequest {
     sender_id: Option<String>,
     service_id: Option<String>,
@@ -23530,6 +28010,78 @@ struct EvomapDisputeRuleRequest {
     penalty_pct: Option<u8>,
     note: Option<String>,
     idempotency_key: Option<String>,
+}
+
+// ── New request types for economic lifecycle endpoints ─────────────────────
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapServiceRegisterRequest {
+    sender_id: Option<String>,
+    service_id: Option<String>,
+    title: Option<String>,
+    summary: Option<String>,
+    category: Option<String>,
+    tags: Option<Vec<String>>,
+    price: Option<f64>,
+    currency: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapServiceListQuery {
+    sender_id: Option<String>,
+    category: Option<String>,
+    status: Option<String>,
+    owner_id: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    sort: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapBidSubmitRequest {
+    sender_id: Option<String>,
+    bid_id: Option<String>,
+    service_id: Option<String>,
+    amount: Option<f64>,
+    currency: Option<String>,
+    note: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapBidEvaluateRequest {
+    sender_id: Option<String>,
+    service_id: Option<String>,
+    strategy: Option<String>,
+    idempotency_key: Option<String>,
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct EvomapDisputeRuleGetQuery {
+    sender_id: Option<String>,
+    dispute_id: Option<String>,
 }
 
 #[cfg(all(
@@ -25145,7 +29697,8 @@ fn evomap_project_json(project: &EvomapProjectRecord) -> Value {
         "merged_by": project.merged_by,
         "created_at_ms": project.created_at_ms,
         "updated_at_ms": project.updated_at_ms,
-        "merged_at_ms": project.merged_at_ms
+        "merged_at_ms": project.merged_at_ms,
+        "lifecycle_state": project.lifecycle_state
     })
 }
 
@@ -25284,6 +29837,7 @@ pub async fn evomap_project_propose(
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
                 merged_at_ms: None,
+                lifecycle_state: Some("active".to_string()),
             };
             projects.insert(project_id, project.clone());
             project
@@ -25909,6 +30463,389 @@ pub async fn evomap_project_suggestions(
             "count": count,
             "limit": limit,
             "offset": offset,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_create(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectCreateRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/project/create",
+    )?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("title is required for /a2a/project/create")
+                .with_request_id(rid.clone())
+        })?
+        .to_string();
+    let summary = req
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let project_id = req
+        .project_id
+        .as_deref()
+        .map(|v| evomap_normalize_project_id(v, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("project-{}", uuid::Uuid::new_v4()));
+    let mut tags = req.tags.unwrap_or_default();
+    tags = tags
+        .into_iter()
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|k| format!("project.create:{k}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_project_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let project = {
+        let mut projects = state.evomap_projects.write().await;
+        if let Some(existing) = projects.get(&project_id).cloned() {
+            if existing.proposed_by == sender_id
+                && existing.title == title
+                && existing.summary == summary
+                && existing.tags == tags
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "project_id already exists with different payload: {project_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let project = EvomapProjectRecord {
+                project_id: project_id.clone(),
+                title,
+                summary,
+                tags,
+                status: EvomapProjectStatus::Proposed,
+                proposed_by: sender_id.clone(),
+                claimed_by: None,
+                progress_pct: 0,
+                progress_note: None,
+                review_verdict: None,
+                review_note: None,
+                reviewed_by: None,
+                merged_by: None,
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                merged_at_ms: None,
+                lifecycle_state: Some("active".to_string()),
+            };
+            projects.insert(project_id, project.clone());
+            project
+        }
+    };
+
+    let data = serde_json::json!({
+        "project": evomap_project_json(&project),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_project_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let project_id = evomap_normalize_project_id(&project_id, &rid)?;
+    let projects = state.evomap_projects.read().await;
+    let project = projects.get(project_id.as_str()).ok_or_else(|| {
+        ApiError::not_found(format!("project not found: {project_id}")).with_request_id(rid.clone())
+    })?;
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "project": evomap_project_json(project)
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_state(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let project_id = evomap_normalize_project_id(&project_id, &rid)?;
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapProjectStateRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/project/:id/state",
+    )?;
+    let new_state = req
+        .state
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("state is required for /a2a/project/:id/state")
+                .with_request_id(rid.clone())
+        })?
+        .to_ascii_lowercase();
+    if !matches!(new_state.as_str(), "active" | "paused" | "completed") {
+        return Err(
+            ApiError::bad_request("state must be one of: active|paused|completed")
+                .with_request_id(rid),
+        );
+    }
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|k| format!("project.state:{project_id}:{k}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_project_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let mut idempotent = false;
+    let project = {
+        let mut projects = state.evomap_projects.write().await;
+        let project = projects.get_mut(project_id.as_str()).ok_or_else(|| {
+            ApiError::not_found(format!("project not found: {project_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        let is_owner = project.proposed_by == sender_id
+            || project.claimed_by.as_deref() == Some(sender_id.as_str());
+        if !is_owner {
+            return Err(ApiError::forbidden(
+                "only proposer or claimer can transition project lifecycle",
+            )
+            .with_request_id(rid)
+            .with_details(serde_json::json!({
+                "project_id": project_id,
+                "reason": "not_project_owner"
+            })));
+        }
+        if project.lifecycle_state.as_deref() == Some(new_state.as_str()) {
+            idempotent = true;
+        } else {
+            project.lifecycle_state = Some(new_state.clone());
+            project.updated_at_ms = Utc::now().timestamp_millis();
+        }
+        project.clone()
+    };
+
+    let data = serde_json::json!({
+        "project": evomap_project_json(&project),
+        "lifecycle_state": new_state,
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_project_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_list_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapProjectGetListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    if let Some(sender_id) = q.sender_id.as_deref() {
+        validate_sender_id(sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
+    }
+    let status_filter = q
+        .status
+        .as_deref()
+        .map(|raw| {
+            EvomapProjectStatus::from_str(raw).ok_or_else(|| {
+                ApiError::bad_request("status must be a valid project status")
+                    .with_request_id(rid.clone())
+            })
+        })
+        .transpose()?;
+    let owner_id = q
+        .owner_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let query_str = q
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_lowercase());
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let sort = q
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("created_asc")
+        .to_ascii_lowercase();
+
+    let projects = state.evomap_projects.read().await;
+    let mut values = projects.values().cloned().collect::<Vec<_>>();
+    if let Some(status) = status_filter {
+        values.retain(|p| p.status == status);
+    }
+    if let Some(owner_id) = owner_id.as_deref() {
+        values.retain(|p| p.proposed_by == owner_id || p.claimed_by.as_deref() == Some(owner_id));
+    }
+    if let Some(query) = query_str.as_deref() {
+        values.retain(|p| {
+            p.project_id.to_ascii_lowercase().contains(query)
+                || p.title.to_ascii_lowercase().contains(query)
+                || p.summary
+                    .as_deref()
+                    .map(|s| s.to_ascii_lowercase().contains(query))
+                    .unwrap_or(false)
+                || p.tags
+                    .iter()
+                    .any(|t| t.to_ascii_lowercase().contains(query))
+        });
+    }
+    match sort.as_str() {
+        "created_desc" => values.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| a.project_id.cmp(&b.project_id))
+        }),
+        "updated_desc" => values.sort_by(|a, b| {
+            b.updated_at_ms
+                .cmp(&a.updated_at_ms)
+                .then_with(|| a.project_id.cmp(&b.project_id))
+        }),
+        "updated_asc" => values.sort_by(|a, b| {
+            a.updated_at_ms
+                .cmp(&b.updated_at_ms)
+                .then_with(|| a.project_id.cmp(&b.project_id))
+        }),
+        _ => values.sort_by(|a, b| {
+            a.created_at_ms
+                .cmp(&b.created_at_ms)
+                .then_with(|| a.project_id.cmp(&b.project_id))
+        }),
+    }
+    let total = values.len();
+    let projects = values
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(|p| evomap_project_json(&p))
+        .collect::<Vec<_>>();
+    let count = projects.len();
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "projects": projects,
+            "total": total,
+            "count": count,
+            "limit": limit,
+            "offset": offset,
+            "sort": sort,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_project_id_suggestions(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(project_id): Path<String>,
+    Query(q): Query<EvomapProjectIdSuggestionsQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let project_id = evomap_normalize_project_id(&project_id, &rid)?;
+    let sender_id = evomap_required_sender(q.sender_id, &rid, "/a2a/project/:id/suggestions")?;
+    let projects = state.evomap_projects.read().await;
+    let project = projects.get(project_id.as_str()).ok_or_else(|| {
+        ApiError::not_found(format!("project not found: {project_id}")).with_request_id(rid.clone())
+    })?;
+    let reason = evomap_project_suggestion_reason(&project.status);
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "project_id": project_id,
+            "sender_id": sender_id,
+            "suggestions": [{
+                "project": evomap_project_json(project),
+                "reason": reason
+            }],
+            "count": 1,
             "idempotent": true
         }),
     ))
@@ -28145,6 +33082,600 @@ pub async fn evomap_dispute_rule(
             .insert(key, data.clone());
     }
     Ok(evomap_value_response(rid, data))
+}
+
+// ── Economic lifecycle: new endpoints (issue #334) ─────────────────────────
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_service_register(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapServiceRegisterRequest =
+        serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/service/register",
+    )?;
+    let title = req
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request("title is required for /a2a/service/register")
+                .with_request_id(rid.clone())
+        })?
+        .to_string();
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|v| evomap_normalize_service_id(v, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("service-{}", uuid::Uuid::new_v4()));
+    let summary = req
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let category = req
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_lowercase())
+        .unwrap_or_else(|| "general".to_string());
+    let price = req.price.unwrap_or(0.0);
+    if !price.is_finite() || price < 0.0 {
+        return Err(
+            ApiError::bad_request("price must be a finite number >= 0").with_request_id(rid)
+        );
+    }
+    let currency = req
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_uppercase())
+        .unwrap_or_else(|| "USD".to_string());
+    let mut tags = req.tags.unwrap_or_default();
+    tags = tags
+        .into_iter()
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+    tags.sort();
+    tags.dedup();
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|k| format!("market.service.register:{k}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            let mut cached = cached;
+            if let Some(obj) = cached.as_object_mut() {
+                obj.insert("idempotent".to_string(), Value::Bool(true));
+            }
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let service = {
+        let mut services = state.evomap_services.write().await;
+        if let Some(existing) = services.get(&service_id).cloned() {
+            let same_price = (existing.price - price).abs() < f64::EPSILON;
+            if existing.published_by == sender_id
+                && existing.title == title
+                && existing.summary == summary
+                && existing.category == category
+                && existing.tags == tags
+                && existing.currency == currency
+                && same_price
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "service_id already exists with different payload: {service_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let svc = EvomapServiceRecord {
+                service_id: service_id.clone(),
+                title,
+                summary,
+                category,
+                tags,
+                status: "open".to_string(),
+                price,
+                currency,
+                published_by: sender_id.clone(),
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+            };
+            services.insert(service_id.clone(), svc.clone());
+            svc
+        }
+    };
+
+    let data = serde_json::json!({
+        "service": evomap_service_json(&service),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_service_list(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapServiceListQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let status_filter = q.status.as_deref().map(|s| s.to_ascii_lowercase());
+    let category_filter = q.category.as_deref().map(|s| s.to_ascii_lowercase());
+    let owner_filter = q.owner_id.as_deref();
+    let query_tokens: Vec<String> = q
+        .query
+        .as_deref()
+        .map(|raw| {
+            raw.split_whitespace()
+                .map(|t| t.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let services = state.evomap_services.read().await;
+    let mut matched: Vec<&EvomapServiceRecord> = services
+        .values()
+        .filter(|svc| {
+            if let Some(st) = &status_filter {
+                if &svc.status != st {
+                    return false;
+                }
+            }
+            if let Some(cat) = &category_filter {
+                if &svc.category != cat {
+                    return false;
+                }
+            }
+            if let Some(owner) = owner_filter {
+                if svc.published_by != owner {
+                    return false;
+                }
+            }
+            if !query_tokens.is_empty() {
+                let haystack = format!(
+                    "{} {} {}",
+                    svc.title.to_ascii_lowercase(),
+                    svc.summary.as_deref().unwrap_or("").to_ascii_lowercase(),
+                    svc.category
+                );
+                if !query_tokens
+                    .iter()
+                    .any(|tok| haystack.contains(tok.as_str()))
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let sort = q.sort.as_deref().unwrap_or("created_desc");
+    match sort {
+        "price_asc" => matched.sort_by(|a, b| {
+            a.price
+                .partial_cmp(&b.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        "price_desc" => matched.sort_by(|a, b| {
+            b.price
+                .partial_cmp(&a.price)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+        "created_asc" => matched.sort_by_key(|s| s.created_at_ms),
+        _ => matched.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms)),
+    }
+
+    let total = matched.len();
+    let page: Vec<Value> = matched
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .map(evomap_service_json)
+        .collect();
+
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "services": page,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "idempotent": true
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_service_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(service_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let service_id = evomap_normalize_service_id(&service_id, &rid)?;
+    let services = state.evomap_services.read().await;
+    let service = services.get(&service_id).ok_or_else(|| {
+        ApiError::not_found(format!("service not found: {service_id}")).with_request_id(rid.clone())
+    })?;
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({ "service": evomap_service_json(service) }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_submit(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapBidSubmitRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/bid/submit",
+    )?;
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|v| evomap_normalize_service_id(v, &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("service_id is required for /a2a/bid/submit")
+                .with_request_id(rid.clone())
+        })?;
+    {
+        let services = state.evomap_services.read().await;
+        if !services.contains_key(&service_id) {
+            return Err(
+                ApiError::not_found(format!("service not found: {service_id}"))
+                    .with_request_id(rid),
+            );
+        }
+    }
+    let amount = req.amount.ok_or_else(|| {
+        ApiError::bad_request("amount is required for /a2a/bid/submit").with_request_id(rid.clone())
+    })?;
+    if !amount.is_finite() || amount < 0.0 {
+        return Err(
+            ApiError::bad_request("amount must be a finite number >= 0").with_request_id(rid)
+        );
+    }
+    let currency = req
+        .currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_ascii_uppercase())
+        .unwrap_or_else(|| "USD".to_string());
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string());
+    let bid_id = req
+        .bid_id
+        .as_deref()
+        .map(|v| evomap_normalize_bid_id(v, &rid))
+        .transpose()?
+        .unwrap_or_else(|| format!("bid-{}", uuid::Uuid::new_v4()));
+
+    let idempotency_key = req
+        .idempotency_key
+        .or_else(|| idempotency_key_from_headers_or_payload(&headers, &payload))
+        .map(|k| format!("market.bid.submit:{k}"));
+    if let Some(key) = idempotency_key.as_ref() {
+        if let Some(cached) = state
+            .evomap_market_idempotency
+            .read()
+            .await
+            .get(key)
+            .cloned()
+        {
+            let mut cached = cached;
+            if let Some(obj) = cached.as_object_mut() {
+                obj.insert("idempotent".to_string(), Value::Bool(true));
+            }
+            return Ok(evomap_value_response(rid, cached));
+        }
+    }
+
+    let now_ms = Utc::now().timestamp_millis();
+    let mut idempotent = false;
+    let bid = {
+        let mut bids = state.evomap_bids.write().await;
+        if let Some(existing) = bids.get(&bid_id).cloned() {
+            let same_amount = (existing.amount - amount).abs() < f64::EPSILON;
+            if existing.bidder_id == sender_id
+                && existing.service_id == service_id
+                && same_amount
+                && existing.currency == currency
+                && existing.note == note
+            {
+                idempotent = true;
+                existing
+            } else {
+                return Err(ApiError::conflict(format!(
+                    "bid_id already exists with different payload: {bid_id}"
+                ))
+                .with_request_id(rid));
+            }
+        } else {
+            let b = EvomapBidRecord {
+                bid_id: bid_id.clone(),
+                service_id,
+                bidder_id: sender_id.clone(),
+                amount,
+                currency,
+                note,
+                status: EvomapBidStatus::Open,
+                accepted_by: None,
+                rejected_reason: None,
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                accepted_at_ms: None,
+            };
+            bids.insert(bid_id.clone(), b.clone());
+            b
+        }
+    };
+
+    let data = serde_json::json!({
+        "bid": evomap_bid_json(&bid),
+        "idempotent": idempotent
+    });
+    if let Some(key) = idempotency_key {
+        state
+            .evomap_market_idempotency
+            .write()
+            .await
+            .insert(key, data.clone());
+    }
+    Ok(evomap_value_response(rid, data))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Path(bid_id): Path<String>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let bid_id = evomap_normalize_bid_id(&bid_id, &rid)?;
+    let bids = state.evomap_bids.read().await;
+    let bid = bids.get(&bid_id).ok_or_else(|| {
+        ApiError::not_found(format!("bid not found: {bid_id}")).with_request_id(rid.clone())
+    })?;
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({ "bid": evomap_bid_json(bid) }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_bid_evaluate(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Json(raw): Json<Value>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+    let payload = raw.get("payload").cloned().unwrap_or(raw);
+    let req: EvomapBidEvaluateRequest = serde_json::from_value(payload.clone()).unwrap_or_default();
+    let sender_id = evomap_required_sender(
+        req.sender_id.or_else(|| semantic_sender(&payload)),
+        &rid,
+        "/a2a/bid/evaluate",
+    )?;
+    let service_id = req
+        .service_id
+        .as_deref()
+        .map(|v| evomap_normalize_service_id(v, &rid))
+        .transpose()?
+        .ok_or_else(|| {
+            ApiError::bad_request("service_id is required for /a2a/bid/evaluate")
+                .with_request_id(rid.clone())
+        })?;
+
+    let service = {
+        let services = state.evomap_services.read().await;
+        services.get(&service_id).cloned().ok_or_else(|| {
+            ApiError::not_found(format!("service not found: {service_id}"))
+                .with_request_id(rid.clone())
+        })?
+    };
+    if service.published_by != sender_id {
+        return Err(
+            ApiError::forbidden("only service publisher can evaluate bids")
+                .with_request_id(rid)
+                .with_details(serde_json::json!({
+                    "service_id": service_id,
+                    "published_by": service.published_by,
+                    "reason": "service_owner_required"
+                })),
+        );
+    }
+
+    // Deterministic evaluation: strategy defaults to "highest_bid"
+    let strategy = req.strategy.as_deref().unwrap_or("highest_bid");
+    let valid_strategies = ["highest_bid", "lowest_bid"];
+    if !valid_strategies.contains(&strategy) {
+        return Err(ApiError::bad_request(format!(
+            "strategy must be one of: {}",
+            valid_strategies.join("|")
+        ))
+        .with_request_id(rid));
+    }
+
+    let bids = state.evomap_bids.read().await;
+    let mut open_bids: Vec<&EvomapBidRecord> = bids
+        .values()
+        .filter(|b| b.service_id == service_id && b.status == EvomapBidStatus::Open)
+        .collect();
+
+    if open_bids.is_empty() {
+        return Ok(evomap_value_response(
+            rid,
+            serde_json::json!({
+                "service_id": service_id,
+                "strategy": strategy,
+                "winner": null,
+                "candidates": 0,
+                "evaluation": "no_open_bids"
+            }),
+        ));
+    }
+
+    match strategy {
+        "lowest_bid" => open_bids.sort_by(|a, b| {
+            a.amount
+                .partial_cmp(&b.amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.created_at_ms.cmp(&b.created_at_ms))
+        }),
+        _ => open_bids.sort_by(|a, b| {
+            b.amount
+                .partial_cmp(&a.amount)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.created_at_ms.cmp(&b.created_at_ms))
+        }),
+    }
+
+    let winner = open_bids[0];
+    let candidates: Vec<Value> = open_bids.iter().map(|b| evomap_bid_json(b)).collect();
+
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "service_id": service_id,
+            "strategy": strategy,
+            "winner": evomap_bid_json(winner),
+            "candidates": candidates.len(),
+            "bids": candidates,
+            "evaluation": "deterministic",
+            "schema_version": "v1"
+        }),
+    ))
+}
+
+#[cfg(all(
+    feature = "agent-contract-experimental",
+    feature = "evolution-network-experimental"
+))]
+pub async fn evomap_dispute_rule_get(
+    State(state): State<ExecutionApiState>,
+    headers: HeaderMap,
+    Query(q): Query<EvomapDisputeRuleGetQuery>,
+) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
+    let rid = request_id(&headers);
+
+    // If dispute_id provided, return the specific stored rule
+    if let Some(dispute_id_raw) = q.dispute_id.as_deref() {
+        let dispute_id = evomap_normalize_dispute_id(dispute_id_raw, &rid)?;
+        let rules = state.evomap_dispute_rules.read().await;
+        let rule = rules.get(&dispute_id).ok_or_else(|| {
+            ApiError::not_found(format!("dispute rule not found: {dispute_id}"))
+                .with_request_id(rid.clone())
+        })?;
+        return Ok(evomap_value_response(
+            rid,
+            serde_json::json!({
+                "rule": evomap_dispute_rule_json(rule),
+                "total_rules": rules.len()
+            }),
+        ));
+    }
+
+    // Otherwise return the canonical ruleset definition
+    Ok(evomap_value_response(
+        rid,
+        serde_json::json!({
+            "ruleset": {
+                "schema_version": "v1",
+                "decisions": [
+                    {
+                        "decision": "uphold_bid",
+                        "description": "Bid is upheld; payment proceeds as agreed",
+                        "aliases": ["uphold", "accept_bid"]
+                    },
+                    {
+                        "decision": "refund_buyer",
+                        "description": "Full or partial refund issued to the buyer",
+                        "aliases": ["refund"]
+                    },
+                    {
+                        "decision": "split_award",
+                        "description": "Award is split between parties",
+                        "aliases": ["split"]
+                    },
+                    {
+                        "decision": "slash_provider",
+                        "description": "Provider is penalised; penalty_pct deducted",
+                        "aliases": ["slash"]
+                    }
+                ],
+                "penalty_pct_range": [0, 100]
+            },
+            "total_rules": state.evomap_dispute_rules.read().await.len()
+        }),
+    ))
 }
 
 #[cfg(all(

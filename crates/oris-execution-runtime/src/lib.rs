@@ -10,6 +10,7 @@ pub mod api_idempotency;
 pub mod api_models;
 #[cfg(feature = "sqlite-persistence")]
 pub mod backend_config;
+pub mod circuit_breaker;
 #[cfg(feature = "execution-server")]
 pub mod graph_bridge;
 pub mod lease;
@@ -47,19 +48,25 @@ pub use api_models::{
 };
 #[cfg(feature = "sqlite-persistence")]
 pub use backend_config::{RuntimeStorageBackend, RuntimeStorageConfig};
+pub use circuit_breaker::{CircuitBreaker, CircuitState};
 #[cfg(feature = "execution-server")]
 pub use graph_bridge::{
     ExecutionCheckpointView, ExecutionGraphBridge, ExecutionGraphBridgeError,
     ExecutionGraphBridgeErrorKind, ExecutionInvokeView, ExecutionStateView,
 };
-pub use lease::{LeaseConfig, LeaseManager, LeaseTickResult, RepositoryLeaseManager, WorkerLease};
+pub use lease::{
+    LeaseConfig, LeaseManager, LeaseTickResult, RepositoryLeaseManager, WorkerHealth,
+    WorkerHealthTracker, WorkerLease,
+};
 pub use models::{
     AttemptDispatchRecord, AttemptExecutionStatus, InterruptRecord, LeaseRecord, RunRecord,
     RunRuntimeStatus,
 };
 pub use observability::{KernelObservability, RejectionReason};
 #[cfg(feature = "kernel-postgres")]
-pub use postgres_runtime_repository::PostgresRuntimeRepository;
+pub use postgres_runtime_repository::{
+    PostgresIdempotencyRecord, PostgresIdempotencyStore, PostgresRuntimeRepository,
+};
 pub use recovery::{CrashRecoveryPipeline, RecoveryContext, RecoveryStep};
 pub use repository::RuntimeRepository;
 pub use scheduler::{DispatchContext, SchedulerDecision, SkeletonScheduler};

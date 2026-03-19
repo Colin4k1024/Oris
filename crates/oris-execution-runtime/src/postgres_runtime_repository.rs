@@ -17,7 +17,7 @@ use super::models::{
 };
 use super::repository::RuntimeRepository;
 
-const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 4;
+const POSTGRES_RUNTIME_SCHEMA_VERSION: i64 = 6;
 
 fn is_valid_schema_ident(schema: &str) -> bool {
     !schema.is_empty()
@@ -533,6 +533,92 @@ impl PostgresRuntimeRepository {
                     sqlx::query(&sql_record)
                         .bind(4_i32)
                         .bind("runtime_recipes_organisms_sessions_disputes")
+                        .bind(now)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                // Migration v5: priority column on runtime_attempts for ordered dispatch
+                if current_version < 5 {
+                    let sql_add_priority = format!(
+                        "ALTER TABLE \"{}\".runtime_attempts ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 0",
+                        schema
+                    );
+                    let sql_idx_priority = format!(
+                        "CREATE INDEX IF NOT EXISTS idx_runtime_attempts_status_priority_retry
+                         ON \"{}\".runtime_attempts(status, priority DESC, retry_at_ms)",
+                        schema
+                    );
+                    let sql_idx_tenant_priority = format!(
+                        "CREATE INDEX IF NOT EXISTS idx_runtime_attempts_tenant_status_priority
+                         ON \"{}\".runtime_attempts(status, priority DESC)",
+                        schema
+                    );
+                    sqlx::query(&sql_add_priority)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_idx_priority)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_idx_tenant_priority)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let now = dt_to_ms(Utc::now());
+                    let sql_record = format!(
+                        "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT(version) DO NOTHING",
+                        schema
+                    );
+                    sqlx::query(&sql_record)
+                        .bind(5_i32)
+                        .bind("attempt_priority_dispatch_order")
+                        .bind(now)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+
+                // Migration v6: API idempotency store for PostgreSQL backends
+                if current_version < 6 {
+                    let sql_idempotency = format!(
+                        "CREATE TABLE IF NOT EXISTS \"{}\".execution_idempotency (
+                            idempotency_key TEXT PRIMARY KEY,
+                            operation TEXT NOT NULL,
+                            thread_id TEXT NOT NULL,
+                            payload_hash TEXT NOT NULL,
+                            response_json TEXT NOT NULL,
+                            created_at_ms BIGINT NOT NULL
+                        )",
+                        schema
+                    );
+                    let sql_idx_idempotency = format!(
+                        "CREATE INDEX IF NOT EXISTS idx_execution_idempotency_created
+                         ON \"{}\".execution_idempotency(created_at_ms)",
+                        schema
+                    );
+                    sqlx::query(&sql_idempotency)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    sqlx::query(&sql_idx_idempotency)
+                        .execute(&pool)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let now = dt_to_ms(Utc::now());
+                    let sql_record = format!(
+                        "INSERT INTO \"{}\".runtime_schema_migrations(version, name, applied_at_ms)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT(version) DO NOTHING",
+                        schema
+                    );
+                    sqlx::query(&sql_record)
+                        .bind(6_i32)
+                        .bind("api_idempotency_store")
                         .bind(now)
                         .execute(&pool)
                         .await
@@ -1483,7 +1569,7 @@ impl RuntimeRepository for PostgresRuntimeRepository {
                      a.status = 'queued'
                      OR (a.status = 'retry_backoff' AND (a.retry_at_ms IS NULL OR a.retry_at_ms <= $1))
                    )
-                 ORDER BY a.attempt_no ASC, a.attempt_id ASC
+                 ORDER BY a.priority DESC, a.attempt_no ASC, a.attempt_id ASC
                  LIMIT $2",
                 schema, schema
             );
@@ -2528,6 +2614,123 @@ impl RuntimeRepository for PostgresRuntimeRepository {
             )));
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PostgresIdempotencyStore — mirrors SqliteIdempotencyStore with Postgres pool
+// ---------------------------------------------------------------------------
+
+/// Record returned / stored by [`PostgresIdempotencyStore`].
+///
+/// Mirrors the fields of `api_idempotency::IdempotencyRecord` so that the
+/// Postgres implementation carries no dependency on the sqlite-persistence
+/// feature flag.
+#[derive(Clone, Debug)]
+pub struct PostgresIdempotencyRecord {
+    pub operation: String,
+    pub thread_id: String,
+    pub payload_hash: String,
+    pub response_json: String,
+}
+
+/// PostgreSQL-backed idempotency helper for the execution API.
+///
+/// Provides the same `get` / `put` interface as `SqliteIdempotencyStore` so that
+/// `ExecutionApiState` can use whichever backend is configured at start-up.
+#[derive(Clone)]
+pub struct PostgresIdempotencyStore {
+    pool: PgPool,
+    schema: String,
+    db_runtime: Option<Arc<tokio::runtime::Runtime>>,
+}
+
+impl PostgresIdempotencyStore {
+    /// Create a new store backed by an existing pool.
+    ///
+    /// The caller must ensure that `ensure_schema()` has already been run on the
+    /// associated `PostgresRuntimeRepository` (which creates the
+    /// `execution_idempotency` table in migration v6) before calling any method
+    /// on this store.
+    pub fn new(pool: PgPool, schema: impl Into<String>) -> Self {
+        Self {
+            pool,
+            schema: schema.into(),
+            db_runtime: new_db_runtime().ok(),
+        }
+    }
+
+    fn runtime(&self) -> Result<&tokio::runtime::Runtime, String> {
+        self.db_runtime
+            .as_deref()
+            .ok_or_else(|| "postgres idempotency runtime not available".to_string())
+    }
+
+    pub fn get(&self, key: &str) -> Result<Option<PostgresIdempotencyRecord>, String> {
+        let pool = self.pool.clone();
+        let schema = self.schema.clone();
+        let key = key.to_string();
+        let rt = self.runtime()?;
+        rt.block_on(async move {
+            let sql = format!(
+                "SELECT operation, thread_id, payload_hash, response_json
+                 FROM \"{}\".execution_idempotency
+                 WHERE idempotency_key = $1",
+                schema
+            );
+            let row: Option<(String, String, String, String)> = sqlx::query_as(&sql)
+                .bind(&key)
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| format!("postgres idempotency get failed: {}", e))?;
+            Ok(
+                row.map(|(operation, thread_id, payload_hash, response_json)| {
+                    PostgresIdempotencyRecord {
+                        operation,
+                        thread_id,
+                        payload_hash,
+                        response_json,
+                    }
+                }),
+            )
+        })
+    }
+
+    pub fn put(&self, key: &str, record: &PostgresIdempotencyRecord) -> Result<(), String> {
+        let pool = self.pool.clone();
+        let schema = self.schema.clone();
+        let key = key.to_string();
+        let operation = record.operation.clone();
+        let thread_id = record.thread_id.clone();
+        let payload_hash = record.payload_hash.clone();
+        let response_json = record.response_json.clone();
+        let now = dt_to_ms(Utc::now());
+        let rt = self.runtime()?;
+        rt.block_on(async move {
+            let sql = format!(
+                "INSERT INTO \"{}\".execution_idempotency
+                 (idempotency_key, operation, thread_id, payload_hash, response_json, created_at_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT(idempotency_key) DO UPDATE SET
+                   operation = EXCLUDED.operation,
+                   thread_id = EXCLUDED.thread_id,
+                   payload_hash = EXCLUDED.payload_hash,
+                   response_json = EXCLUDED.response_json,
+                   created_at_ms = EXCLUDED.created_at_ms",
+                schema
+            );
+            sqlx::query(&sql)
+                .bind(&key)
+                .bind(&operation)
+                .bind(&thread_id)
+                .bind(&payload_hash)
+                .bind(&response_json)
+                .bind(now)
+                .execute(&pool)
+                .await
+                .map_err(|e| format!("postgres idempotency put failed: {}", e))?;
+            Ok(())
+        })
     }
 }
 

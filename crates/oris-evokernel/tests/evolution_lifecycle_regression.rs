@@ -190,6 +190,9 @@ fn sandbox_policy() -> EvoSandboxPolicy {
         max_duration_ms: 30_000,
         max_output_bytes: 1024 * 1024,
         denied_env_prefixes: Vec::new(),
+        max_memory_bytes: None,
+        max_cpu_secs: None,
+        use_process_group: false,
     }
 }
 

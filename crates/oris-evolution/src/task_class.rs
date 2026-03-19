@@ -197,6 +197,242 @@ pub fn signals_match_class(signals: &[String], class_id: &str, registry: &[TaskC
         .map_or(false, |c| c.id == class_id)
 }
 
+// ─── TaskClassDefinition ──────────────────────────────────────────────────────
+
+/// Extended task-class definition that adds a natural-language `description`
+/// field used by `TaskClassInferencer` for semantic matching and TOML persistence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskClassDefinition {
+    /// Opaque, stable identifier.
+    pub id: String,
+    /// Human-readable label.
+    pub name: String,
+    /// Natural-language description used when scoring signal similarity.
+    pub description: String,
+    /// Lowercase keywords used for overlap-based classification.
+    pub signal_keywords: Vec<String>,
+}
+
+impl TaskClassDefinition {
+    /// Convert into a lightweight `TaskClass` (drops the description field).
+    pub fn into_task_class(self) -> TaskClass {
+        TaskClass::new(self.id, self.name, self.signal_keywords)
+    }
+}
+
+// ─── Built-in task class definitions ─────────────────────────────────────────
+
+/// Return the canonical built-in task class definitions including descriptions.
+pub fn builtin_task_class_definitions() -> Vec<TaskClassDefinition> {
+    vec![
+        TaskClassDefinition {
+            id: "missing-import".to_string(),
+            name: "Missing import / undefined symbol".to_string(),
+            description: "Compiler cannot find symbol unresolved import undefined reference \
+                          missing use declaration cannot find value in scope"
+                .to_string(),
+            signal_keywords: vec![
+                "e0425",
+                "e0433",
+                "unresolved",
+                "undefined",
+                "import",
+                "missing",
+                "cannot",
+                "find",
+                "symbol",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        },
+        TaskClassDefinition {
+            id: "type-mismatch".to_string(),
+            name: "Type mismatch".to_string(),
+            description: "Type mismatch mismatched types expected one type found another \
+                          type annotation required"
+                .to_string(),
+            signal_keywords: vec![
+                "e0308",
+                "mismatched",
+                "expected",
+                "found",
+                "type",
+                "mismatch",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        },
+        TaskClassDefinition {
+            id: "borrow-conflict".to_string(),
+            name: "Borrow checker conflict".to_string(),
+            description: "Borrow checker conflict cannot borrow as mutable lifetime error \
+                          value moved cannot use after move"
+                .to_string(),
+            signal_keywords: vec![
+                "e0502", "e0505", "borrow", "lifetime", "moved", "cannot", "conflict",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+        },
+        TaskClassDefinition {
+            id: "test-failure".to_string(),
+            name: "Test failure".to_string(),
+            description: "Test failure panicked assertion failed test did not pass".to_string(),
+            signal_keywords: vec!["test", "failed", "panic", "assert", "assertion", "failure"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        },
+        TaskClassDefinition {
+            id: "performance".to_string(),
+            name: "Performance issue".to_string(),
+            description: "Performance issue slow response high latency operation timeout \
+                          hot path resource contention"
+                .to_string(),
+            signal_keywords: vec!["slow", "latency", "timeout", "perf", "performance", "hot"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        },
+    ]
+}
+
+// ─── TOML persistence ─────────────────────────────────────────────────────────
+
+#[cfg(feature = "evolution-experimental")]
+#[derive(Deserialize)]
+struct TaskClassesToml {
+    task_classes: Vec<TaskClassDefinition>,
+}
+
+/// Load task class definitions from a TOML file.
+///
+/// The file must contain a top-level `[[task_classes]]` array whose entries
+/// each have `id`, `name`, `description`, and `signal_keywords` fields.
+///
+/// Only available with the `evolution-experimental` feature.
+#[cfg(feature = "evolution-experimental")]
+pub fn load_task_classes_from_toml(
+    path: &std::path::Path,
+) -> Result<Vec<TaskClassDefinition>, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let parsed: TaskClassesToml = toml::from_str(&content).map_err(|e| e.to_string())?;
+    Ok(parsed.task_classes)
+}
+
+/// Load task class definitions.
+///
+/// When the `evolution-experimental` feature is enabled, attempts to load from
+/// `~/.oris/oris-task-classes.toml` if it exists; otherwise falls back to
+/// `builtin_task_class_definitions()`.
+pub fn load_task_classes() -> Vec<TaskClassDefinition> {
+    #[cfg(feature = "evolution-experimental")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            let path = std::path::Path::new(&home)
+                .join(".oris")
+                .join("oris-task-classes.toml");
+            if path.exists() {
+                if let Ok(classes) = load_task_classes_from_toml(&path) {
+                    return classes;
+                }
+            }
+        }
+    }
+    builtin_task_class_definitions()
+}
+
+// ─── TaskClassInferencer ──────────────────────────────────────────────────────
+
+/// Infers the task class for a signal description using keyword recall scoring.
+///
+/// # Scoring
+///
+/// For each registered class, the score is:
+///
+/// ```text
+/// score = |signal_tokens ∩ class_keywords| / |class_keywords|
+/// ```
+///
+/// The class with the highest score is returned when the score meets
+/// `threshold` (default `0.75`).  When no class reaches the threshold the
+/// fallback `"generic_fix"` ID is returned.
+pub struct TaskClassInferencer {
+    classes: Vec<TaskClassDefinition>,
+    threshold: f32,
+}
+
+impl TaskClassInferencer {
+    /// Create an inferencer from a custom set of definitions.
+    pub fn new(classes: Vec<TaskClassDefinition>) -> Self {
+        Self {
+            classes,
+            threshold: 0.75,
+        }
+    }
+
+    /// Create an inferencer pre-loaded with `builtin_task_class_definitions()`.
+    pub fn with_builtins() -> Self {
+        Self::new(builtin_task_class_definitions())
+    }
+
+    /// Override the similarity threshold (default `0.75`).
+    pub fn with_threshold(mut self, threshold: f32) -> Self {
+        self.threshold = threshold;
+        self
+    }
+
+    /// Infer the task class ID for the given signal description.
+    ///
+    /// Returns the ID of the best matching class when it achieves a score
+    /// ≥ `threshold`, or `"generic_fix"` otherwise.
+    pub fn infer(&self, signal_description: &str) -> String {
+        let signal_tokens = tokenise(signal_description);
+        if signal_tokens.is_empty() {
+            return "generic_fix".to_string();
+        }
+
+        let mut best_id = "generic_fix";
+        let mut best_score = 0.0f32;
+
+        for class in &self.classes {
+            let score = recall_score(&signal_tokens, &class.signal_keywords);
+            if score > best_score {
+                best_score = score;
+                best_id = &class.id;
+            }
+        }
+
+        if best_score >= self.threshold {
+            best_id.to_string()
+        } else {
+            "generic_fix".to_string()
+        }
+    }
+
+    /// Return a reference to the underlying class definitions.
+    pub fn class_definitions(&self) -> &[TaskClassDefinition] {
+        &self.classes
+    }
+}
+
+// ─── Internal similarity helper ───────────────────────────────────────────────
+
+/// Keyword recall: fraction of class keywords that appear in the signal tokens.
+fn recall_score(signal_tokens: &[String], keywords: &[String]) -> f32 {
+    if keywords.is_empty() {
+        return 0.0;
+    }
+    let intersection = keywords
+        .iter()
+        .filter(|kw| signal_tokens.contains(kw))
+        .count();
+    intersection as f32 / keywords.len() as f32
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -353,5 +589,72 @@ mod tests {
             .classify(&signals)
             .expect("case-insensitive classify should work");
         assert_eq!(cls.id, "tc");
+    }
+
+    // ── TaskClassInferencer tests ─────────────────────────────────────────────
+
+    #[test]
+    fn inferencer_canonical_compiler_error_missing_import() {
+        let inferencer = TaskClassInferencer::with_builtins();
+        // Canonical signal: contains the majority of missing-import keywords.
+        let signal = "error[E0425]: cannot find value `foo`: \
+                      unresolved import symbol is undefined missing";
+        let class_id = inferencer.infer(signal);
+        assert_eq!(
+            class_id, "missing-import",
+            "canonical missing-import signal should infer correct class"
+        );
+    }
+
+    #[test]
+    fn inferencer_canonical_compiler_error_type_mismatch() {
+        let inferencer = TaskClassInferencer::with_builtins();
+        // Canonical signal: contains most type-mismatch keywords.
+        let signal = "error[E0308]: mismatched type expected u32 found String type mismatch";
+        let class_id = inferencer.infer(signal);
+        assert_eq!(class_id, "type-mismatch");
+    }
+
+    #[test]
+    fn inferencer_score_below_threshold_falls_back_to_generic_fix() {
+        let inferencer = TaskClassInferencer::with_builtins();
+        // Signal with only one matching keyword — far below 0.75 threshold.
+        let signal = "e0308";
+        let class_id = inferencer.infer(signal);
+        assert_eq!(
+            class_id, "generic_fix",
+            "low-match signal must fall back to generic_fix"
+        );
+    }
+
+    #[test]
+    fn inferencer_empty_signal_falls_back_to_generic_fix() {
+        let inferencer = TaskClassInferencer::with_builtins();
+        assert_eq!(inferencer.infer(""), "generic_fix");
+    }
+
+    #[test]
+    fn inferencer_custom_threshold_lower_accepts_partial_match() {
+        // With a lower threshold partial matches should succeed.
+        let inferencer = TaskClassInferencer::with_builtins().with_threshold(0.3);
+        // "E0308 mismatched" — 2/6 = 0.333, which is ≥ 0.30 threshold.
+        let class_id = inferencer.infer("E0308 mismatched");
+        assert_eq!(class_id, "type-mismatch");
+    }
+
+    #[test]
+    fn inferencer_builtin_definitions_are_configurable_via_load() {
+        // load_task_classes() must return at least the builtin definitions
+        // (no TOML file exists in CI — falls back to builtins).
+        let defs = load_task_classes();
+        assert!(
+            !defs.is_empty(),
+            "load_task_classes must return at least builtins"
+        );
+        let has_missing_import = defs.iter().any(|d| d.id == "missing-import");
+        assert!(
+            has_missing_import,
+            "builtin missing-import class must be present"
+        );
     }
 }

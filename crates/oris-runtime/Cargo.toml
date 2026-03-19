@@ -1,6 +1,6 @@
 [package]
 name = "oris-runtime"
-version = "0.40.0"
+version = "0.61.0"
 edition = "2021"
 rust-version = "1.80"
 publish = true
@@ -33,9 +33,9 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-oris-execution-runtime = { version = "0.2.15", path = "../oris-execution-runtime", default-features = false }
+oris-execution-runtime = { version = "0.3.0", path = "../oris-execution-runtime", default-features = false }
 oris-kernel = { version = "0.2.12", path = "../oris-kernel", default-features = false }
-oris-evokernel = { version = "0.13.0", path = "../oris-evokernel", optional = true }
+oris-evokernel = { version = "0.14.1", path = "../oris-evokernel", optional = true }
 scraper = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1.80"

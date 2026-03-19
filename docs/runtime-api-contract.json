@@ -15,6 +15,116 @@
       "path_params": []
     },
     {
+      "method": "POST",
+      "path": "/a2a/hello",
+      "auth": "a2a-auth",
+      "summary": "Negotiate Oris A2A protocol compatibility and capabilities",
+      "request_body_schema": "A2aHandshakeRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aHandshakeResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/fetch",
+      "auth": "a2a-auth",
+      "summary": "Fetch evolution assets and optional queued tasks for a peer",
+      "request_body_schema": "A2aCompatFetchRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aCompatFetchResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/tasks/distribute",
+      "auth": "a2a-auth",
+      "summary": "Start a remote task session for distributed work",
+      "request_body_schema": "A2aCompatDistributeRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aCompatDistributeResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/task/claim",
+      "auth": "a2a-auth",
+      "summary": "Claim a queued task session dispatch for execution",
+      "request_body_schema": "A2aCompatClaimRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aCompatClaimResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/task/complete",
+      "auth": "a2a-auth",
+      "summary": "Complete a claimed task session dispatch",
+      "request_body_schema": "A2aCompatTaskCompleteRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aCompatReportResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/work/claim",
+      "auth": "a2a-auth",
+      "summary": "Claim an assignment from the compatibility work queue",
+      "request_body_schema": "A2aCompatWorkClaimRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aCompatWorkClaimResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/work/complete",
+      "auth": "a2a-auth",
+      "summary": "Complete an assignment claimed from the compatibility work queue",
+      "request_body_schema": "A2aCompatWorkCompleteRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aCompatWorkCompleteResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/heartbeat",
+      "auth": "a2a-auth",
+      "summary": "Declare node liveness and advertise available work",
+      "request_body_schema": "A2aCompatHeartbeatRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_A2aCompatHeartbeatResponse",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/publish",
+      "auth": "a2a-auth",
+      "summary": "Publish evolution assets into the remote node import pipeline",
+      "request_body_schema": "PublishRequest",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_ImportOutcome",
+      "path_params": []
+    },
+    {
+      "method": "POST",
+      "path": "/a2a/revoke",
+      "auth": "a2a-auth",
+      "summary": "Revoke previously published evolution assets",
+      "request_body_schema": "RevokeNotice",
+      "query_schema": null,
+      "response_content_type": "application/json",
+      "response_schema": "ApiEnvelope_RevokeNotice",
+      "path_params": []
+    },
+    {
       "method": "GET",
       "path": "/v1/audit/logs",
       "auth": "api-auth",

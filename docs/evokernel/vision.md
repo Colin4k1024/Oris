@@ -1,6 +1,6 @@
 # Oris - 3 Year Evolution Trajectory
 
-Source: https://www.notion.so/317e8a70eec580638995d5b823e40947
+Source: migrated from internal planning notes.
 
 Last synced: March 2, 2026
 

@@ -1,6 +1,6 @@
 [package]
 name = "oris-governor"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 rust-version = "1.80"
 publish = ["crates-io"]
@@ -8,5 +8,5 @@ license = "MIT"
 description = "Promotion, cooldown, and revocation policies for Oris EvoKernel."
 
 [dependencies]
-oris-evolution = { version = "0.3.0", path = "../oris-evolution" }
+oris-evolution = { version = "0.4.1", path = "../oris-evolution" }
 serde = { version = "1.0", features = ["derive"] }

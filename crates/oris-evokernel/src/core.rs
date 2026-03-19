@@ -8951,6 +8951,9 @@ index 0000000..1111111
             max_duration_ms: 60_000,
             max_output_bytes: 1024 * 1024,
             denied_env_prefixes: Vec::new(),
+            max_memory_bytes: None,
+            max_cpu_secs: None,
+            use_process_group: false,
         }
     }
 
@@ -9481,6 +9484,9 @@ index 0000000..1111111
             max_duration_ms: 1_000,
             max_output_bytes: 1024,
             denied_env_prefixes: Vec::new(),
+            max_memory_bytes: None,
+            max_cpu_secs: None,
+            use_process_group: false,
         });
         let report = validator
             .run(

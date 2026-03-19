@@ -1,10 +1,14 @@
 //! Scheduler skeleton for Phase 1 runtime rollout.
 
+use std::sync::Arc;
+
 use chrono::Utc;
 
 use oris_kernel::event::KernelError;
 
+use super::circuit_breaker::CircuitBreaker;
 use super::models::AttemptDispatchRecord;
+use super::observability::RejectionReason;
 use super::repository::RuntimeRepository;
 
 const DISPATCH_SCAN_LIMIT: usize = 16;
@@ -19,6 +23,11 @@ pub struct DispatchContext {
     pub plugin_requirements: Option<Vec<String>>,
     /// Worker capability tags the scheduler may match against.
     pub worker_capabilities: Option<Vec<String>>,
+    /// Maximum queue depth before backpressure is applied.
+    /// When the number of dispatchable candidates meets or exceeds this limit,
+    /// `dispatch_one_with_context` returns `SchedulerDecision::Backpressure`
+    /// instead of acquiring a new lease.
+    pub max_queue_depth: Option<usize>,
 }
 
 impl DispatchContext {
@@ -35,6 +44,11 @@ impl DispatchContext {
         self.priority = Some(priority);
         self
     }
+
+    pub fn with_max_queue_depth(mut self, limit: usize) -> Self {
+        self.max_queue_depth = Some(limit);
+        self
+    }
 }
 
 /// Scheduler dispatch decision.
@@ -44,17 +58,36 @@ pub enum SchedulerDecision {
         attempt_id: String,
         worker_id: String,
     },
+    /// Backpressure applied: the queue depth has exceeded the configured limit.
+    Backpressure {
+        reason: RejectionReason,
+        queue_depth: usize,
+    },
     Noop,
 }
 
 /// Compile-safe scheduler skeleton for queue -> lease dispatch.
 pub struct SkeletonScheduler<R: RuntimeRepository> {
     repository: R,
+    /// Optional circuit breaker applied globally to all dispatch calls.
+    circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
 
 impl<R: RuntimeRepository> SkeletonScheduler<R> {
     pub fn new(repository: R) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            circuit_breaker: None,
+        }
+    }
+
+    /// Attach a shared circuit breaker to this scheduler.
+    ///
+    /// When the breaker is `Open`, all dispatch calls return
+    /// `SchedulerDecision::Backpressure` until the probe window elapses.
+    pub fn with_circuit_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(breaker);
+        self
     }
 
     /// Attempt to dispatch one eligible attempt to `worker_id`.
@@ -65,19 +98,45 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
     /// Dispatch one attempt to `worker_id` with optional context for tenant/priority/capability routing.
     /// Context is passed through for future filtering or sorting; current implementation
     /// uses the same candidate list as `dispatch_one`.
+    ///
+    /// If `context.max_queue_depth` is set and the number of dispatchable candidates is
+    /// greater than or equal to that limit, returns `SchedulerDecision::Backpressure`
+    /// without acquiring any lease.
     pub fn dispatch_one_with_context(
         &self,
         worker_id: &str,
         context: Option<&DispatchContext>,
     ) -> Result<SchedulerDecision, KernelError> {
         let now = Utc::now();
+
+        // Circuit breaker gate: if the breaker is Open, reject dispatch.
+        if let Some(cb) = &self.circuit_breaker {
+            if cb.is_open() {
+                return Ok(SchedulerDecision::Backpressure {
+                    reason: RejectionReason::capacity_limit("circuit breaker open"),
+                    queue_depth: 0,
+                });
+            }
+        }
+
         let candidates: Vec<AttemptDispatchRecord> = self
             .repository
             .list_dispatchable_attempts(now, DISPATCH_SCAN_LIMIT)?;
-        // Optional: apply context-based sort (e.g. by priority when available on attempts).
-        if context.as_ref().and_then(|c| c.priority).is_some() {
-            // Placeholder: could sort by attempt priority when AttemptDispatchRecord carries it.
+
+        // Backpressure gate: if queue depth meets or exceeds the limit, reject dispatch.
+        if let Some(limit) = context.and_then(|c| c.max_queue_depth) {
+            if candidates.len() >= limit {
+                return Ok(SchedulerDecision::Backpressure {
+                    reason: RejectionReason::capacity_limit(format!(
+                        "queue depth {} >= limit {}",
+                        candidates.len(),
+                        limit
+                    )),
+                    queue_depth: candidates.len(),
+                });
+            }
         }
+
         let lease_expires_at = now + chrono::Duration::seconds(30);
 
         for candidate in candidates {
@@ -364,7 +423,9 @@ mod tests {
                 assert_eq!(attempt_id, "attempt-b");
                 assert_eq!(worker_id, "worker-scheduler");
             }
-            SchedulerDecision::Noop => panic!("expected a dispatch"),
+            SchedulerDecision::Noop | SchedulerDecision::Backpressure { .. } => {
+                panic!("expected a dispatch")
+            }
         }
 
         let claimed = repo.claimed_attempts.lock().expect("claimed lock");
@@ -414,5 +475,98 @@ mod tests {
             .with_priority(5);
         assert_eq!(ctx.tenant_id.as_deref(), Some("tenant-1"));
         assert_eq!(ctx.priority, Some(5));
+    }
+
+    #[test]
+    fn dispatch_one_with_context_applies_backpressure_when_queue_exceeds_limit() {
+        // 3 queued attempts, limit = 2  → backpressure should fire
+        let repo = FakeRepository::new(
+            vec![
+                attempt("attempt-a", 1),
+                attempt("attempt-b", 2),
+                attempt("attempt-c", 3),
+            ],
+            &[],
+        );
+        let scheduler = SkeletonScheduler::new(repo);
+        let ctx = DispatchContext::new().with_max_queue_depth(2);
+
+        let decision = scheduler
+            .dispatch_one_with_context("worker-1", Some(&ctx))
+            .expect("should not error on backpressure");
+
+        match decision {
+            SchedulerDecision::Backpressure { queue_depth, .. } => {
+                assert_eq!(queue_depth, 3);
+            }
+            other => panic!("expected Backpressure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_one_with_context_dispatches_when_queue_below_limit() {
+        // 1 queued attempt, limit = 5 → should dispatch normally
+        let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
+        let scheduler = SkeletonScheduler::new(repo);
+        let ctx = DispatchContext::new().with_max_queue_depth(5);
+
+        let decision = scheduler
+            .dispatch_one_with_context("worker-1", Some(&ctx))
+            .expect("dispatch should succeed");
+
+        assert!(
+            matches!(decision, SchedulerDecision::Dispatched { .. }),
+            "expected Dispatched, got {:?}",
+            decision
+        );
+    }
+
+    #[test]
+    fn open_circuit_breaker_returns_backpressure() {
+        use crate::circuit_breaker::CircuitBreaker;
+        use std::sync::Arc;
+
+        let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
+        let breaker = Arc::new(CircuitBreaker::new(30));
+        breaker.trip();
+
+        let scheduler = SkeletonScheduler::new(repo).with_circuit_breaker(breaker);
+
+        let decision = scheduler
+            .dispatch_one("worker-1")
+            .expect("should not error");
+
+        match decision {
+            SchedulerDecision::Backpressure { reason, .. } => {
+                let msg = format!("{:?}", reason);
+                assert!(
+                    msg.contains("circuit breaker open"),
+                    "unexpected reason: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Backpressure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn closed_circuit_breaker_allows_dispatch() {
+        use crate::circuit_breaker::CircuitBreaker;
+        use std::sync::Arc;
+
+        let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
+        let breaker = Arc::new(CircuitBreaker::new(30)); // starts Closed
+
+        let scheduler = SkeletonScheduler::new(repo).with_circuit_breaker(breaker);
+
+        let decision = scheduler
+            .dispatch_one("worker-1")
+            .expect("dispatch should succeed");
+
+        assert!(
+            matches!(decision, SchedulerDecision::Dispatched { .. }),
+            "expected Dispatched, got {:?}",
+            decision
+        );
     }
 }

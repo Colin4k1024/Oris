@@ -1,11 +1,11 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability report
-    url: https://github.com/fanjia1024/Oris/security/advisories/new
+    url: https://github.com/Colin4k1024/Oris/security/advisories/new
     about: Please report vulnerabilities privately through GitHub Security Advisories.
   - name: Contribution guide
-    url: https://github.com/fanjia1024/Oris/blob/main/CONTRIBUTING.md
+    url: https://github.com/Colin4k1024/Oris/blob/main/CONTRIBUTING.md
     about: Please read contribution guidelines before opening an issue or pull request.
   - name: Privacy notice
-    url: https://github.com/fanjia1024/Oris/blob/main/PRIVACY.md
+    url: https://github.com/Colin4k1024/Oris/blob/main/PRIVACY.md
     about: Learn how repository and collaboration data is handled.

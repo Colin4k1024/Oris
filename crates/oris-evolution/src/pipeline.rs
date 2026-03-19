@@ -22,6 +22,7 @@ use crate::port::{
     EvaluateInput, EvaluatePort, GeneStorePersistPort, SandboxPort, SignalExtractorInput,
     SignalExtractorPort, ValidateInput, ValidatePort,
 };
+use crate::task_class::{load_task_classes, TaskClassInferencer};
 
 /// Pipeline configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,6 +120,8 @@ pub struct PipelineContext {
     pub reused_capsules: Vec<String>,
     /// Wall-clock duration recorded for each stage that ran.
     pub stage_timings: HashMap<String, Duration>,
+    /// Task class ID inferred by the Detect stage, if a `TaskClassInferencer` is attached.
+    pub inferred_task_class_id: Option<String>,
 }
 
 impl Default for PipelineContext {
@@ -135,6 +138,7 @@ impl Default for PipelineContext {
             solidified_genes: Vec::new(),
             reused_capsules: Vec::new(),
             stage_timings: HashMap::new(),
+            inferred_task_class_id: None,
         }
     }
 }
@@ -165,6 +169,9 @@ pub struct PipelineResult {
     pub stage_states: Vec<StageState>,
     /// Error message if failed
     pub error: Option<String>,
+    /// Task class inferred during the Detect stage (present when a
+    /// `TaskClassInferencer` was attached to the pipeline).
+    pub inferred_task_class_id: Option<String>,
 }
 
 /// Individual stage state
@@ -284,6 +291,8 @@ pub struct StandardEvolutionPipeline {
     selector: Arc<dyn Selector>,
     /// Optional signal extractor for the Detect stage.
     signal_extractor: Option<Arc<dyn SignalExtractorPort>>,
+    /// Optional task-class inferencer for the Detect stage.
+    task_class_inferencer: Option<TaskClassInferencer>,
     /// Optional sandbox for the Execute stage.
     sandbox: Option<Arc<dyn SandboxPort>>,
     /// Optional gene store for the Solidify/Reuse stages.
@@ -304,6 +313,7 @@ impl StandardEvolutionPipeline {
             config,
             selector,
             signal_extractor: None,
+            task_class_inferencer: None,
             sandbox: None,
             gene_store: None,
             validate_port: None,
@@ -315,6 +325,24 @@ impl StandardEvolutionPipeline {
     pub fn with_signal_extractor(mut self, extractor: Arc<dyn SignalExtractorPort>) -> Self {
         self.signal_extractor = Some(extractor);
         self
+    }
+
+    /// Attach a `TaskClassInferencer` for the Detect stage.
+    ///
+    /// When attached the Detect stage automatically infers the task class from
+    /// collected signals and stores the result in
+    /// `PipelineResult::inferred_task_class_id`.  If not attached, inference is
+    /// skipped and the field is `None`.
+    pub fn with_task_class_inferencer(mut self, inferencer: TaskClassInferencer) -> Self {
+        self.task_class_inferencer = Some(inferencer);
+        self
+    }
+
+    /// Attach a `TaskClassInferencer` pre-loaded with the current
+    /// `load_task_classes()` registry (builtin + optional TOML override).
+    pub fn with_default_task_class_inferencer(self) -> Self {
+        let inferencer = TaskClassInferencer::new(load_task_classes());
+        self.with_task_class_inferencer(inferencer)
     }
 
     /// Attach a `SandboxPort` for the Execute stage.
@@ -370,6 +398,20 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             }
             // When no extractor is injected, signals already in context are
             // used as-is (pass-through, backward-compatible behaviour).
+
+            // Infer task class from collected signals when an inferencer is set.
+            if let Some(ref inferencer) = self.task_class_inferencer {
+                if !context.signals.is_empty() {
+                    let combined: String = context
+                        .signals
+                        .iter()
+                        .map(|s| s.description.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    context.inferred_task_class_id = Some(inferencer.infer(&combined));
+                }
+            }
+
             let elapsed = t0.elapsed();
             context
                 .stage_timings
@@ -694,6 +736,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             } else {
                 Some("Validation stage did not pass".to_string())
             },
+            inferred_task_class_id: context.inferred_task_class_id.clone(),
         })
     }
 

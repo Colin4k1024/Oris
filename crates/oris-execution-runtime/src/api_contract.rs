@@ -134,6 +134,116 @@ pub fn generate_runtime_api_contract() -> RuntimeApiContract {
                 vec![],
             ),
             endpoint(
+                "POST",
+                "/a2a/hello",
+                "a2a-auth",
+                "Negotiate Oris A2A protocol compatibility and capabilities",
+                Some("A2aHandshakeRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aHandshakeResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/fetch",
+                "a2a-auth",
+                "Fetch evolution assets and optional queued tasks for a peer",
+                Some("A2aCompatFetchRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aCompatFetchResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/tasks/distribute",
+                "a2a-auth",
+                "Start a remote task session for distributed work",
+                Some("A2aCompatDistributeRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aCompatDistributeResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/task/claim",
+                "a2a-auth",
+                "Claim a queued task session dispatch for execution",
+                Some("A2aCompatClaimRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aCompatClaimResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/task/complete",
+                "a2a-auth",
+                "Complete a claimed task session dispatch",
+                Some("A2aCompatTaskCompleteRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aCompatReportResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/work/claim",
+                "a2a-auth",
+                "Claim an assignment from the compatibility work queue",
+                Some("A2aCompatWorkClaimRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aCompatWorkClaimResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/work/complete",
+                "a2a-auth",
+                "Complete an assignment claimed from the compatibility work queue",
+                Some("A2aCompatWorkCompleteRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aCompatWorkCompleteResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/heartbeat",
+                "a2a-auth",
+                "Declare node liveness and advertise available work",
+                Some("A2aCompatHeartbeatRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_A2aCompatHeartbeatResponse"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/publish",
+                "a2a-auth",
+                "Publish evolution assets into the remote node import pipeline",
+                Some("PublishRequest"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_ImportOutcome"),
+                vec![],
+            ),
+            endpoint(
+                "POST",
+                "/a2a/revoke",
+                "a2a-auth",
+                "Revoke previously published evolution assets",
+                Some("RevokeNotice"),
+                None,
+                "application/json",
+                Some("ApiEnvelope_RevokeNotice"),
+                vec![],
+            ),
+            endpoint(
                 "GET",
                 "/v1/audit/logs",
                 "api-auth",
@@ -509,11 +619,15 @@ mod tests {
     #[test]
     fn generated_runtime_api_contract_covers_current_v1_surface() {
         let contract = generate_runtime_api_contract();
-        assert_eq!(contract.endpoints.len(), 27);
+        assert_eq!(contract.endpoints.len(), 37);
         assert!(contract
             .endpoints
             .iter()
             .any(|endpoint| endpoint.path == "/v1/jobs/run" && endpoint.method == "POST"));
+        assert!(contract
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.path == "/a2a/hello" && endpoint.method == "POST"));
         assert!(contract
             .endpoints
             .iter()

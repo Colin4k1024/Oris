@@ -153,9 +153,124 @@ pub enum AntiPatternKind {
     Custom(String),
 }
 
+/// Composite score with time-decay and statistical confidence interval.
+///
+/// `raw` is the unweighted composite from `DimensionScores::composite()`.
+/// `time_decayed` applies an exponential time-decay weight `w_t = exp(-λ * age_days)`
+/// where `λ = 0.05` (≈ 14-day half-life).
+/// `confidence_interval` is a Wilson score interval (lower, upper); the upper
+/// bound is used as a pessimistic estimate when `sample_count < 10`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompositeScore {
+    /// Raw weighted composite score in [0.0, 1.0].
+    pub raw: f64,
+    /// Time-decay-weighted score in [0.0, 1.0].
+    pub time_decayed: f64,
+    /// Wilson score interval `(lower, upper)` in [0.0, 1.0].
+    pub confidence_interval: (f64, f64),
+    /// Number of historical observations used (0 = first evaluation).
+    pub sample_count: usize,
+}
+
+impl CompositeScore {
+    /// Compute from a raw score, observation age in days, and historical sample count.
+    ///
+    /// * `raw` — result of `DimensionScores::composite()`
+    /// * `age_days` — calendar age of the most-recent matching observation
+    /// * `sample_count` — number of historical outcomes (0 for brand-new mutations)
+    pub fn compute(raw: f64, age_days: f64, sample_count: usize) -> Self {
+        const LAMBDA: f64 = 0.05;
+        let weight = (-LAMBDA * age_days).exp();
+        let time_decayed = (raw * weight).clamp(0.0, 1.0);
+        let ci = wilson_interval(raw, sample_count);
+        Self {
+            raw,
+            time_decayed,
+            confidence_interval: ci,
+            sample_count,
+        }
+    }
+
+    /// Pessimistic estimate: upper bound of the Wilson CI when `sample_count < 10`,
+    /// otherwise the raw score.
+    pub fn pessimistic(&self) -> f64 {
+        if self.sample_count < 10 {
+            self.confidence_interval.1
+        } else {
+            self.raw
+        }
+    }
+}
+
+/// Wilson score interval for a proportion `p` estimated from `n` observations.
+///
+/// Uses a 95% confidence level (`z = 1.96`).  Returns `(0.0, 1.0)` when `n == 0`.
+pub fn wilson_interval(p: f64, n: usize) -> (f64, f64) {
+    if n == 0 {
+        return (0.0, 1.0);
+    }
+    let n_f = n as f64;
+    const Z: f64 = 1.96;
+    let z2 = Z * Z;
+    let denom = 1.0 + z2 / n_f;
+    let center = (p + z2 / (2.0 * n_f)) / denom;
+    let half = (Z / denom) * (p * (1.0 - p) / n_f + z2 / (4.0 * n_f * n_f)).sqrt();
+    (
+        (center - half).clamp(0.0, 1.0),
+        (center + half).clamp(0.0, 1.0),
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Thresholds
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub const PROMOTE_THRESHOLD: f64 = 0.72;
 pub const APPLY_THRESHOLD: f64 = 0.45;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_decay_older_score_lower() {
+        let fresh = CompositeScore::compute(0.8, 1.0, 20);
+        let stale = CompositeScore::compute(0.8, 30.0, 20);
+        assert!(
+            stale.time_decayed < fresh.time_decayed,
+            "30-day score ({}) should be below 1-day score ({})",
+            stale.time_decayed,
+            fresh.time_decayed
+        );
+    }
+
+    #[test]
+    fn wilson_upper_bound_below_one_for_small_sample() {
+        // With 4 observations and raw=0.75, upper CI bound should be < 1.0.
+        let (_, upper) = wilson_interval(0.75, 4);
+        assert!(
+            upper < 1.0,
+            "upper CI={upper} should be < 1.0 for 4 samples"
+        );
+    }
+
+    #[test]
+    fn wilson_zero_samples_returns_full_range() {
+        let (lo, hi) = wilson_interval(0.5, 0);
+        assert!((lo - 0.0).abs() < 1e-9);
+        assert!((hi - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn composite_pessimistic_uses_upper_bound_for_small_sample() {
+        let cs = CompositeScore::compute(0.6, 0.0, 4);
+        let (_, upper) = wilson_interval(0.6, 4);
+        assert!((cs.pessimistic() - upper).abs() < 1e-9);
+    }
+
+    #[test]
+    fn composite_pessimistic_uses_raw_for_large_sample() {
+        let cs = CompositeScore::compute(0.6, 0.0, 20);
+        assert!((cs.pessimistic() - 0.6).abs() < 1e-9);
+    }
+}
