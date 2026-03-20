@@ -3,10 +3,7 @@
 //! K5-c: Context-Aware Scheduler Kernel with priority-aware dispatch and configurable fairness.
 //! K5-d: Safe Backpressure Engine with per-tenant and per-worker throttle limits.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -250,9 +247,7 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
                     return Some((
                         RejectionReason::tenant_limit(format!(
                             "tenant {} at {} runs, limit {}",
-                            tenant,
-                            count,
-                            self.throttle_limits.max_concurrent_runs_per_tenant
+                            tenant, count, self.throttle_limits.max_concurrent_runs_per_tenant
                         )),
                         count,
                     ));
@@ -263,19 +258,14 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
     }
 
     /// Check per-worker backpressure (K5-d).
-    fn check_worker_backpressure(
-        &self,
-        worker_id: &str,
-    ) -> Option<(RejectionReason, usize)> {
+    fn check_worker_backpressure(&self, worker_id: &str) -> Option<(RejectionReason, usize)> {
         let counts = self.worker_lease_counts.lock().unwrap();
         if let Some(&count) = counts.get(worker_id) {
             if count >= self.throttle_limits.max_concurrent_leases_per_worker {
                 return Some((
                     RejectionReason::capacity_limit(format!(
                         "worker {} at {} leases, limit {}",
-                        worker_id,
-                        count,
-                        self.throttle_limits.max_concurrent_leases_per_worker
+                        worker_id, count, self.throttle_limits.max_concurrent_leases_per_worker
                     )),
                     count,
                 ));
@@ -845,8 +835,9 @@ mod tests {
             &[],
         );
         let scheduler = SkeletonScheduler::new(repo);
-        let ctx = DispatchContext::new()
-            .with_fairness_policy(FairnessPolicy::PriorityWeighted { default_weight: 100 });
+        let ctx = DispatchContext::new().with_fairness_policy(FairnessPolicy::PriorityWeighted {
+            default_weight: 100,
+        });
 
         let decision = scheduler
             .dispatch_one_with_context("worker-1", Some(&ctx))
@@ -869,10 +860,13 @@ mod tests {
             .with_fairness_policy(FairnessPolicy::RoundRobin)
             .with_thread_priority(ThreadPriority::HIGH)
             .with_resource_budget(ResourceBudget::unbounded());
-        
+
         assert_eq!(ctx.tenant_id.as_deref(), Some("tenant-1"));
         assert_eq!(ctx.priority, Some(5));
-        assert!(matches!(ctx.fairness_policy, Some(FairnessPolicy::RoundRobin)));
+        assert!(matches!(
+            ctx.fairness_policy,
+            Some(FairnessPolicy::RoundRobin)
+        ));
         assert!(matches!(ctx.thread_priority, Some(ThreadPriority::HIGH)));
         assert!(ctx.resource_budget.is_some());
     }
@@ -889,18 +883,17 @@ mod tests {
             max_concurrent_leases_per_worker: 2,
             max_queue_depth: 1000,
         };
-        
-        let scheduler = SkeletonScheduler::new(repo)
-            .with_throttle_limits(throttle_limits.clone());
+
+        let scheduler = SkeletonScheduler::new(repo).with_throttle_limits(throttle_limits.clone());
 
         // First dispatch should succeed
         let decision1 = scheduler.dispatch_one("worker-1").expect("dispatch 1");
         assert!(matches!(decision1, SchedulerDecision::Dispatched { .. }));
-        
+
         // Second dispatch to same worker should also succeed (limit is 2)
         let decision2 = scheduler.dispatch_one("worker-1").expect("dispatch 2");
         assert!(matches!(decision2, SchedulerDecision::Dispatched { .. }));
-        
+
         // Third dispatch should fail with backpressure
         let decision3 = scheduler.dispatch_one("worker-1").expect("dispatch 3");
         match decision3 {
@@ -916,9 +909,9 @@ mod tests {
     fn scheduler_metrics_tracks_counts() {
         let repo = FakeRepository::new(vec![attempt("attempt-a", 1)], &[]);
         let scheduler = SkeletonScheduler::new(repo);
-        
+
         let _ = scheduler.dispatch_one("worker-1").expect("dispatch");
-        
+
         let metrics = scheduler.get_metrics();
         assert_eq!(metrics.worker_lease_counts.get("worker-1"), Some(&1));
     }

@@ -41,7 +41,9 @@ pub enum DeterministicMode {
 }
 
 impl Default for DeterministicMode {
-    fn default() -> Self { DeterministicMode::Live }
+    fn default() -> Self {
+        DeterministicMode::Live
+    }
 }
 
 impl DeterministicMode {

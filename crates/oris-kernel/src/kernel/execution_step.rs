@@ -20,12 +20,16 @@ pub enum ExecutionStepVersion {
 
 impl ExecutionStepVersion {
     pub fn as_str(&self) -> &'static str {
-        match self { ExecutionStepVersion::V1 => "1.0" }
+        match self {
+            ExecutionStepVersion::V1 => "1.0",
+        }
     }
 }
 
 impl Default for ExecutionStepVersion {
-    fn default() -> Self { ExecutionStepVersion::V1 }
+    fn default() -> Self {
+        ExecutionStepVersion::V1
+    }
 }
 
 /// Explicit input for one execution step.
@@ -107,10 +111,20 @@ pub struct ExecutionStepV1<S: KernelState> {
 
 impl<S: KernelState> ExecutionStepV1<S> {
     pub fn new(step_id: Option<String>, input: ExecutionStepInput) -> Self {
-        Self { version: ExecutionStepVersion::V1, step_id, input, _phantom: std::marker::PhantomData }
+        Self {
+            version: ExecutionStepVersion::V1,
+            step_id,
+            input,
+            _phantom: std::marker::PhantomData,
+        }
     }
     pub fn initial(step_id: Option<String>) -> Self {
-        Self { version: ExecutionStepVersion::V1, step_id, input: ExecutionStepInput::Initial, _phantom: std::marker::PhantomData }
+        Self {
+            version: ExecutionStepVersion::V1,
+            step_id,
+            input: ExecutionStepInput::Initial,
+            _phantom: std::marker::PhantomData,
+        }
     }
 }
 
