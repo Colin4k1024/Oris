@@ -542,6 +542,8 @@ impl SqliteRuntimeRepository {
                 lease_expires_at: ms_to_dt(row.get::<_, i64>(3).map_err(map_rusqlite_err)?),
                 heartbeat_at: ms_to_dt(row.get::<_, i64>(4).map_err(map_rusqlite_err)?),
                 version: row.get::<_, i64>(5).map_err(map_rusqlite_err)? as u64,
+                terminal_state: None,
+                terminal_at: None,
             }))
         } else {
             Ok(None)
@@ -573,6 +575,8 @@ impl SqliteRuntimeRepository {
                 lease_expires_at: ms_to_dt(row.get::<_, i64>(3).map_err(map_rusqlite_err)?),
                 heartbeat_at: ms_to_dt(row.get::<_, i64>(4).map_err(map_rusqlite_err)?),
                 version: row.get::<_, i64>(5).map_err(map_rusqlite_err)? as u64,
+                terminal_state: None,
+                terminal_at: None,
             }))
         } else {
             Ok(None)
@@ -2988,6 +2992,8 @@ impl RuntimeRepository for SqliteRuntimeRepository {
             lease_expires_at,
             heartbeat_at: now,
             version: version as u64,
+            terminal_state: None,
+            terminal_at: None,
         })
     }
 

@@ -51,9 +51,8 @@ pub use interrupt_resolver::{
     InterruptResolver, InterruptResolverError, InterruptSource, ResolveResult,
 };
 pub use kernel_interrupt::{
-    InterruptCheckpoint, KernelInterrupt, KernelInterruptError, KernelInterruptId,
-    KernelInterruptKind, KernelInterruptStatus, KernelInterruptStore,
-    InMemoryKernelInterruptStore,
+    InMemoryKernelInterruptStore, InterruptCheckpoint, KernelInterrupt, KernelInterruptError,
+    KernelInterruptId, KernelInterruptKind, KernelInterruptStatus, KernelInterruptStore,
 };
 pub use kernel_mode::KernelMode;
 pub use policy::{

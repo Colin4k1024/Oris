@@ -1,6 +1,6 @@
 # Current Project Status
 
-Last updated: March 15, 2026
+Last updated: March 20, 2026
 
 ## External Summary
 
@@ -25,6 +25,8 @@ It is not yet accurate to say:
 - Acceptance gating that checks end-to-end evidence for internal consistency.
 - Bounded delivery preparation that can emit branch and pull-request artifacts without merging or releasing them.
 - Quarantined remote asset reuse that requires successful local validation before promotion.
+- Full A2A protocol semantic surface (protocol core, task lifecycle, asset discovery, council/project workflows, economic lifecycle) through v0.61.0.
+- Kernel 2.0 hardening: execution step contracts, canonical log store, replay cursor, interrupt objects, lease-based finalization, context-aware scheduler, backpressure engine.
 
 ## What Remains Out Of Scope
 
@@ -40,6 +42,17 @@ This status is based on the checked-in boundary and test gate described in:
 - [self-evolution-acceptance-checklist.md](self-evolution-acceptance-checklist.md)
 - [implementation-roadmap.md](implementation-roadmap.md)
 - [README.md](README.md)
+- [PROJECT_AUDIT_2026_Q1.md](../PROJECT_AUDIT_2026_Q1.md)
+
+## Next Directions
+
+The Q1 2026 audit identified five priority tracks for subsequent issues. See [PROJECT_AUDIT_2026_Q1.md](../PROJECT_AUDIT_2026_Q1.md) §8 for the full issue proposal table. Summary:
+
+1. **Code Health (Track A):** Error handling cleanup in evokernel/runtime, debug output migration to tracing, deprecated code removal, test coverage expansion.
+2. **Kernel Hardening (Track B):** Postgres backend parity, crash-recovery stress testing, lease terminal state persistence, scheduler fairness validation.
+3. **Evolution Autonomy (Track C):** CI failure intake, confidence decay daemon, embedding-based task matching, agent feedback loop, bounded PR lane.
+4. **Developer Experience (Track D):** Per-crate examples, quickstart tutorial, API reference docs.
+5. **Production Readiness (Track E):** OpenTelemetry traces, Prometheus metrics, rate limiting, schema migration hardening.
 
 ## Reusable Release Note Paragraph
 

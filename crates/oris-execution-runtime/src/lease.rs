@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn worker_lease_state_transition_guards() {
         let now = Utc::now();
-        
+
         // Active lease can transition to any terminal state
         let active_record = LeaseRecord {
             lease_id: "L1".to_string(),
@@ -673,10 +673,18 @@ mod tests {
             terminal_at: None,
         };
         let active_lease = WorkerLease::from_record(active_record);
-        assert!(active_lease.can_transition_to(&LeaseTerminalState::Completed).is_ok());
-        assert!(active_lease.can_transition_to(&LeaseTerminalState::Failed).is_ok());
-        assert!(active_lease.can_transition_to(&LeaseTerminalState::Expired).is_ok());
-        assert!(active_lease.can_transition_to(&LeaseTerminalState::Cancelled).is_ok());
+        assert!(active_lease
+            .can_transition_to(&LeaseTerminalState::Completed)
+            .is_ok());
+        assert!(active_lease
+            .can_transition_to(&LeaseTerminalState::Failed)
+            .is_ok());
+        assert!(active_lease
+            .can_transition_to(&LeaseTerminalState::Expired)
+            .is_ok());
+        assert!(active_lease
+            .can_transition_to(&LeaseTerminalState::Cancelled)
+            .is_ok());
 
         // Terminal lease cannot transition again
         let terminal_record = LeaseRecord {
@@ -690,6 +698,8 @@ mod tests {
             terminal_at: Some(now),
         };
         let terminal_lease = WorkerLease::from_record(terminal_record);
-        assert!(terminal_lease.can_transition_to(&LeaseTerminalState::Failed).is_err());
+        assert!(terminal_lease
+            .can_transition_to(&LeaseTerminalState::Failed)
+            .is_err());
     }
 }

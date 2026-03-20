@@ -40,7 +40,12 @@ pub struct EffectLog {
 
 impl EffectLog {
     pub fn new(run_id: RunId, seq: Seq, effect: RuntimeEffect) -> Self {
-        Self { run_id, seq, effect, timestamp_ms: None }
+        Self {
+            run_id,
+            seq,
+            effect,
+            timestamp_ms: None,
+        }
     }
     pub fn is_llm_call(&self) -> bool {
         matches!(self.effect, RuntimeEffect::LLMCall { .. })
