@@ -923,4 +923,302 @@ mod tests {
         assert_eq!(limits.max_concurrent_leases_per_worker, 10);
         assert_eq!(limits.max_queue_depth, 1000);
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #375: Scheduler fairness tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fairness_fcfs_preserves_insertion_order() {
+        let repo = FakeRepository::new(
+            vec![
+                attempt("first", 1),
+                attempt("second", 2),
+                attempt("third", 3),
+            ],
+            &[],
+        );
+        let scheduler = SkeletonScheduler::new(repo.clone());
+
+        let decision = scheduler.dispatch_one("worker-1").expect("dispatch");
+        assert!(matches!(decision, SchedulerDecision::Dispatched { .. }));
+
+        let claimed = repo.claimed_attempts.lock().unwrap();
+        assert_eq!(claimed[0], "first", "FCFS must pick the first candidate");
+    }
+
+    #[test]
+    fn fairness_priority_weighted_dispatches_highest_priority_first() {
+        let repo = FakeRepository::new(
+            vec![attempt("low", 1), attempt("mid", 5), attempt("high", 10)],
+            &[],
+        );
+        let scheduler = SkeletonScheduler::new(repo.clone())
+            .with_fairness_policy(FairnessPolicy::PriorityWeighted { default_weight: 1 });
+
+        let decision = scheduler.dispatch_one("worker-1").expect("dispatch");
+        assert!(matches!(decision, SchedulerDecision::Dispatched { .. }));
+
+        let claimed = repo.claimed_attempts.lock().unwrap();
+        assert_eq!(
+            claimed[0], "high",
+            "PriorityWeighted must pick highest attempt_no first"
+        );
+    }
+
+    #[test]
+    fn fairness_priority_weighted_skips_conflict_picks_next_best() {
+        let repo = FakeRepository::new(
+            vec![attempt("low", 1), attempt("mid", 5), attempt("high", 10)],
+            &["high"], // highest priority is conflicted
+        );
+        let scheduler = SkeletonScheduler::new(repo.clone())
+            .with_fairness_policy(FairnessPolicy::PriorityWeighted { default_weight: 1 });
+
+        let decision = scheduler.dispatch_one("worker-1").expect("dispatch");
+        assert!(matches!(decision, SchedulerDecision::Dispatched { .. }));
+
+        let claimed = repo.claimed_attempts.lock().unwrap();
+        assert_eq!(
+            claimed[0], "mid",
+            "should skip conflicted high and pick mid"
+        );
+    }
+
+    #[test]
+    fn fairness_context_policy_overrides_scheduler_default() {
+        let repo = FakeRepository::new(vec![attempt("low", 1), attempt("high", 10)], &[]);
+        // Scheduler default is FCFS
+        let scheduler = SkeletonScheduler::new(repo.clone());
+
+        // Context overrides to PriorityWeighted
+        let ctx = DispatchContext::new()
+            .with_fairness_policy(FairnessPolicy::PriorityWeighted { default_weight: 1 });
+
+        let decision = scheduler
+            .dispatch_one_with_context("worker-1", Some(&ctx))
+            .expect("dispatch");
+        assert!(matches!(decision, SchedulerDecision::Dispatched { .. }));
+
+        let claimed = repo.claimed_attempts.lock().unwrap();
+        assert_eq!(
+            claimed[0], "high",
+            "context policy override should pick high first"
+        );
+    }
+
+    #[test]
+    fn fairness_roundrobin_falls_back_to_fcfs() {
+        let repo = FakeRepository::new(vec![attempt("first", 1), attempt("second", 2)], &[]);
+        let scheduler =
+            SkeletonScheduler::new(repo.clone()).with_fairness_policy(FairnessPolicy::RoundRobin);
+
+        let decision = scheduler.dispatch_one("worker-1").expect("dispatch");
+        assert!(matches!(decision, SchedulerDecision::Dispatched { .. }));
+
+        let claimed = repo.claimed_attempts.lock().unwrap();
+        assert_eq!(
+            claimed[0], "first",
+            "RoundRobin currently falls back to FCFS"
+        );
+    }
+
+    #[test]
+    fn fairness_multiple_workers_dispatch_independently() {
+        let repo =
+            FakeRepository::new(vec![attempt("a", 1), attempt("b", 2), attempt("c", 3)], &[]);
+        let scheduler = SkeletonScheduler::new(repo.clone());
+
+        let d1 = scheduler.dispatch_one("worker-1").expect("dispatch 1");
+        let d2 = scheduler.dispatch_one("worker-2").expect("dispatch 2");
+        assert!(matches!(d1, SchedulerDecision::Dispatched { .. }));
+        assert!(matches!(d2, SchedulerDecision::Dispatched { .. }));
+
+        let metrics = scheduler.get_metrics();
+        assert_eq!(metrics.worker_lease_counts.get("worker-1"), Some(&1));
+        assert_eq!(metrics.worker_lease_counts.get("worker-2"), Some(&1));
+    }
+
+    #[test]
+    fn fairness_empty_candidates_returns_noop() {
+        let repo = FakeRepository::new(vec![], &[]);
+        let scheduler = SkeletonScheduler::new(repo);
+
+        let decision = scheduler.dispatch_one("worker-1").expect("dispatch");
+        assert!(matches!(decision, SchedulerDecision::Noop));
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #376: Backpressure tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn backpressure_per_tenant_throttle() {
+        let repo = FakeRepository::new(vec![attempt("a", 1)], &[]);
+        let limits = ThrottleLimits {
+            max_concurrent_runs_per_tenant: 2,
+            max_concurrent_leases_per_worker: 100,
+            max_queue_depth: 1000,
+        };
+        let scheduler = SkeletonScheduler::new(repo).with_throttle_limits(limits);
+
+        let ctx = DispatchContext::new().with_tenant("tenant-1");
+
+        // First two dispatches should succeed
+        let d1 = scheduler
+            .dispatch_one_with_context("w1", Some(&ctx))
+            .expect("d1");
+        assert!(matches!(d1, SchedulerDecision::Dispatched { .. }));
+        let d2 = scheduler
+            .dispatch_one_with_context("w2", Some(&ctx))
+            .expect("d2");
+        assert!(matches!(d2, SchedulerDecision::Dispatched { .. }));
+
+        // Third dispatch for same tenant should be throttled
+        let d3 = scheduler
+            .dispatch_one_with_context("w3", Some(&ctx))
+            .expect("d3");
+        match d3 {
+            SchedulerDecision::Backpressure { reason, .. } => {
+                let msg = format!("{:?}", reason);
+                assert!(msg.contains("tenant-1"), "got: {}", msg);
+            }
+            other => panic!("expected Backpressure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn backpressure_per_worker_decrement_reopens_slot() {
+        let repo = FakeRepository::new(vec![attempt("a", 1)], &[]);
+        let limits = ThrottleLimits {
+            max_concurrent_runs_per_tenant: 100,
+            max_concurrent_leases_per_worker: 1,
+            max_queue_depth: 1000,
+        };
+        let scheduler = SkeletonScheduler::new(repo).with_throttle_limits(limits);
+
+        // First dispatch succeeds
+        let d1 = scheduler.dispatch_one("worker-1").expect("d1");
+        assert!(matches!(d1, SchedulerDecision::Dispatched { .. }));
+
+        // Second dispatch is throttled
+        let d2 = scheduler.dispatch_one("worker-1").expect("d2");
+        assert!(matches!(d2, SchedulerDecision::Backpressure { .. }));
+
+        // Decrement opens the slot
+        scheduler.decrement_worker_count("worker-1");
+
+        // Third dispatch succeeds again
+        let d3 = scheduler.dispatch_one("worker-1").expect("d3");
+        assert!(matches!(d3, SchedulerDecision::Dispatched { .. }));
+    }
+
+    #[test]
+    fn backpressure_queue_depth_exact_boundary() {
+        // candidates.len() == limit should trigger backpressure
+        let repo = FakeRepository::new(vec![attempt("a", 1), attempt("b", 2)], &[]);
+        let scheduler = SkeletonScheduler::new(repo);
+        let ctx = DispatchContext::new().with_max_queue_depth(2);
+
+        let decision = scheduler
+            .dispatch_one_with_context("worker-1", Some(&ctx))
+            .expect("dispatch");
+        assert!(
+            matches!(decision, SchedulerDecision::Backpressure { .. }),
+            "queue depth at limit should trigger backpressure"
+        );
+    }
+
+    #[test]
+    fn backpressure_queue_depth_below_limit_dispatches() {
+        let repo = FakeRepository::new(vec![attempt("a", 1), attempt("b", 2)], &[]);
+        let scheduler = SkeletonScheduler::new(repo);
+        let ctx = DispatchContext::new().with_max_queue_depth(5);
+
+        let decision = scheduler
+            .dispatch_one_with_context("worker-1", Some(&ctx))
+            .expect("dispatch");
+        assert!(matches!(decision, SchedulerDecision::Dispatched { .. }));
+    }
+
+    #[test]
+    fn backpressure_circuit_breaker_blocks_all_dispatch() {
+        let repo = FakeRepository::new(vec![attempt("a", 1)], &[]);
+        let cb = Arc::new(CircuitBreaker::new(60));
+        cb.trip();
+        let scheduler = SkeletonScheduler::new(repo).with_circuit_breaker(cb);
+
+        let decision = scheduler.dispatch_one("worker-1").expect("dispatch");
+        match decision {
+            SchedulerDecision::Backpressure { reason, .. } => {
+                let msg = format!("{:?}", reason);
+                assert!(
+                    msg.contains("circuit breaker"),
+                    "expected circuit breaker reason, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected Backpressure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn backpressure_different_tenants_independent_limits() {
+        let repo = FakeRepository::new(vec![attempt("a", 1)], &[]);
+        let limits = ThrottleLimits {
+            max_concurrent_runs_per_tenant: 1,
+            max_concurrent_leases_per_worker: 100,
+            max_queue_depth: 1000,
+        };
+        let scheduler = SkeletonScheduler::new(repo).with_throttle_limits(limits);
+
+        let ctx_t1 = DispatchContext::new().with_tenant("tenant-1");
+        let ctx_t2 = DispatchContext::new().with_tenant("tenant-2");
+
+        // Tenant-1 dispatch succeeds
+        let d1 = scheduler
+            .dispatch_one_with_context("w1", Some(&ctx_t1))
+            .expect("d1");
+        assert!(matches!(d1, SchedulerDecision::Dispatched { .. }));
+
+        // Tenant-1 second dispatch throttled
+        let d2 = scheduler
+            .dispatch_one_with_context("w2", Some(&ctx_t1))
+            .expect("d2");
+        assert!(matches!(d2, SchedulerDecision::Backpressure { .. }));
+
+        // Tenant-2 dispatch succeeds (independent limit)
+        let d3 = scheduler
+            .dispatch_one_with_context("w3", Some(&ctx_t2))
+            .expect("d3");
+        assert!(matches!(d3, SchedulerDecision::Dispatched { .. }));
+    }
+
+    #[test]
+    fn backpressure_metrics_reflect_current_state() {
+        let repo = FakeRepository::new(vec![attempt("a", 1)], &[]);
+        let limits = ThrottleLimits {
+            max_concurrent_runs_per_tenant: 100,
+            max_concurrent_leases_per_worker: 100,
+            max_queue_depth: 1000,
+        };
+        let scheduler = SkeletonScheduler::new(repo).with_throttle_limits(limits);
+
+        let ctx = DispatchContext::new().with_tenant("t1");
+        let _ = scheduler
+            .dispatch_one_with_context("w1", Some(&ctx))
+            .expect("d1");
+        let _ = scheduler
+            .dispatch_one_with_context("w1", Some(&ctx))
+            .expect("d2");
+
+        let metrics = scheduler.get_metrics();
+        assert_eq!(metrics.worker_lease_counts.get("w1"), Some(&2));
+        assert_eq!(metrics.tenant_run_counts.get("t1"), Some(&2));
+
+        // Decrement and verify
+        scheduler.decrement_worker_count("w1");
+        let metrics2 = scheduler.get_metrics();
+        assert_eq!(metrics2.worker_lease_counts.get("w1"), Some(&1));
+    }
 }
