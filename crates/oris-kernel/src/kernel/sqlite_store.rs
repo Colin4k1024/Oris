@@ -376,4 +376,231 @@ mod tests {
         assert_eq!(latest.at_seq, 9);
         assert_eq!(latest.state["k"], "v");
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #373: SQLite crash-recovery tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn crash_recovery_events_survive_reopen() {
+        let path = test_db_path("crash-events");
+        let run_id = "run-crash-events".to_string();
+
+        // Phase 1: Write events then "crash" (drop store)
+        {
+            let store = SqliteEventStore::new(&path);
+            store
+                .append(
+                    &run_id,
+                    &[
+                        Event::StateUpdated {
+                            step_id: Some("n1".into()),
+                            payload: serde_json::json!({"v": 1}),
+                        },
+                        Event::StateUpdated {
+                            step_id: Some("n2".into()),
+                            payload: serde_json::json!({"v": 2}),
+                        },
+                        Event::StateUpdated {
+                            step_id: Some("n3".into()),
+                            payload: serde_json::json!({"v": 3}),
+                        },
+                    ],
+                )
+                .unwrap();
+        } // store dropped — simulates crash
+
+        // Phase 2: Reopen and verify all events survived
+        {
+            let store = SqliteEventStore::new(&path);
+            assert_eq!(store.head(&run_id).unwrap(), 3);
+
+            let events = store.scan(&run_id, 1).unwrap();
+            assert_eq!(events.len(), 3);
+            assert_eq!(events[0].seq, 1);
+            assert_eq!(events[2].seq, 3);
+        }
+    }
+
+    #[test]
+    fn crash_recovery_snapshots_survive_reopen() {
+        let path = test_db_path("crash-snapshots");
+        let run_id = "run-crash-snapshots".to_string();
+
+        // Phase 1: Save snapshot then "crash"
+        {
+            let store: SqliteSnapshotStore<serde_json::Value> = SqliteSnapshotStore::new(&path);
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 5,
+                    state: serde_json::json!({"counter": 42}),
+                })
+                .unwrap();
+        } // store dropped
+
+        // Phase 2: Reopen and verify snapshot survived
+        {
+            let store: SqliteSnapshotStore<serde_json::Value> = SqliteSnapshotStore::new(&path);
+            let snap = store.load_latest(&run_id).unwrap().unwrap();
+            assert_eq!(snap.at_seq, 5);
+            assert_eq!(snap.state["counter"], 42);
+        }
+    }
+
+    #[test]
+    fn crash_recovery_replay_from_snapshot_after_reopen() {
+        let path = test_db_path("crash-replay");
+        let run_id = "run-crash-replay".to_string();
+
+        // Phase 1: Write events and snapshot, then "crash"
+        {
+            let event_store = SqliteEventStore::new(&path);
+            let snap_store: SqliteSnapshotStore<serde_json::Value> =
+                SqliteSnapshotStore::new(&path);
+
+            // Append 5 events
+            event_store
+                .append(
+                    &run_id,
+                    &[
+                        Event::StateUpdated {
+                            step_id: Some("n1".into()),
+                            payload: serde_json::json!({"v": 1}),
+                        },
+                        Event::StateUpdated {
+                            step_id: Some("n2".into()),
+                            payload: serde_json::json!({"v": 2}),
+                        },
+                    ],
+                )
+                .unwrap();
+
+            // Save snapshot at seq 2
+            snap_store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 2,
+                    state: serde_json::json!({"v": 2}),
+                })
+                .unwrap();
+
+            // Append 3 more events (tail beyond snapshot)
+            event_store
+                .append(
+                    &run_id,
+                    &[
+                        Event::StateUpdated {
+                            step_id: Some("n3".into()),
+                            payload: serde_json::json!({"v": 3}),
+                        },
+                        Event::StateUpdated {
+                            step_id: Some("n4".into()),
+                            payload: serde_json::json!({"v": 4}),
+                        },
+                        Event::Completed,
+                    ],
+                )
+                .unwrap();
+        } // stores dropped — crash
+
+        // Phase 2: Reopen and verify recovery path
+        {
+            let event_store = SqliteEventStore::new(&path);
+            let snap_store: SqliteSnapshotStore<serde_json::Value> =
+                SqliteSnapshotStore::new(&path);
+
+            // Load snapshot — should be at seq 2
+            let snap = snap_store.load_latest(&run_id).unwrap().unwrap();
+            assert_eq!(snap.at_seq, 2);
+
+            // Scan tail events (seq > 2)
+            let tail = event_store.scan(&run_id, snap.at_seq + 1).unwrap();
+            assert_eq!(tail.len(), 3); // events 3, 4, 5
+
+            // Verify total event count
+            let all = event_store.scan(&run_id, 1).unwrap();
+            assert_eq!(all.len(), 5);
+            assert_eq!(event_store.head(&run_id).unwrap(), 5);
+        }
+    }
+
+    #[test]
+    fn crash_recovery_multiple_snapshots_latest_wins() {
+        let path = test_db_path("crash-multi-snap");
+        let run_id = "run-crash-multi".to_string();
+
+        // Phase 1: Save multiple snapshots
+        {
+            let store: SqliteSnapshotStore<serde_json::Value> = SqliteSnapshotStore::new(&path);
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 3,
+                    state: serde_json::json!({"v": 3}),
+                })
+                .unwrap();
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 7,
+                    state: serde_json::json!({"v": 7}),
+                })
+                .unwrap();
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 5,
+                    state: serde_json::json!({"v": 5}),
+                })
+                .unwrap();
+        } // crash
+
+        // Phase 2: Latest snapshot (highest at_seq) should be returned
+        {
+            let store: SqliteSnapshotStore<serde_json::Value> = SqliteSnapshotStore::new(&path);
+            let snap = store.load_latest(&run_id).unwrap().unwrap();
+            assert_eq!(snap.at_seq, 7);
+            assert_eq!(snap.state["v"], 7);
+        }
+    }
+
+    #[test]
+    fn crash_recovery_append_after_reopen_continues_sequence() {
+        let path = test_db_path("crash-append");
+        let run_id = "run-crash-append".to_string();
+
+        // Phase 1: Append some events
+        {
+            let store = SqliteEventStore::new(&path);
+            store
+                .append(
+                    &run_id,
+                    &[Event::StateUpdated {
+                        step_id: Some("n1".into()),
+                        payload: serde_json::json!({"v": 1}),
+                    }],
+                )
+                .unwrap();
+        } // crash
+
+        // Phase 2: Reopen and append more — sequence must continue
+        {
+            let store = SqliteEventStore::new(&path);
+            let seq = store
+                .append(
+                    &run_id,
+                    &[Event::StateUpdated {
+                        step_id: Some("n2".into()),
+                        payload: serde_json::json!({"v": 2}),
+                    }],
+                )
+                .unwrap();
+            assert_eq!(seq, 2); // continues from 1
+            assert_eq!(store.head(&run_id).unwrap(), 2);
+
+            let all = store.scan(&run_id, 1).unwrap();
+            assert_eq!(all.len(), 2);
+        }
+    }
 }
