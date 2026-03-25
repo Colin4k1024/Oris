@@ -702,4 +702,155 @@ mod tests {
             .can_transition_to(&LeaseTerminalState::Failed)
             .is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #372: Finalization semantics tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finalization_all_terminal_states_block_execution() {
+        let now = Utc::now();
+        let terminal_states = vec![
+            LeaseTerminalState::Completed,
+            LeaseTerminalState::Failed,
+            LeaseTerminalState::Expired,
+            LeaseTerminalState::Cancelled,
+        ];
+        for state in terminal_states {
+            let record = LeaseRecord {
+                lease_id: format!("L-{:?}", state),
+                attempt_id: "A1".to_string(),
+                worker_id: "W1".to_string(),
+                lease_expires_at: now + Duration::seconds(60),
+                heartbeat_at: now,
+                version: 1,
+                terminal_state: Some(state),
+                terminal_at: Some(now),
+            };
+            let lease = WorkerLease::from_record(record);
+            assert!(
+                lease.check_execution_allowed("W1", now).is_err(),
+                "terminal state {:?} must block execution",
+                lease.terminal_state()
+            );
+        }
+    }
+
+    #[test]
+    fn finalization_terminal_lease_rejects_all_further_transitions() {
+        let now = Utc::now();
+        let terminal_states = vec![
+            LeaseTerminalState::Completed,
+            LeaseTerminalState::Failed,
+            LeaseTerminalState::Expired,
+            LeaseTerminalState::Cancelled,
+        ];
+        for from_state in &terminal_states {
+            let record = LeaseRecord {
+                lease_id: "L1".to_string(),
+                attempt_id: "A1".to_string(),
+                worker_id: "W1".to_string(),
+                lease_expires_at: now + Duration::seconds(10),
+                heartbeat_at: now,
+                version: 1,
+                terminal_state: Some(from_state.clone()),
+                terminal_at: Some(now),
+            };
+            let lease = WorkerLease::from_record(record);
+            for to_state in &terminal_states {
+                assert!(
+                    lease.can_transition_to(to_state).is_err(),
+                    "transition from {:?} to {:?} must be rejected",
+                    from_state,
+                    to_state
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finalization_active_lease_accepts_all_terminal_transitions() {
+        let now = Utc::now();
+        let record = LeaseRecord {
+            lease_id: "L1".to_string(),
+            attempt_id: "A1".to_string(),
+            worker_id: "W1".to_string(),
+            lease_expires_at: now + Duration::seconds(10),
+            heartbeat_at: now,
+            version: 1,
+            terminal_state: None,
+            terminal_at: None,
+        };
+        let lease = WorkerLease::from_record(record);
+        let all_terminal = vec![
+            LeaseTerminalState::Completed,
+            LeaseTerminalState::Failed,
+            LeaseTerminalState::Expired,
+            LeaseTerminalState::Cancelled,
+        ];
+        for state in &all_terminal {
+            assert!(
+                lease.can_transition_to(state).is_ok(),
+                "active lease must accept transition to {:?}",
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn finalization_idempotent_cleanup_double_terminal_rejected() {
+        let now = Utc::now();
+        let active_record = LeaseRecord {
+            lease_id: "L1".to_string(),
+            attempt_id: "A1".to_string(),
+            worker_id: "W1".to_string(),
+            lease_expires_at: now + Duration::seconds(10),
+            heartbeat_at: now,
+            version: 1,
+            terminal_state: None,
+            terminal_at: None,
+        };
+        let active_lease = WorkerLease::from_record(active_record);
+        assert!(active_lease
+            .can_transition_to(&LeaseTerminalState::Completed)
+            .is_ok());
+
+        let terminal_record = LeaseRecord {
+            lease_id: "L1".to_string(),
+            attempt_id: "A1".to_string(),
+            worker_id: "W1".to_string(),
+            lease_expires_at: now + Duration::seconds(10),
+            heartbeat_at: now,
+            version: 2,
+            terminal_state: Some(LeaseTerminalState::Completed),
+            terminal_at: Some(now),
+        };
+        let terminal_lease = WorkerLease::from_record(terminal_record);
+        assert!(terminal_lease
+            .can_transition_to(&LeaseTerminalState::Completed)
+            .is_err());
+        assert!(terminal_lease
+            .can_transition_to(&LeaseTerminalState::Failed)
+            .is_err());
+        assert!(terminal_lease.check_execution_allowed("W1", now).is_err());
+    }
+
+    #[test]
+    fn finalization_terminal_state_is_none_for_active_lease() {
+        let now = Utc::now();
+        let record = LeaseRecord {
+            lease_id: "L1".to_string(),
+            attempt_id: "A1".to_string(),
+            worker_id: "W1".to_string(),
+            lease_expires_at: now + Duration::seconds(10),
+            heartbeat_at: now,
+            version: 1,
+            terminal_state: None,
+            terminal_at: None,
+        };
+        let lease = WorkerLease::from_record(record);
+        assert!(!lease.is_terminal());
+        assert!(lease.terminal_state().is_none());
+        assert!(lease.check_execution_allowed("W1", now).is_ok());
+    }
 }
