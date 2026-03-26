@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    AssetState, Capsule, GeneId, MIN_REPLAY_CONFIDENCE, REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR,
+    AssetState, GeneId, MIN_REPLAY_CONFIDENCE, REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR,
 };
 
 /// Confidence scheduler configuration
@@ -553,6 +553,297 @@ impl BayesianConfidenceUpdater {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-dimensional Confidence Profile (Issue #384)
+// ---------------------------------------------------------------------------
+
+/// Freshness dimension: how recently the asset was validated.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FreshnessDimension {
+    /// Last validation timestamp in milliseconds since epoch.
+    pub last_validated_ms: i64,
+    /// Freshness score in [0.0, 1.0], decays over time.
+    pub score: f32,
+    /// Maximum age in hours before the asset is considered stale.
+    pub max_age_hours: f32,
+}
+
+impl Default for FreshnessDimension {
+    fn default() -> Self {
+        Self {
+            last_validated_ms: 0,
+            score: 1.0,
+            max_age_hours: 24.0,
+        }
+    }
+}
+
+impl FreshnessDimension {
+    /// Recompute freshness score based on current time.
+    pub fn refresh_score(&mut self, now_ms: i64) {
+        let age_hours = (now_ms - self.last_validated_ms) as f32 / 3_600_000.0;
+        self.score = if age_hours <= 0.0 {
+            1.0
+        } else {
+            (-REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR * age_hours)
+                .exp()
+                .clamp(0.0, 1.0)
+        };
+    }
+
+    /// Returns true if the asset is stale (age exceeds max_age_hours).
+    pub fn is_stale(&self, now_ms: i64) -> bool {
+        let age_hours = (now_ms - self.last_validated_ms) as f32 / 3_600_000.0;
+        age_hours > self.max_age_hours
+    }
+
+    /// Record a fresh validation.
+    pub fn record_validation(&mut self, now_ms: i64) {
+        self.last_validated_ms = now_ms;
+        self.score = 1.0;
+    }
+}
+
+/// Compatibility dimension: how well the asset matches the current environment.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CompatibilityDimension {
+    /// Environment fingerprint hash at last validation.
+    pub validated_env_hash: String,
+    /// Compatibility score in [0.0, 1.0].
+    pub score: f32,
+    /// Number of environment changes detected since last validation.
+    pub drift_count: u32,
+    /// Maximum tolerated drift count before requiring revalidation.
+    pub max_drift_tolerance: u32,
+}
+
+impl Default for CompatibilityDimension {
+    fn default() -> Self {
+        Self {
+            validated_env_hash: String::new(),
+            score: 1.0,
+            drift_count: 0,
+            max_drift_tolerance: 3,
+        }
+    }
+}
+
+impl CompatibilityDimension {
+    /// Record a detected environment drift event, reducing compatibility.
+    pub fn record_drift(&mut self) {
+        self.drift_count += 1;
+        let penalty = self.drift_count as f32 * 0.15;
+        self.score = (1.0 - penalty).clamp(0.0, 1.0);
+    }
+
+    /// Reset compatibility after revalidation in the current environment.
+    pub fn record_revalidation(&mut self, env_hash: String) {
+        self.validated_env_hash = env_hash;
+        self.score = 1.0;
+        self.drift_count = 0;
+    }
+
+    /// Returns true if drift exceeds tolerance.
+    pub fn exceeds_drift_tolerance(&self) -> bool {
+        self.drift_count > self.max_drift_tolerance
+    }
+}
+
+/// Reuse evidence dimension: track record of successful reuse.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReuseEvidenceDimension {
+    /// Total successful reuses.
+    pub success_count: u32,
+    /// Total failed reuses.
+    pub failure_count: u32,
+    /// Reuse score in [0.0, 1.0] based on success rate.
+    pub score: f32,
+}
+
+impl Default for ReuseEvidenceDimension {
+    fn default() -> Self {
+        Self {
+            success_count: 0,
+            failure_count: 0,
+            score: 0.667, // Prior: 2/(2+1) matching Bayesian prior
+        }
+    }
+}
+
+impl ReuseEvidenceDimension {
+    /// Record a successful reuse.
+    pub fn record_success(&mut self) {
+        self.success_count += 1;
+        self.recompute_score();
+    }
+
+    /// Record a failed reuse.
+    pub fn record_failure(&mut self) {
+        self.failure_count += 1;
+        self.recompute_score();
+    }
+
+    fn recompute_score(&mut self) {
+        // Beta-Bernoulli with prior alpha=2, beta=1
+        let alpha = 2.0 + self.success_count as f32;
+        let beta = 1.0 + self.failure_count as f32;
+        self.score = alpha / (alpha + beta);
+    }
+
+    /// Total observations.
+    pub fn total_observations(&self) -> u32 {
+        self.success_count + self.failure_count
+    }
+}
+
+/// Thresholds for replay admissibility based on confidence profile.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayAdmissibilityThresholds {
+    /// Minimum freshness score for replay eligibility.
+    pub min_freshness: f32,
+    /// Minimum compatibility score for replay eligibility.
+    pub min_compatibility: f32,
+    /// Minimum reuse evidence score for replay eligibility.
+    pub min_reuse_evidence: f32,
+    /// Minimum composite score for replay eligibility.
+    pub min_composite: f32,
+}
+
+impl Default for ReplayAdmissibilityThresholds {
+    fn default() -> Self {
+        Self {
+            min_freshness: MIN_REPLAY_CONFIDENCE,
+            min_compatibility: 0.5,
+            min_reuse_evidence: 0.3,
+            min_composite: MIN_REPLAY_CONFIDENCE,
+        }
+    }
+}
+
+/// Lifecycle state of a confidence profile.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConfidenceLifecycleState {
+    /// Newly created, not yet fully evaluated.
+    Initial,
+    /// Actively maintained with recent evidence.
+    Active,
+    /// Freshness or compatibility is degrading.
+    Degrading,
+    /// Requires revalidation before replay.
+    NeedsRevalidation,
+    /// Demoted due to failures or drift.
+    Demoted,
+    /// Fully revoked, not eligible for any use.
+    Revoked,
+}
+
+impl Default for ConfidenceLifecycleState {
+    fn default() -> Self {
+        Self::Initial
+    }
+}
+
+/// Multi-dimensional confidence profile that models confidence as a lifecycle.
+///
+/// Instead of a single f32 score, confidence is decomposed into three
+/// orthogonal dimensions: freshness (time-based decay), compatibility
+/// (environment drift), and reuse evidence (historical success rate).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConfidenceProfile {
+    /// Asset identifier this profile belongs to.
+    pub asset_id: String,
+    /// Freshness dimension.
+    pub freshness: FreshnessDimension,
+    /// Compatibility dimension.
+    pub compatibility: CompatibilityDimension,
+    /// Reuse evidence dimension.
+    pub reuse_evidence: ReuseEvidenceDimension,
+    /// Lifecycle state derived from dimension scores.
+    pub lifecycle_state: ConfidenceLifecycleState,
+    /// Thresholds for replay admissibility.
+    pub thresholds: ReplayAdmissibilityThresholds,
+    /// Creation timestamp in milliseconds.
+    pub created_at_ms: i64,
+    /// Last update timestamp in milliseconds.
+    pub updated_at_ms: i64,
+}
+
+impl ConfidenceProfile {
+    /// Create a new profile for an asset.
+    pub fn new(asset_id: impl Into<String>, now_ms: i64) -> Self {
+        let mut freshness = FreshnessDimension::default();
+        freshness.last_validated_ms = now_ms;
+        Self {
+            asset_id: asset_id.into(),
+            freshness,
+            compatibility: CompatibilityDimension::default(),
+            reuse_evidence: ReuseEvidenceDimension::default(),
+            lifecycle_state: ConfidenceLifecycleState::Initial,
+            thresholds: ReplayAdmissibilityThresholds::default(),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        }
+    }
+
+    /// Compute the composite confidence score (weighted mean of dimensions).
+    pub fn composite_score(&self) -> f32 {
+        let score = 0.4 * self.freshness.score
+            + 0.35 * self.compatibility.score
+            + 0.25 * self.reuse_evidence.score;
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Check if this asset is eligible for replay.
+    pub fn is_replay_eligible(&self) -> bool {
+        self.freshness.score >= self.thresholds.min_freshness
+            && self.compatibility.score >= self.thresholds.min_compatibility
+            && self.reuse_evidence.score >= self.thresholds.min_reuse_evidence
+            && self.composite_score() >= self.thresholds.min_composite
+            && !matches!(
+                self.lifecycle_state,
+                ConfidenceLifecycleState::Demoted
+                    | ConfidenceLifecycleState::Revoked
+                    | ConfidenceLifecycleState::NeedsRevalidation
+            )
+    }
+
+    /// Update the lifecycle state based on current dimension scores.
+    pub fn update_lifecycle_state(&mut self, now_ms: i64) {
+        self.freshness.refresh_score(now_ms);
+        self.updated_at_ms = now_ms;
+
+        if matches!(self.lifecycle_state, ConfidenceLifecycleState::Revoked) {
+            return; // Revoked is terminal unless explicitly reinstated
+        }
+
+        if self.compatibility.exceeds_drift_tolerance() {
+            self.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        } else if self.freshness.is_stale(now_ms) {
+            self.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        } else if self.freshness.score < self.thresholds.min_freshness
+            || self.compatibility.score < self.thresholds.min_compatibility
+        {
+            self.lifecycle_state = ConfidenceLifecycleState::Degrading;
+        } else if self.reuse_evidence.total_observations() == 0 {
+            self.lifecycle_state = ConfidenceLifecycleState::Initial;
+        } else {
+            self.lifecycle_state = ConfidenceLifecycleState::Active;
+        }
+    }
+
+    /// Demote this profile (e.g., after repeated failures).
+    pub fn demote(&mut self, now_ms: i64) {
+        self.lifecycle_state = ConfidenceLifecycleState::Demoted;
+        self.updated_at_ms = now_ms;
+    }
+
+    /// Revoke this profile permanently.
+    pub fn revoke(&mut self, now_ms: i64) {
+        self.lifecycle_state = ConfidenceLifecycleState::Revoked;
+        self.updated_at_ms = now_ms;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,5 +1127,98 @@ mod tests {
 
         assert!((seq.posterior_mean() - bulk.posterior_mean()).abs() < 1e-6);
         assert!((seq.posterior_variance() - bulk.posterior_variance()).abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // ConfidenceProfile tests (Issue #384)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn confidence_profile_new_has_initial_state() {
+        let now = 1_700_000_000_000i64;
+        let profile = ConfidenceProfile::new("asset-1", now);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Initial);
+        assert!(profile.is_replay_eligible());
+        assert!(profile.composite_score() > 0.8);
+    }
+
+    #[test]
+    fn confidence_profile_freshness_decay() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-2", now);
+        let later = now + 25 * 3_600_000;
+        profile.update_lifecycle_state(later);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn confidence_profile_drift_triggers_revalidation() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-3", now);
+        for _ in 0..4 {
+            profile.compatibility.record_drift();
+        }
+        profile.update_lifecycle_state(now + 1000);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn confidence_profile_reuse_evidence_updates() {
+        let mut reuse = ReuseEvidenceDimension::default();
+        reuse.record_success();
+        reuse.record_success();
+        reuse.record_failure();
+        assert!((reuse.score - 0.667).abs() < 0.01);
+        assert_eq!(reuse.total_observations(), 3);
+    }
+
+    #[test]
+    fn confidence_profile_composite_score_weighted() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-4", now);
+        profile.freshness.score = 0.8;
+        profile.compatibility.score = 0.6;
+        profile.reuse_evidence.score = 0.5;
+        assert!((profile.composite_score() - 0.655).abs() < 0.01);
+    }
+
+    #[test]
+    fn confidence_profile_demote_and_revoke() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-5", now);
+        profile.demote(now + 1000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted);
+        assert!(!profile.is_replay_eligible());
+
+        profile.revoke(now + 2000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+        profile.update_lifecycle_state(now + 3000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+    }
+
+    #[test]
+    fn compatibility_revalidation_resets_drift() {
+        let mut compat = CompatibilityDimension::default();
+        compat.record_drift();
+        compat.record_drift();
+        assert_eq!(compat.drift_count, 2);
+        assert!(compat.score < 1.0);
+        compat.record_revalidation("new-env-hash".to_string());
+        assert_eq!(compat.drift_count, 0);
+        assert!((compat.score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn replay_admissibility_thresholds_gate_correctly() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-6", now);
+        profile.compatibility.score = 0.3;
+        assert!(!profile.is_replay_eligible());
     }
 }
