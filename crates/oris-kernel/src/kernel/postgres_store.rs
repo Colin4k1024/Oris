@@ -563,4 +563,223 @@ mod tests {
         assert_eq!(latest.at_seq, 7);
         assert_eq!(latest.state["k"], "v");
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #374: Postgres parity tests (mirrors SQLite crash-recovery suite)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn postgres_parity_events_survive_reconnect() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let schema = test_schema();
+        let run_id = "run-parity-events".to_string();
+
+        // Phase 1: Write events then drop store
+        {
+            let store = PostgresEventStore::new(&db_url).with_schema(&schema);
+            store
+                .append(
+                    &run_id,
+                    &[
+                        Event::StateUpdated {
+                            step_id: Some("n1".into()),
+                            payload: serde_json::json!({"v": 1}),
+                        },
+                        Event::StateUpdated {
+                            step_id: Some("n2".into()),
+                            payload: serde_json::json!({"v": 2}),
+                        },
+                        Event::StateUpdated {
+                            step_id: Some("n3".into()),
+                            payload: serde_json::json!({"v": 3}),
+                        },
+                    ],
+                )
+                .unwrap();
+        }
+
+        // Phase 2: Reconnect and verify
+        {
+            let store = PostgresEventStore::new(&db_url).with_schema(&schema);
+            assert_eq!(store.head(&run_id).unwrap(), 3);
+            let events = store.scan(&run_id, 1).unwrap();
+            assert_eq!(events.len(), 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_parity_snapshots_survive_reconnect() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let schema = test_schema();
+        let run_id = "run-parity-snapshots".to_string();
+
+        {
+            let store: PostgresSnapshotStore<serde_json::Value> =
+                PostgresSnapshotStore::new(&db_url).with_schema(&schema);
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 5,
+                    state: serde_json::json!({"counter": 42}),
+                })
+                .unwrap();
+        }
+
+        {
+            let store: PostgresSnapshotStore<serde_json::Value> =
+                PostgresSnapshotStore::new(&db_url).with_schema(&schema);
+            let snap = store.load_latest(&run_id).unwrap().unwrap();
+            assert_eq!(snap.at_seq, 5);
+            assert_eq!(snap.state["counter"], 42);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_parity_replay_from_snapshot_after_reconnect() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let schema = test_schema();
+        let run_id = "run-parity-replay".to_string();
+
+        {
+            let event_store = PostgresEventStore::new(&db_url).with_schema(&schema);
+            let snap_store: PostgresSnapshotStore<serde_json::Value> =
+                PostgresSnapshotStore::new(&db_url).with_schema(&schema);
+
+            event_store
+                .append(
+                    &run_id,
+                    &[
+                        Event::StateUpdated {
+                            step_id: Some("n1".into()),
+                            payload: serde_json::json!({"v": 1}),
+                        },
+                        Event::StateUpdated {
+                            step_id: Some("n2".into()),
+                            payload: serde_json::json!({"v": 2}),
+                        },
+                    ],
+                )
+                .unwrap();
+
+            snap_store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 2,
+                    state: serde_json::json!({"v": 2}),
+                })
+                .unwrap();
+
+            event_store
+                .append(
+                    &run_id,
+                    &[
+                        Event::StateUpdated {
+                            step_id: Some("n3".into()),
+                            payload: serde_json::json!({"v": 3}),
+                        },
+                        Event::Completed,
+                    ],
+                )
+                .unwrap();
+        }
+
+        {
+            let event_store = PostgresEventStore::new(&db_url).with_schema(&schema);
+            let snap_store: PostgresSnapshotStore<serde_json::Value> =
+                PostgresSnapshotStore::new(&db_url).with_schema(&schema);
+
+            let snap = snap_store.load_latest(&run_id).unwrap().unwrap();
+            assert_eq!(snap.at_seq, 2);
+
+            let tail = event_store.scan(&run_id, snap.at_seq + 1).unwrap();
+            assert_eq!(tail.len(), 2);
+            assert_eq!(event_store.head(&run_id).unwrap(), 4);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_parity_multiple_snapshots_latest_wins() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let schema = test_schema();
+        let run_id = "run-parity-multi".to_string();
+
+        {
+            let store: PostgresSnapshotStore<serde_json::Value> =
+                PostgresSnapshotStore::new(&db_url).with_schema(&schema);
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 3,
+                    state: serde_json::json!({"v": 3}),
+                })
+                .unwrap();
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 7,
+                    state: serde_json::json!({"v": 7}),
+                })
+                .unwrap();
+            store
+                .save(&Snapshot {
+                    run_id: run_id.clone(),
+                    at_seq: 5,
+                    state: serde_json::json!({"v": 5}),
+                })
+                .unwrap();
+        }
+
+        {
+            let store: PostgresSnapshotStore<serde_json::Value> =
+                PostgresSnapshotStore::new(&db_url).with_schema(&schema);
+            let snap = store.load_latest(&run_id).unwrap().unwrap();
+            assert_eq!(snap.at_seq, 7);
+            assert_eq!(snap.state["v"], 7);
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_parity_append_after_reconnect_continues_sequence() {
+        let Some(db_url) = test_db_url() else {
+            return;
+        };
+        let schema = test_schema();
+        let run_id = "run-parity-append".to_string();
+
+        {
+            let store = PostgresEventStore::new(&db_url).with_schema(&schema);
+            store
+                .append(
+                    &run_id,
+                    &[Event::StateUpdated {
+                        step_id: Some("n1".into()),
+                        payload: serde_json::json!({"v": 1}),
+                    }],
+                )
+                .unwrap();
+        }
+
+        {
+            let store = PostgresEventStore::new(&db_url).with_schema(&schema);
+            let seq = store
+                .append(
+                    &run_id,
+                    &[Event::StateUpdated {
+                        step_id: Some("n2".into()),
+                        payload: serde_json::json!({"v": 2}),
+                    }],
+                )
+                .unwrap();
+            assert_eq!(seq, 2);
+            assert_eq!(store.head(&run_id).unwrap(), 2);
+        }
+    }
 }
