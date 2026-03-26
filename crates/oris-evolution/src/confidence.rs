@@ -968,6 +968,194 @@ pub fn apply_decay_batch(
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Shadow Revalidation Scheduling (Issue #386)
+// ---------------------------------------------------------------------------
+
+/// Priority class for revalidation scheduling.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RevalidationPriority {
+    /// Low priority: asset is still above thresholds but aging.
+    Low,
+    /// Medium priority: asset is degrading.
+    Medium,
+    /// High priority: asset is below threshold or has high reuse count.
+    High,
+    /// Critical: asset was demoted and needs immediate revalidation.
+    Critical,
+}
+
+/// A scheduled revalidation target.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevalidationTarget {
+    /// Asset identifier.
+    pub asset_id: String,
+    /// Priority of this revalidation.
+    pub priority: RevalidationPriority,
+    /// Current composite confidence score.
+    pub current_composite: f32,
+    /// Whether the freshness dimension is stale.
+    pub freshness_stale: bool,
+    /// Whether compatibility drift exceeds tolerance.
+    pub drift_exceeded: bool,
+    /// Total reuse count (higher reuse = higher value asset).
+    pub reuse_count: u32,
+    /// Scheduled revalidation timestamp (ms). 0 means ASAP.
+    pub scheduled_at_ms: i64,
+}
+
+/// Configuration for the revalidation scheduler.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevalidationSchedulerConfig {
+    /// Maximum number of concurrent revalidations.
+    pub max_concurrent: usize,
+    /// Interval between revalidation sweeps in seconds.
+    pub sweep_interval_secs: u64,
+    /// High-value threshold: assets with reuse_count above this get priority boost.
+    pub high_value_reuse_threshold: u32,
+    /// Confidence threshold below which revalidation is scheduled.
+    pub revalidation_confidence_threshold: f32,
+}
+
+impl Default for RevalidationSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 5,
+            sweep_interval_secs: 300,
+            high_value_reuse_threshold: 10,
+            revalidation_confidence_threshold: 0.5,
+        }
+    }
+}
+
+/// Outcome of a shadow revalidation attempt.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ShadowRevalidationOutcome {
+    /// Asset passed revalidation, confidence restored.
+    Passed,
+    /// Asset failed revalidation, confidence reduced further.
+    Failed,
+    /// Revalidation was skipped (e.g., asset was revoked).
+    Skipped,
+}
+
+/// Result of processing a revalidation.
+#[derive(Clone, Debug)]
+pub struct RevalidationResult {
+    pub asset_id: String,
+    pub outcome: ShadowRevalidationOutcome,
+    pub old_composite: f32,
+    pub new_composite: f32,
+}
+
+/// Scan profiles and produce a priority-sorted list of revalidation targets.
+pub fn schedule_revalidations(
+    profiles: &[ConfidenceProfile],
+    now_ms: i64,
+    config: &RevalidationSchedulerConfig,
+) -> Vec<RevalidationTarget> {
+    let mut targets: Vec<RevalidationTarget> = profiles
+        .iter()
+        .filter(|p| {
+            !matches!(
+                p.lifecycle_state,
+                ConfidenceLifecycleState::Revoked | ConfidenceLifecycleState::Active
+            )
+        })
+        .filter(|p| {
+            matches!(
+                p.lifecycle_state,
+                ConfidenceLifecycleState::Demoted | ConfidenceLifecycleState::NeedsRevalidation
+            ) || p.composite_score() < config.revalidation_confidence_threshold
+        })
+        .map(|p| {
+            let reuse_count = p.reuse_evidence.total_observations();
+            let priority = compute_revalidation_priority(p, config);
+            RevalidationTarget {
+                asset_id: p.asset_id.clone(),
+                priority,
+                current_composite: p.composite_score(),
+                freshness_stale: p.freshness.is_stale(now_ms),
+                drift_exceeded: p.compatibility.exceeds_drift_tolerance(),
+                reuse_count,
+                scheduled_at_ms: 0, // ASAP
+            }
+        })
+        .collect();
+
+    // Sort by priority (Critical first), then by composite (lowest first)
+    targets.sort_by(|a, b| {
+        b.priority.cmp(&a.priority).then_with(|| {
+            a.current_composite
+                .partial_cmp(&b.current_composite)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+
+    // Limit to max_concurrent
+    targets.truncate(config.max_concurrent);
+    targets
+}
+
+fn compute_revalidation_priority(
+    profile: &ConfidenceProfile,
+    config: &RevalidationSchedulerConfig,
+) -> RevalidationPriority {
+    if matches!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted) {
+        return RevalidationPriority::Critical;
+    }
+    if profile.composite_score() < MIN_REPLAY_CONFIDENCE {
+        return RevalidationPriority::High;
+    }
+    if profile.reuse_evidence.total_observations() >= config.high_value_reuse_threshold {
+        return RevalidationPriority::High;
+    }
+    if matches!(
+        profile.lifecycle_state,
+        ConfidenceLifecycleState::NeedsRevalidation
+    ) {
+        return RevalidationPriority::Medium;
+    }
+    RevalidationPriority::Low
+}
+
+/// Apply a revalidation outcome to a profile, adjusting confidence.
+pub fn apply_revalidation_outcome(
+    profile: &mut ConfidenceProfile,
+    outcome: ShadowRevalidationOutcome,
+    now_ms: i64,
+    env_hash: Option<String>,
+) -> RevalidationResult {
+    let old_composite = profile.composite_score();
+
+    match outcome {
+        ShadowRevalidationOutcome::Passed => {
+            profile.freshness.record_validation(now_ms);
+            if let Some(hash) = env_hash {
+                profile.compatibility.record_revalidation(hash);
+            }
+            profile.reuse_evidence.record_success();
+            profile.update_lifecycle_state(now_ms);
+        }
+        ShadowRevalidationOutcome::Failed => {
+            profile.reuse_evidence.record_failure();
+            profile.update_lifecycle_state(now_ms);
+            // If already degrading and fails, demote
+            if profile.composite_score() < MIN_REPLAY_CONFIDENCE {
+                profile.demote(now_ms);
+            }
+        }
+        ShadowRevalidationOutcome::Skipped => {}
+    }
+
+    RevalidationResult {
+        asset_id: profile.asset_id.clone(),
+        outcome,
+        old_composite,
+        new_composite: profile.composite_score(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1410,5 +1598,110 @@ mod tests {
         let far_future = now + 48 * 3_600_000;
         let result = apply_decay_rules(&mut profile, far_future, 5, &config);
         assert!(!result.demoted);
+    }
+
+    // -----------------------------------------------------------------------
+    // Revalidation Scheduling tests (Issue #386)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn revalidation_schedules_degrading_profiles() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("reval-1", now);
+        // Make it degrading
+        profile.freshness.score = 0.3;
+        profile.compatibility.score = 0.4;
+        profile.lifecycle_state = ConfidenceLifecycleState::Degrading;
+
+        let config = RevalidationSchedulerConfig::default();
+        let targets = schedule_revalidations(&[profile], now, &config);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].asset_id, "reval-1");
+    }
+
+    #[test]
+    fn revalidation_skips_active_and_revoked() {
+        let now = 1_700_000_000_000i64;
+        let mut active = ConfidenceProfile::new("active", now);
+        active.lifecycle_state = ConfidenceLifecycleState::Active;
+
+        let mut revoked = ConfidenceProfile::new("revoked", now);
+        revoked.lifecycle_state = ConfidenceLifecycleState::Revoked;
+
+        let config = RevalidationSchedulerConfig::default();
+        let targets = schedule_revalidations(&[active, revoked], now, &config);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn revalidation_priority_demoted_is_critical() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("demoted-1", now);
+        profile.lifecycle_state = ConfidenceLifecycleState::Demoted;
+        profile.freshness.score = 0.2;
+
+        let config = RevalidationSchedulerConfig::default();
+        let targets = schedule_revalidations(&[profile], now, &config);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].priority, RevalidationPriority::Critical);
+    }
+
+    #[test]
+    fn revalidation_respects_max_concurrent() {
+        let now = 1_700_000_000_000i64;
+        let profiles: Vec<ConfidenceProfile> = (0..10)
+            .map(|i| {
+                let mut p = ConfidenceProfile::new(format!("asset-{i}"), now);
+                p.freshness.score = 0.2;
+                p.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+                p
+            })
+            .collect();
+
+        let config = RevalidationSchedulerConfig {
+            max_concurrent: 3,
+            ..Default::default()
+        };
+        let targets = schedule_revalidations(&profiles, now, &config);
+        assert_eq!(targets.len(), 3);
+    }
+
+    #[test]
+    fn apply_revalidation_passed_restores_confidence() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("reval-pass", now);
+        profile.freshness.score = 0.3;
+        profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        let old = profile.composite_score();
+
+        let result = apply_revalidation_outcome(
+            &mut profile,
+            ShadowRevalidationOutcome::Passed,
+            now + 1000,
+            Some("env-hash-new".to_string()),
+        );
+        assert_eq!(result.outcome, ShadowRevalidationOutcome::Passed);
+        assert!(result.new_composite > old);
+    }
+
+    #[test]
+    fn apply_revalidation_failed_may_demote() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("reval-fail", now);
+        // Set last_validated far in the past so refresh_score keeps freshness low
+        profile.freshness.last_validated_ms = now - 30 * 3_600_000; // 30 hours ago
+        profile.freshness.score = 0.2;
+        profile.compatibility.score = 0.3;
+        profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+
+        let result = apply_revalidation_outcome(
+            &mut profile,
+            ShadowRevalidationOutcome::Failed,
+            now + 1000,
+            None,
+        );
+        assert_eq!(result.outcome, ShadowRevalidationOutcome::Failed);
+        // With low freshness and compatibility, should be demoted
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted);
     }
 }
