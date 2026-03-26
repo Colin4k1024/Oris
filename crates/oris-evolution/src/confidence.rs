@@ -1124,6 +1124,104 @@ pub fn detect_drift_signals(
 }
 
 // ---------------------------------------------------------------------------
+// Remote Trust with Local Evidence (Issue #389)
+// ---------------------------------------------------------------------------
+
+/// Origin of an asset's trust evidence.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TrustOrigin {
+    /// Validated locally on this node.
+    Local,
+    /// Received from a remote peer via the evolution network.
+    Remote { peer_id: String },
+}
+
+impl Default for TrustOrigin {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+/// Local evidence record for a remote asset.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LocalEvidenceRecord {
+    /// Timestamp of last local validation (ms).
+    pub last_local_validation_ms: i64,
+    /// Whether local validation passed.
+    pub local_validation_passed: bool,
+    /// Number of local validations performed.
+    pub local_validation_count: u32,
+}
+
+/// Policy for requiring local evidence on remote assets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteTrustPolicy {
+    /// Maximum age (hours) of local evidence before remote asset becomes untrusted.
+    pub max_local_evidence_age_hours: f32,
+    /// Whether remote assets without any local evidence are trusted.
+    pub trust_unvalidated_remote: bool,
+    /// Minimum local validations required before a remote asset is trusted.
+    pub min_local_validations: u32,
+}
+
+impl Default for RemoteTrustPolicy {
+    fn default() -> Self {
+        Self {
+            max_local_evidence_age_hours: 12.0,
+            trust_unvalidated_remote: false,
+            min_local_validations: 1,
+        }
+    }
+}
+
+/// Check whether a remote asset has sufficient local evidence to remain trusted.
+pub fn remote_asset_has_local_evidence(
+    origin: &TrustOrigin,
+    local_evidence: Option<&LocalEvidenceRecord>,
+    now_ms: i64,
+    policy: &RemoteTrustPolicy,
+) -> bool {
+    // Local assets are always trusted (they are the evidence)
+    if matches!(origin, TrustOrigin::Local) {
+        return true;
+    }
+
+    let evidence = match local_evidence {
+        Some(e) => e,
+        None => return policy.trust_unvalidated_remote,
+    };
+
+    if !evidence.local_validation_passed {
+        return false;
+    }
+
+    if evidence.local_validation_count < policy.min_local_validations {
+        return false;
+    }
+
+    let age_hours = (now_ms - evidence.last_local_validation_ms) as f32 / 3_600_000.0;
+    age_hours <= policy.max_local_evidence_age_hours
+}
+
+/// Apply remote trust policy to a confidence profile, demoting if local evidence is stale.
+pub fn enforce_remote_trust_policy(
+    profile: &mut ConfidenceProfile,
+    origin: &TrustOrigin,
+    local_evidence: Option<&LocalEvidenceRecord>,
+    now_ms: i64,
+    policy: &RemoteTrustPolicy,
+) -> bool {
+    if remote_asset_has_local_evidence(origin, local_evidence, now_ms, policy) {
+        return true;
+    }
+
+    // Remote asset without sufficient local evidence → needs revalidation
+    profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+    profile.updated_at_ms = now_ms;
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Shadow Revalidation Scheduling (Issue #386)
 // ---------------------------------------------------------------------------
 
@@ -2075,5 +2173,123 @@ mod tests {
                 .assets_requiring_revalidation()
                 .contains(&"gated-asset".to_string()));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Remote Trust with Local Evidence tests (Issue #389)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn local_assets_always_trusted() {
+        let policy = RemoteTrustPolicy::default();
+        assert!(remote_asset_has_local_evidence(
+            &TrustOrigin::Local,
+            None,
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_without_evidence_untrusted_by_default() {
+        let policy = RemoteTrustPolicy::default();
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        assert!(!remote_asset_has_local_evidence(
+            &origin, None, NOW, &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_with_fresh_local_evidence_trusted() {
+        let policy = RemoteTrustPolicy::default();
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: NOW - 3_600_000, // 1 hour ago
+            local_validation_passed: true,
+            local_validation_count: 1,
+        };
+        assert!(remote_asset_has_local_evidence(
+            &origin,
+            Some(&evidence),
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_with_stale_evidence_untrusted() {
+        let policy = RemoteTrustPolicy::default(); // max 12 hours
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: NOW - 24 * 3_600_000, // 24 hours ago
+            local_validation_passed: true,
+            local_validation_count: 5,
+        };
+        assert!(!remote_asset_has_local_evidence(
+            &origin,
+            Some(&evidence),
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_with_failed_validation_untrusted() {
+        let policy = RemoteTrustPolicy::default();
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: NOW,
+            local_validation_passed: false,
+            local_validation_count: 1,
+        };
+        assert!(!remote_asset_has_local_evidence(
+            &origin,
+            Some(&evidence),
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn enforce_remote_policy_demotes_stale_remote() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("remote-1", now);
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let policy = RemoteTrustPolicy::default();
+        let trusted = enforce_remote_trust_policy(&mut profile, &origin, None, now, &policy);
+        assert!(!trusted);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn enforce_remote_policy_keeps_valid_remote_active() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("remote-2", now);
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: now - 3_600_000,
+            local_validation_passed: true,
+            local_validation_count: 2,
+        };
+        let policy = RemoteTrustPolicy::default();
+        let trusted =
+            enforce_remote_trust_policy(&mut profile, &origin, Some(&evidence), now, &policy);
+        assert!(trusted);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Initial);
     }
 }
