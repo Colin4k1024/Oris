@@ -14,7 +14,7 @@
 //!     EvolutionPipelineConfig::default(),
 //!     build_selector(),
 //! )
-//! .with_signal_extractor(Arc::new(RuntimeSignalExtractorAdapter::new()))
+//! .with_signal_extractor(Arc::new(RuntimeSignalExtractorAdapter::default()))
 //! .with_sandbox(Arc::new(LocalSandboxAdapter::new(
 //!     "run-001",
 //!     "/path/to/workspace",
@@ -32,7 +32,7 @@ use oris_evolution::{
 };
 use oris_sandbox::{LocalProcessSandbox, Sandbox, SandboxError, SandboxPolicy};
 
-use crate::signal_extractor::RuntimeSignalExtractor;
+use crate::signal_extractor::{RuntimeSignalExtractor, SignalExtractorError};
 // ─────────────────────────────────────────────────────────────────────────────
 // RuntimeSignalExtractorAdapter
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,16 +47,16 @@ pub struct RuntimeSignalExtractorAdapter {
 
 impl RuntimeSignalExtractorAdapter {
     /// Create a new adapter with a fresh `RuntimeSignalExtractor`.
-    pub fn new() -> Self {
-        Self {
-            inner: RuntimeSignalExtractor::new(),
-        }
+    pub fn new() -> Result<Self, SignalExtractorError> {
+        Ok(Self {
+            inner: RuntimeSignalExtractor::new()?,
+        })
     }
 }
 
 impl Default for RuntimeSignalExtractorAdapter {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("built-in regex patterns are valid")
     }
 }
 

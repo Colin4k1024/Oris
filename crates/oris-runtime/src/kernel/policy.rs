@@ -185,8 +185,10 @@ impl<P: Policy> RetryWithBackoffPolicy<P> {
     }
 
     fn delay_ms(&self, err: &ActionError, attempt: u32) -> u64 {
-        if matches!(err.kind, ActionErrorKind::RateLimited) && err.retry_after_ms.is_some() {
-            return err.retry_after_ms.unwrap();
+        if matches!(err.kind, ActionErrorKind::RateLimited) {
+            if let Some(ms) = err.retry_after_ms {
+                return ms;
+            }
         }
         let exp = self
             .backoff_base_ms

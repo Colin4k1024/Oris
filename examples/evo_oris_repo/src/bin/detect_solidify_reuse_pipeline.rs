@@ -144,7 +144,7 @@ fn main() -> ExampleResult<()> {
     // ── 1. Build adapters ──────────────────────────────────────────────────────
 
     // Signal extractor: converts compiler diagnostics into `EvolutionSignal`s.
-    let extractor = Arc::new(RuntimeSignalExtractorAdapter::new());
+    let extractor = Arc::new(RuntimeSignalExtractorAdapter::default());
 
     // Gene store: in-memory SQLite (":memory:") — no filesystem I/O required.
     let gene_store = Arc::new(

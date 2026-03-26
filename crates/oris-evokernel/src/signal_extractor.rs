@@ -12,6 +12,13 @@ use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+/// Error type for signal extraction operations
+#[derive(Debug, thiserror::Error)]
+pub enum SignalExtractorError {
+    #[error("invalid regex pattern: {0}")]
+    InvalidRegex(#[from] regex_lite::Error),
+}
+
 /// A signal extracted from runtime execution
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeSignal {
@@ -88,94 +95,94 @@ pub struct CompilerDiagnosticsParser {
 
 impl CompilerDiagnosticsParser {
     /// Create a new parser with default patterns
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, SignalExtractorError> {
         let rustc_error_patterns = vec![
             // Rust errors
             (
-                Regex::new(r"error\[E\d+\]:\s*(.+)").unwrap(),
+                Regex::new(r"error\[E\d+\]:\s*(.+)")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)borrow checker error").unwrap(),
+                Regex::new(r"^(?i)borrow checker error")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)cannot find (function|struct|module|trait|macro)").unwrap(),
+                Regex::new(r"^(?i)cannot find (function|struct|module|trait|macro)")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)unresolved (import|item)").unwrap(),
+                Regex::new(r"^(?i)unresolved (import|item)")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)type mismatch").unwrap(),
+                Regex::new(r"^(?i)type mismatch")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)mismatched types").unwrap(),
+                Regex::new(r"^(?i)mismatched types")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)expected (struct|enum|tuple|array)").unwrap(),
+                Regex::new(r"^(?i)expected (struct|enum|tuple|array)")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)trait bound.*not satisfied").unwrap(),
+                Regex::new(r"^(?i)trait bound.*not satisfied")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)the trait.*is not implemented").unwrap(),
+                Regex::new(r"^(?i)the trait.*is not implemented")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)method.*not found").unwrap(),
+                Regex::new(r"^(?i)method.*not found")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)no method named.*found").unwrap(),
+                Regex::new(r"^(?i)no method named.*found")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)cannot borrow.*as.*mutable").unwrap(),
+                Regex::new(r"^(?i)cannot borrow.*as.*mutable")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)cannot borrow.*as.*immutable").unwrap(),
+                Regex::new(r"^(?i)cannot borrow.*as.*immutable")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)lifetime.*required").unwrap(),
+                Regex::new(r"^(?i)lifetime.*required")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
         ];
 
         let rustc_warning_patterns = vec![
             (
-                Regex::new(r"warning\[W\d+\]:\s*(.+)").unwrap(),
+                Regex::new(r"warning\[W\d+\]:\s*(.+)")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)unused (import|variable|function|struct)").unwrap(),
+                Regex::new(r"^(?i)unused (import|variable|function|struct)")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)dead code").unwrap(),
+                Regex::new(r"^(?i)dead code")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)field is never read").unwrap(),
+                Regex::new(r"^(?i)field is never read")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
             (
-                Regex::new(r"^(?i)deprecated").unwrap(),
+                Regex::new(r"^(?i)deprecated")?,
                 RuntimeSignalType::CompilerDiagnostic,
             ),
         ];
 
-        Self {
+        Ok(Self {
             rustc_error_patterns,
             rustc_warning_patterns,
-        }
+        })
     }
 
     /// Parse compiler output and extract signals
@@ -216,7 +223,7 @@ impl CompilerDiagnosticsParser {
 
 impl Default for CompilerDiagnosticsParser {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("built-in regex patterns are valid")
     }
 }
 
@@ -230,12 +237,13 @@ pub struct StackTraceParser {
 
 impl StackTraceParser {
     /// Create a new parser
-    pub fn new() -> Self {
-        Self {
-            stack_trace_pattern: Regex::new(r"(?m)^\s+at\s+(.+?)(?:\s+in\s+(.+?))?(?:\s+\(.*\))?$")
-                .unwrap(),
-            panic_pattern: Regex::new(r"(?i)(thread\s+.*\s+panicked|panicked\s+at)").unwrap(),
-        }
+    pub fn new() -> Result<Self, SignalExtractorError> {
+        Ok(Self {
+            stack_trace_pattern: Regex::new(
+                r"(?m)^\s+at\s+(.+?)(?:\s+in\s+(.+?))?(?:\s+\(.*\))?$",
+            )?,
+            panic_pattern: Regex::new(r"(?i)(thread\s+.*\s+panicked|panicked\s+at)")?,
+        })
     }
 
     /// Parse stack trace and extract signals
@@ -277,7 +285,7 @@ impl StackTraceParser {
 
 impl Default for StackTraceParser {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("built-in regex patterns are valid")
     }
 }
 
@@ -293,27 +301,27 @@ pub struct LogAnalyzer {
 
 impl LogAnalyzer {
     /// Create a new analyzer
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, SignalExtractorError> {
+        Ok(Self {
             timeout_patterns: vec![
-                Regex::new(r"(?i)timeout").unwrap(),
-                Regex::new(r"(?i)timed out").unwrap(),
-                Regex::new(r"(?i)deadline exceeded").unwrap(),
+                Regex::new(r"(?i)timeout")?,
+                Regex::new(r"(?i)timed out")?,
+                Regex::new(r"(?i)deadline exceeded")?,
             ],
             resource_patterns: vec![
-                Regex::new(r"(?i)(out of memory|oom)").unwrap(),
-                Regex::new(r"(?i)memory allocation failed").unwrap(),
-                Regex::new(r"(?i)disk (full|space)").unwrap(),
-                Regex::new(r"(?i)too many open files").unwrap(),
-                Regex::new(r"(?i)resource temporarily unavailable").unwrap(),
+                Regex::new(r"(?i)(out of memory|oom)")?,
+                Regex::new(r"(?i)memory allocation failed")?,
+                Regex::new(r"(?i)disk (full|space)")?,
+                Regex::new(r"(?i)too many open files")?,
+                Regex::new(r"(?i)resource temporarily unavailable")?,
             ],
             test_failure_patterns: vec![
-                Regex::new(r"(?i)test failed").unwrap(),
-                Regex::new(r"(?i)assertion failed").unwrap(),
-                Regex::new(r"(?i)expected .* but got").unwrap(),
-                Regex::new(r"(?i)panicked at").unwrap(),
+                Regex::new(r"(?i)test failed")?,
+                Regex::new(r"(?i)assertion failed")?,
+                Regex::new(r"(?i)expected .* but got")?,
+                Regex::new(r"(?i)panicked at")?,
             ],
-        }
+        })
     }
 
     /// Analyze logs and extract signals
@@ -364,7 +372,7 @@ impl LogAnalyzer {
 
 impl Default for LogAnalyzer {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("built-in regex patterns are valid")
     }
 }
 
@@ -377,12 +385,12 @@ pub struct RuntimeSignalExtractor {
 
 impl RuntimeSignalExtractor {
     /// Create a new extractor
-    pub fn new() -> Self {
-        Self {
-            compiler_parser: CompilerDiagnosticsParser::new(),
-            stack_trace_parser: StackTraceParser::new(),
-            log_analyzer: LogAnalyzer::new(),
-        }
+    pub fn new() -> Result<Self, SignalExtractorError> {
+        Ok(Self {
+            compiler_parser: CompilerDiagnosticsParser::new()?,
+            stack_trace_parser: StackTraceParser::new()?,
+            log_analyzer: LogAnalyzer::new()?,
+        })
     }
 
     /// Extract signals from compiler output
@@ -431,7 +439,7 @@ impl RuntimeSignalExtractor {
 
 impl Default for RuntimeSignalExtractor {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("built-in regex patterns are valid")
     }
 }
 
@@ -441,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_compiler_error_parsing() {
-        let parser = CompilerDiagnosticsParser::new();
+        let parser = CompilerDiagnosticsParser::new().unwrap();
 
         let output = r#"
 error[E0425]: cannot find function `foo` in this scope
@@ -462,7 +470,7 @@ error[E0308]: mismatched types
 
     #[test]
     fn test_stack_trace_parsing() {
-        let parser = StackTraceParser::new();
+        let parser = StackTraceParser::new().unwrap();
 
         let trace = r#"
 thread 'main' panicked at 'something failed', src/main.rs:10:5
@@ -478,7 +486,7 @@ stack backtrace:
 
     #[test]
     fn test_log_analysis() {
-        let analyzer = LogAnalyzer::new();
+        let analyzer = LogAnalyzer::new().unwrap();
 
         let logs = r#"
 [INFO] Starting application
@@ -492,7 +500,7 @@ stack backtrace:
 
     #[test]
     fn test_runtime_signal_extractor() {
-        let extractor = RuntimeSignalExtractor::new();
+        let extractor = RuntimeSignalExtractor::new().unwrap();
 
         let signals = extractor.extract_all(
             Some("error[E0425]: cannot find function"),
@@ -501,5 +509,13 @@ stack backtrace:
         );
 
         assert!(signals.len() >= 3);
+    }
+
+    #[test]
+    fn test_parsers_return_ok() {
+        assert!(CompilerDiagnosticsParser::new().is_ok());
+        assert!(StackTraceParser::new().is_ok());
+        assert!(LogAnalyzer::new().is_ok());
+        assert!(RuntimeSignalExtractor::new().is_ok());
     }
 }

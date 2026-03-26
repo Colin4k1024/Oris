@@ -58,7 +58,7 @@ async fn main() -> ExampleResult<()> {
         .description
         .push_str("\nerror[E0308]: mismatched types\nexpected `String`, found `u32`");
 
-    let extractor = RuntimeSignalExtractorAdapter::new();
+    let extractor = RuntimeSignalExtractorAdapter::default();
     let detected = detect_from_intake_events(&[enriched_event], &extractor);
 
     println!("\n[2] Triggered Detect-Stage Input");
