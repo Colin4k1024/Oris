@@ -65,3 +65,19 @@ If you previously enabled `full-evolution-experimental` only for compatibility `
 2. Keep `full-evolution-experimental` only where publish/fetch/revoke and evolution session
    orchestration are explicitly required.
 3. Update runbooks and monitors to treat `/a2a/*` as the stable entrypoints.
+
+## Boundary Alignment Policy (v0.75+)
+
+Public-facing documentation and README statements MUST be tied to milestone closure reviews:
+
+- **No overclaiming**: Do not describe capabilities as "autonomous" unless the corresponding
+  milestone (e.g., v0.90 Autonomous Intake, v1.0 Trusted Improvement System) has been closed
+  with proof artifacts.
+- **Milestone gates**: Each milestone closure produces proof artifacts in `docs/` that document
+  what was actually shipped and validated. Public docs reference these artifacts.
+- **Review checkpoint**: Before any release, verify that README capability claims match the
+  latest closed milestone boundary. Claims beyond the closed boundary must use "experimental"
+  or "planned" qualifiers.
+
+Current closed milestone: **v0.75 Reliability Gate** (phase-1).
+Next open milestone: **v0.80 Confidence Lifecycle** (phase-2).
