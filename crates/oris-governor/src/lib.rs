@@ -361,4 +361,123 @@ mod tests {
         ));
         assert_eq!(result.cooling_window.unwrap().cooldown_secs, 30);
     }
+
+    // -----------------------------------------------------------------------
+    // Comprehensive demotion/revocation tests (Issue #388)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn revocation_on_exact_failure_threshold() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        // Exactly at the threshold (default: 2)
+        let result = governor.evaluate(create_test_input(10, 1, 10, 2));
+        assert_eq!(result.target_state, AssetState::Revoked);
+        assert_eq!(
+            result.reason_code,
+            TransitionReasonCode::DowngradeReplayRegression
+        );
+    }
+
+    #[test]
+    fn no_revocation_below_failure_threshold() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        // 1 failure, threshold is 2
+        let result = governor.evaluate(create_test_input(10, 1, 10, 1));
+        assert_ne!(result.target_state, AssetState::Revoked);
+    }
+
+    #[test]
+    fn replay_failure_revocation_has_priority_over_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        // Would qualify for promotion (5 successes >= 3) but has 2 replay failures
+        let result = governor.evaluate(create_test_input(5, 1, 10, 2));
+        assert_eq!(result.target_state, AssetState::Revoked);
+    }
+
+    #[test]
+    fn confidence_regression_revocation_with_zero_age() {
+        let governor = DefaultGovernor::new(GovernorConfig {
+            max_confidence_drop: 0.2,
+            ..Default::default()
+        });
+        let input = GovernorInput {
+            candidate_source: CandidateSource::Local,
+            success_count: 5,
+            blast_radius: BlastRadius {
+                files_changed: 1,
+                lines_changed: 10,
+            },
+            replay_failures: 0,
+            recent_mutation_ages_secs: Vec::new(),
+            current_confidence: 0.5,
+            historical_peak_confidence: 0.9,
+            confidence_last_updated_secs: Some(0), // no decay, but raw diff is 0.4 >= 0.2
+        };
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Revoked);
+        assert_eq!(
+            result.reason_code,
+            TransitionReasonCode::DowngradeConfidenceRegression
+        );
+    }
+
+    #[test]
+    fn no_confidence_regression_when_drop_is_small() {
+        let governor = DefaultGovernor::new(GovernorConfig {
+            max_confidence_drop: 0.35,
+            ..Default::default()
+        });
+        let input = GovernorInput {
+            candidate_source: CandidateSource::Local,
+            success_count: 5,
+            blast_radius: BlastRadius {
+                files_changed: 1,
+                lines_changed: 10,
+            },
+            replay_failures: 0,
+            recent_mutation_ages_secs: Vec::new(),
+            current_confidence: 0.7,
+            historical_peak_confidence: 0.9,
+            confidence_last_updated_secs: Some(0),
+        };
+        let result = governor.evaluate(input);
+        // drop is 0.2, threshold is 0.35 → no revocation
+        assert_ne!(result.target_state, AssetState::Revoked);
+    }
+
+    #[test]
+    fn decayed_confidence_accounts_for_time() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        // default decay_rate=0.05, max_confidence_drop=0.35
+        let input = GovernorInput {
+            candidate_source: CandidateSource::Local,
+            success_count: 3,
+            blast_radius: BlastRadius {
+                files_changed: 1,
+                lines_changed: 10,
+            },
+            replay_failures: 0,
+            recent_mutation_ages_secs: Vec::new(),
+            current_confidence: 0.8,
+            historical_peak_confidence: 0.8,
+            confidence_last_updated_secs: Some(24 * 3600), // 24 hours
+        };
+        let result = governor.evaluate(input);
+        // decayed = 0.8 * exp(-0.05*24) ≈ 0.24, peak=0.8, drop=0.56 >= 0.35
+        assert_eq!(result.target_state, AssetState::Revoked);
+    }
+
+    #[test]
+    fn revocation_reason_codes_are_correct() {
+        let governor = DefaultGovernor::new(GovernorConfig {
+            retry_cooldown_secs: 10,
+            ..Default::default()
+        });
+        // Replay regression
+        let r1 = governor.evaluate(create_test_input(0, 1, 10, 5));
+        assert!(matches!(
+            r1.revocation_reason,
+            Some(RevocationReason::ReplayRegression)
+        ));
+    }
 }

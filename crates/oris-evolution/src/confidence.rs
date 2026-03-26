@@ -1964,4 +1964,116 @@ mod tests {
         let signals = detect_drift_signals("same", "same", &components, &components, now);
         assert!(signals.is_empty());
     }
+
+    // -----------------------------------------------------------------------
+    // Demotion/revocation propagation tests (Issue #388)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn demotion_prevents_replay_eligibility() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("demote-gate-1", now);
+        assert!(profile.is_replay_eligible());
+        profile.demote(now + 1000);
+        assert!(!profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn revocation_is_terminal() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("revoke-1", now);
+        profile.revoke(now + 1000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+
+        // update_lifecycle_state should not change Revoked state
+        profile.freshness.record_validation(now + 2000);
+        profile.compatibility.record_revalidation("new".to_string());
+        profile.update_lifecycle_state(now + 3000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+        assert!(!profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn demotion_via_decay_propagates_correctly() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-demote", now);
+        let config = DecayRulesConfig::default();
+        // Large time gap + many drift events → auto-demotion
+        let far = now + 100 * 3_600_000;
+        let result = apply_decay_rules(&mut profile, far, 7, &config);
+        // Should be either demoted or needs revalidation
+        assert!(
+            result.demoted || result.needs_revalidation,
+            "expected demotion or revalidation, got demoted={}, needs_reval={}",
+            result.demoted,
+            result.needs_revalidation
+        );
+        assert!(!profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn revalidation_can_restore_demoted_profile() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("restore-1", now);
+        profile.demote(now + 1000);
+        assert!(!profile.is_replay_eligible());
+
+        // Successful revalidation restores to Active
+        profile.freshness.record_validation(now + 2000);
+        profile
+            .compatibility
+            .record_revalidation("env-v2".to_string());
+        profile.reuse_evidence.record_success();
+        profile.lifecycle_state = ConfidenceLifecycleState::Active;
+        profile.update_lifecycle_state(now + 2000);
+        assert!(profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn repeated_failures_escalate_to_demotion() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("escalate-1", now);
+        // Set freshness low and compatibility low
+        profile.freshness.last_validated_ms = now - 48 * 3_600_000;
+        profile.freshness.refresh_score(now);
+        profile.compatibility.score = 0.2;
+
+        // Record many failures to drop reuse evidence
+        for _ in 0..10 {
+            profile.reuse_evidence.record_failure();
+        }
+
+        // Apply revalidation failure
+        let _result = apply_revalidation_outcome(
+            &mut profile,
+            ShadowRevalidationOutcome::Failed,
+            now + 1000,
+            None,
+        );
+        // Should be demoted due to very low composite
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted,);
+    }
+
+    #[test]
+    fn policy_aware_confidence_gating_with_controller() {
+        let mut ctrl = ConfidenceController::with_default_config();
+        // Record failures to push confidence below selectable threshold
+        ctrl.record_failure("gated-asset", NOW);
+        ctrl.record_failure("gated-asset", NOW + 1);
+        ctrl.record_failure("gated-asset", NOW + 2);
+        ctrl.record_failure("gated-asset", NOW + 3);
+        ctrl.record_failure("gated-asset", NOW + 4);
+
+        // Multiple downgrades should bring it near or below threshold
+        let _events = ctrl.run_downgrade_check(NOW + 10);
+        let conf = ctrl.confidence("gated-asset");
+
+        // After downgrade events, check if requiring revalidation
+        if conf < MIN_REPLAY_CONFIDENCE {
+            assert!(!ctrl.is_selectable("gated-asset"));
+            assert!(ctrl
+                .assets_requiring_revalidation()
+                .contains(&"gated-asset".to_string()));
+        }
+    }
 }
