@@ -844,6 +844,130 @@ impl ConfidenceProfile {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Decay Rules (Issue #385)
+// ---------------------------------------------------------------------------
+
+/// Configuration for multi-dimensional decay rules.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecayRulesConfig {
+    /// Freshness decay rate per hour (exponential).
+    pub freshness_decay_rate_per_hour: f32,
+    /// Compatibility penalty per drift event.
+    pub drift_penalty_per_event: f32,
+    /// Minimum composite confidence for promotion eligibility.
+    pub min_promotion_confidence: f32,
+    /// Minimum composite confidence for replay eligibility.
+    pub min_replay_confidence: f32,
+    /// Hours after which an asset is considered stale.
+    pub stale_threshold_hours: f32,
+    /// Enable automatic demotion when composite drops below threshold.
+    pub auto_demote_enabled: bool,
+}
+
+impl Default for DecayRulesConfig {
+    fn default() -> Self {
+        Self {
+            freshness_decay_rate_per_hour: REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR,
+            drift_penalty_per_event: 0.15,
+            min_promotion_confidence: 0.6,
+            min_replay_confidence: MIN_REPLAY_CONFIDENCE,
+            stale_threshold_hours: 24.0,
+            auto_demote_enabled: true,
+        }
+    }
+}
+
+/// Result of applying decay rules to a confidence profile.
+#[derive(Clone, Debug)]
+pub struct DecayResult {
+    /// Previous composite score.
+    pub previous_composite: f32,
+    /// New composite score.
+    pub new_composite: f32,
+    /// Whether the asset was demoted by this decay pass.
+    pub demoted: bool,
+    /// Whether the asset now requires revalidation.
+    pub needs_revalidation: bool,
+    /// Individual dimension changes.
+    pub freshness_delta: f32,
+    pub compatibility_delta: f32,
+}
+
+/// Apply decay rules to a confidence profile based on elapsed time and drift events.
+///
+/// This function updates the profile's freshness dimension based on time elapsed,
+/// applies drift penalties, and transitions the lifecycle state as needed.
+pub fn apply_decay_rules(
+    profile: &mut ConfidenceProfile,
+    now_ms: i64,
+    drift_events: u32,
+    config: &DecayRulesConfig,
+) -> DecayResult {
+    let previous_composite = profile.composite_score();
+    let old_freshness = profile.freshness.score;
+    let old_compatibility = profile.compatibility.score;
+
+    // Apply freshness decay
+    profile.freshness.refresh_score(now_ms);
+
+    // Apply drift penalties
+    for _ in 0..drift_events {
+        profile.compatibility.record_drift();
+    }
+
+    // Update lifecycle state
+    profile.update_lifecycle_state(now_ms);
+
+    let new_composite = profile.composite_score();
+
+    // Auto-demotion check
+    let demoted = config.auto_demote_enabled
+        && new_composite < config.min_replay_confidence
+        && !matches!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::Demoted | ConfidenceLifecycleState::Revoked
+        );
+
+    if demoted {
+        profile.demote(now_ms);
+    }
+
+    let needs_revalidation = matches!(
+        profile.lifecycle_state,
+        ConfidenceLifecycleState::NeedsRevalidation
+    );
+
+    DecayResult {
+        previous_composite,
+        new_composite,
+        demoted,
+        needs_revalidation,
+        freshness_delta: profile.freshness.score - old_freshness,
+        compatibility_delta: profile.compatibility.score - old_compatibility,
+    }
+}
+
+/// Batch-process decay for multiple profiles.
+pub fn apply_decay_batch(
+    profiles: &mut [ConfidenceProfile],
+    now_ms: i64,
+    drift_events_per_asset: &HashMap<String, u32>,
+    config: &DecayRulesConfig,
+) -> Vec<(String, DecayResult)> {
+    profiles
+        .iter_mut()
+        .map(|p| {
+            let drift = drift_events_per_asset
+                .get(&p.asset_id)
+                .copied()
+                .unwrap_or(0);
+            let result = apply_decay_rules(p, now_ms, drift, config);
+            (p.asset_id.clone(), result)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,5 +1344,71 @@ mod tests {
         let mut profile = ConfidenceProfile::new("asset-6", now);
         profile.compatibility.score = 0.3;
         assert!(!profile.is_replay_eligible());
+    }
+
+    // -----------------------------------------------------------------------
+    // Decay Rules tests (Issue #385)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decay_rules_freshness_decays_over_time() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-1", now);
+        let config = DecayRulesConfig::default();
+        let later = now + 10 * 3_600_000; // 10 hours later
+        let result = apply_decay_rules(&mut profile, later, 0, &config);
+        assert!(result.freshness_delta < 0.0);
+        assert!(result.new_composite < result.previous_composite);
+    }
+
+    #[test]
+    fn decay_rules_drift_events_reduce_compatibility() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-2", now);
+        let config = DecayRulesConfig::default();
+        let result = apply_decay_rules(&mut profile, now + 1000, 2, &config);
+        assert!(result.compatibility_delta < 0.0);
+        assert_eq!(profile.compatibility.drift_count, 2);
+    }
+
+    #[test]
+    fn decay_rules_auto_demotion_below_threshold() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-3", now);
+        let config = DecayRulesConfig::default();
+        // Fast-forward 48 hours so freshness decays heavily
+        let far_future = now + 48 * 3_600_000;
+        let result = apply_decay_rules(&mut profile, far_future, 5, &config);
+        assert!(result.demoted || result.needs_revalidation);
+    }
+
+    #[test]
+    fn decay_rules_batch_processing() {
+        let now = 1_700_000_000_000i64;
+        let mut profiles = vec![
+            ConfidenceProfile::new("batch-1", now),
+            ConfidenceProfile::new("batch-2", now),
+        ];
+        let mut drift_map = HashMap::new();
+        drift_map.insert("batch-1".to_string(), 1u32);
+        drift_map.insert("batch-2".to_string(), 0u32);
+        let config = DecayRulesConfig::default();
+        let results = apply_decay_batch(&mut profiles, now + 3_600_000, &drift_map, &config);
+        assert_eq!(results.len(), 2);
+        // batch-1 had drift, should have lower compatibility
+        assert!(profiles[0].compatibility.score < profiles[1].compatibility.score);
+    }
+
+    #[test]
+    fn decay_rules_no_demotion_when_disabled() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-4", now);
+        let config = DecayRulesConfig {
+            auto_demote_enabled: false,
+            ..DecayRulesConfig::default()
+        };
+        let far_future = now + 48 * 3_600_000;
+        let result = apply_decay_rules(&mut profile, far_future, 5, &config);
+        assert!(!result.demoted);
     }
 }
