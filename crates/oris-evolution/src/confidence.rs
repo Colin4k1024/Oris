@@ -969,6 +969,161 @@ pub fn apply_decay_batch(
 }
 
 // ---------------------------------------------------------------------------
+// Drift-Aware Trust Degradation (Issue #387)
+// ---------------------------------------------------------------------------
+
+/// Categories of environment drift that affect replay trust.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DriftSignalKind {
+    /// Rust compiler version changed.
+    CompilerVersionChange,
+    /// Cargo.lock dependency graph changed.
+    DependencyChange,
+    /// Target triple changed.
+    TargetTripleChange,
+    /// OS version changed.
+    OsChange,
+    /// Custom drift signal.
+    Custom(String),
+}
+
+/// A single drift signal detected from the environment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DriftSignal {
+    /// Kind of drift detected.
+    pub kind: DriftSignalKind,
+    /// Old value (for diagnostics).
+    pub old_value: String,
+    /// New value (for diagnostics).
+    pub new_value: String,
+    /// Severity weight in [0.0, 1.0]. Higher = more impactful.
+    pub severity: f32,
+    /// Timestamp when drift was detected (ms).
+    pub detected_at_ms: i64,
+}
+
+/// Configuration for drift-aware trust degradation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DriftDegradationConfig {
+    /// Base penalty per drift event (multiplied by severity).
+    pub base_penalty: f32,
+    /// Maximum cumulative drift penalty before forced revalidation.
+    pub max_cumulative_penalty: f32,
+    /// Whether compiler version changes force immediate revalidation.
+    pub compiler_change_forces_revalidation: bool,
+}
+
+impl Default for DriftDegradationConfig {
+    fn default() -> Self {
+        Self {
+            base_penalty: 0.15,
+            max_cumulative_penalty: 0.6,
+            compiler_change_forces_revalidation: true,
+        }
+    }
+}
+
+/// Result of applying drift signals to a profile.
+#[derive(Clone, Debug)]
+pub struct DriftDegradationResult {
+    /// Total penalty applied.
+    pub total_penalty: f32,
+    /// Whether forced revalidation was triggered.
+    pub forced_revalidation: bool,
+    /// Number of drift signals processed.
+    pub signals_processed: u32,
+    /// Previous composite score.
+    pub previous_composite: f32,
+    /// New composite score.
+    pub new_composite: f32,
+}
+
+/// Apply drift signals to a confidence profile, degrading trust proportionally.
+pub fn apply_drift_degradation(
+    profile: &mut ConfidenceProfile,
+    signals: &[DriftSignal],
+    now_ms: i64,
+    config: &DriftDegradationConfig,
+) -> DriftDegradationResult {
+    let previous_composite = profile.composite_score();
+    let mut total_penalty: f32 = 0.0;
+    let mut forced_revalidation = false;
+
+    for signal in signals {
+        let penalty = config.base_penalty * signal.severity;
+        total_penalty += penalty;
+        profile.compatibility.record_drift();
+
+        if config.compiler_change_forces_revalidation
+            && signal.kind == DriftSignalKind::CompilerVersionChange
+        {
+            forced_revalidation = true;
+        }
+    }
+
+    total_penalty = total_penalty.min(config.max_cumulative_penalty);
+
+    if forced_revalidation || total_penalty >= config.max_cumulative_penalty {
+        profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        forced_revalidation = true;
+        // Only refresh freshness score, don't override lifecycle state
+        profile.freshness.refresh_score(now_ms);
+        profile.updated_at_ms = now_ms;
+    } else {
+        profile.update_lifecycle_state(now_ms);
+    }
+
+    DriftDegradationResult {
+        total_penalty,
+        forced_revalidation,
+        signals_processed: signals.len() as u32,
+        previous_composite,
+        new_composite: profile.composite_score(),
+    }
+}
+
+/// Compare two environment fingerprint hashes and produce drift signals.
+pub fn detect_drift_signals(
+    old_env_hash: &str,
+    new_env_hash: &str,
+    old_components: &[(&str, &str)],
+    new_components: &[(&str, &str)],
+    now_ms: i64,
+) -> Vec<DriftSignal> {
+    if old_env_hash == new_env_hash {
+        return Vec::new();
+    }
+
+    let old_map: HashMap<&str, &str> = old_components.iter().copied().collect();
+    let new_map: HashMap<&str, &str> = new_components.iter().copied().collect();
+
+    let mut signals = Vec::new();
+
+    for (key, new_val) in &new_map {
+        if let Some(old_val) = old_map.get(key) {
+            if old_val != new_val {
+                let (kind, severity) = match *key {
+                    "rustc_version" => (DriftSignalKind::CompilerVersionChange, 0.9),
+                    "cargo_lock_hash" => (DriftSignalKind::DependencyChange, 0.6),
+                    "target_triple" => (DriftSignalKind::TargetTripleChange, 0.8),
+                    "os" => (DriftSignalKind::OsChange, 0.5),
+                    other => (DriftSignalKind::Custom(other.to_string()), 0.4),
+                };
+                signals.push(DriftSignal {
+                    kind,
+                    old_value: old_val.to_string(),
+                    new_value: new_val.to_string(),
+                    severity,
+                    detected_at_ms: now_ms,
+                });
+            }
+        }
+    }
+
+    signals
+}
+
+// ---------------------------------------------------------------------------
 // Shadow Revalidation Scheduling (Issue #386)
 // ---------------------------------------------------------------------------
 
@@ -1703,5 +1858,110 @@ mod tests {
         assert_eq!(result.outcome, ShadowRevalidationOutcome::Failed);
         // With low freshness and compatibility, should be demoted
         assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted);
+    }
+
+    // -----------------------------------------------------------------------
+    // Drift-Aware Trust Degradation tests (Issue #387)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn drift_degradation_reduces_compatibility() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("drift-1", now);
+        let signals = vec![DriftSignal {
+            kind: DriftSignalKind::DependencyChange,
+            old_value: "hash-a".to_string(),
+            new_value: "hash-b".to_string(),
+            severity: 0.6,
+            detected_at_ms: now,
+        }];
+        let config = DriftDegradationConfig::default();
+        let result = apply_drift_degradation(&mut profile, &signals, now + 100, &config);
+        assert_eq!(result.signals_processed, 1);
+        assert!(result.new_composite < result.previous_composite);
+        assert!(!result.forced_revalidation);
+    }
+
+    #[test]
+    fn drift_compiler_change_forces_revalidation() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("drift-2", now);
+        let signals = vec![DriftSignal {
+            kind: DriftSignalKind::CompilerVersionChange,
+            old_value: "1.75.0".to_string(),
+            new_value: "1.76.0".to_string(),
+            severity: 0.9,
+            detected_at_ms: now,
+        }];
+        let config = DriftDegradationConfig::default();
+        let result = apply_drift_degradation(&mut profile, &signals, now + 100, &config);
+        assert!(result.forced_revalidation);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn drift_multiple_signals_cumulative() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("drift-3", now);
+        let signals = vec![
+            DriftSignal {
+                kind: DriftSignalKind::DependencyChange,
+                old_value: "a".to_string(),
+                new_value: "b".to_string(),
+                severity: 0.6,
+                detected_at_ms: now,
+            },
+            DriftSignal {
+                kind: DriftSignalKind::OsChange,
+                old_value: "linux".to_string(),
+                new_value: "macos".to_string(),
+                severity: 0.5,
+                detected_at_ms: now,
+            },
+        ];
+        let config = DriftDegradationConfig::default();
+        let result = apply_drift_degradation(&mut profile, &signals, now + 100, &config);
+        assert_eq!(result.signals_processed, 2);
+        assert_eq!(profile.compatibility.drift_count, 2);
+    }
+
+    #[test]
+    fn detect_drift_signals_finds_changes() {
+        let now = 1_700_000_000_000i64;
+        let old_components = vec![
+            ("rustc_version", "1.75.0"),
+            ("cargo_lock_hash", "abc"),
+            ("target_triple", "x86_64-unknown-linux-gnu"),
+        ];
+        let new_components = vec![
+            ("rustc_version", "1.76.0"),
+            ("cargo_lock_hash", "def"),
+            ("target_triple", "x86_64-unknown-linux-gnu"),
+        ];
+        let signals = detect_drift_signals(
+            "hash-old",
+            "hash-new",
+            &old_components,
+            &new_components,
+            now,
+        );
+        assert_eq!(signals.len(), 2);
+        assert!(signals
+            .iter()
+            .any(|s| s.kind == DriftSignalKind::CompilerVersionChange));
+        assert!(signals
+            .iter()
+            .any(|s| s.kind == DriftSignalKind::DependencyChange));
+    }
+
+    #[test]
+    fn detect_drift_signals_same_env_returns_empty() {
+        let now = 1_700_000_000_000i64;
+        let components = vec![("rustc_version", "1.75.0")];
+        let signals = detect_drift_signals("same", "same", &components, &components, now);
+        assert!(signals.is_empty());
     }
 }
