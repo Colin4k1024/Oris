@@ -58,7 +58,10 @@ impl EventStore for InMemoryEventStore {
                 event,
             });
         }
-        Ok(*log.last().map(|e| &e.seq).unwrap())
+        Ok(log
+            .last()
+            .map(|e| e.seq)
+            .expect("append just pushed events; log cannot be empty"))
     }
 
     fn scan(&self, run_id: &RunId, from: Seq) -> Result<Vec<SequencedEvent>, KernelError> {

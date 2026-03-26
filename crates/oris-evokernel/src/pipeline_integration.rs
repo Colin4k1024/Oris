@@ -23,7 +23,7 @@
 //! # fn dummy_selector() -> Arc<dyn Selector> { unimplemented!() }
 //!
 //! let events: Vec<IntakeEvent> = vec![/* ... */];
-//! let extractor = Arc::new(RuntimeSignalExtractorAdapter::new());
+//! let extractor = Arc::new(RuntimeSignalExtractorAdapter::default());
 //! let signals = detect_from_intake_events(&events, extractor.as_ref());
 //! ```
 
@@ -148,7 +148,7 @@ mod tests {
             IssueSeverity::High,
         );
 
-        let extractor = RuntimeSignalExtractorAdapter::new();
+        let extractor = RuntimeSignalExtractorAdapter::new().unwrap();
         let signals = detect_from_intake_events(&[event], &extractor);
 
         assert!(
@@ -184,7 +184,7 @@ mod tests {
             IssueSeverity::Critical,
         );
 
-        let extractor = RuntimeSignalExtractorAdapter::new();
+        let extractor = RuntimeSignalExtractorAdapter::new().unwrap();
         let signals = detect_from_intake_events(&[event], &extractor);
 
         assert!(
@@ -204,7 +204,7 @@ mod tests {
             IssueSeverity::Low,
         );
 
-        let extractor = RuntimeSignalExtractorAdapter::new();
+        let extractor = RuntimeSignalExtractorAdapter::new().unwrap();
         let signals = detect_from_intake_events(&[event], &extractor);
 
         // Low-content noise events may produce zero signals or only very low
@@ -287,7 +287,7 @@ mod tests {
             IssueSeverity::High,
         );
 
-        let extractor = RuntimeSignalExtractorAdapter::new();
+        let extractor = RuntimeSignalExtractorAdapter::new().unwrap();
         let signals = detect_from_intake_events(&[compiler_event], &extractor);
 
         // Build a pipeline that only runs Detect + Select (other stages disabled).

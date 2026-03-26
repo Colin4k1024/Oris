@@ -80,7 +80,7 @@ fn intake_event_compiler_error_reaches_detect_stage() {
         IssueSeverity::High,
     );
 
-    let extractor = RuntimeSignalExtractorAdapter::new();
+    let extractor = RuntimeSignalExtractorAdapter::new().unwrap();
     let signals = detect_from_intake_events(&[event], &extractor);
 
     // At least one signal must be produced for a genuine compiler error.
@@ -134,7 +134,7 @@ fn intake_event_runtime_panic_reaches_detect_stage() {
         IssueSeverity::Critical,
     );
 
-    let extractor = RuntimeSignalExtractorAdapter::new();
+    let extractor = RuntimeSignalExtractorAdapter::new().unwrap();
     let signals = detect_from_intake_events(&[event], &extractor);
 
     assert!(
@@ -173,7 +173,7 @@ fn pipeline_with_injected_extractor_calls_detect() {
     );
     let extractor_input = intake_events_to_extractor_input(&[event]);
 
-    let extractor = Arc::new(RuntimeSignalExtractorAdapter::new());
+    let extractor = Arc::new(RuntimeSignalExtractorAdapter::new().unwrap());
     let config = EvolutionPipelineConfig {
         enable_execute: false,
         enable_validate: false,
