@@ -689,6 +689,8 @@ impl PostgresRuntimeRepository {
                 lease_expires_at: ms_to_dt(row.get::<i64, _>(3)),
                 heartbeat_at: ms_to_dt(row.get::<i64, _>(4)),
                 version: row.get::<i64, _>(5) as u64,
+                terminal_state: None,
+                terminal_at: None,
             }))
         })
     }
@@ -719,6 +721,8 @@ impl PostgresRuntimeRepository {
                 lease_expires_at: ms_to_dt(row.get::<i64, _>(3)),
                 heartbeat_at: ms_to_dt(row.get::<i64, _>(4)),
                 version: row.get::<i64, _>(5) as u64,
+                terminal_state: None,
+                terminal_at: None,
             }))
         })
     }
@@ -1724,6 +1728,8 @@ impl RuntimeRepository for PostgresRuntimeRepository {
                 lease_expires_at,
                 heartbeat_at: now,
                 version: version as u64,
+                terminal_state: None,
+                terminal_at: None,
             })
         })
     }
