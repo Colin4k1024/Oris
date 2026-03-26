@@ -360,6 +360,54 @@ jobs:
           command: test
           args: -p oris-runtime --features "sqlite-persistence,kernel-postgres" kernel::runtime::postgres_runtime_repository::tests:: -- --nocapture --test-threads=1
 
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: 1
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - name: install pandoc
+        shell: bash
+        run: |
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends pandoc protobuf-compiler || true
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+          components: llvm-tools-preview
+      - uses: swatinem/rust-cache@v2
+        with:
+          shared-key: "rust-coverage"
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: Generate coverage report
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: lcov.info
+      - name: Coverage summary
+        run: cargo llvm-cov --all-features --workspace --text 2>&1 | tail -30
+
   publish_crate:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
@@ -368,6 +416,7 @@ jobs:
       - security
       - supply_chain
       - runtime_backends
+      - coverage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
