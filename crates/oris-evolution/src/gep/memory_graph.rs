@@ -3,8 +3,7 @@
 //! The memory graph is an append-only JSONL file recording the causal chain
 //! of evolution decisions, enabling experience reuse and path suppression.
 
-use super::content_hash::{compute_asset_id, AssetIdError};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -123,7 +122,7 @@ impl MemoryGraphEvent {
     }
 
     /// Create a capsule event
-    pub fn capsule_created(id: String, capsule_id: String, parent: Option<String>) -> Self {
+    pub fn capsule_created(id: String, _capsule_id: String, parent: Option<String>) -> Self {
         Self {
             event_type: "MemoryGraphEvent".to_string(),
             kind: MemoryEventKind::CapsuleCreated,

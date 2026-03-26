@@ -31,6 +31,7 @@ use oris_evolution::{
     ValidationIssue, ValidationResult,
 };
 use oris_sandbox::{LocalProcessSandbox, Sandbox, SandboxError, SandboxPolicy};
+use tracing;
 
 use crate::signal_extractor::{RuntimeSignalExtractor, SignalExtractorError};
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,7 +278,7 @@ impl GeneStorePersistPort for SqliteGeneStorePersistAdapter {
         };
 
         if let Err(ref e) = result {
-            eprintln!("[SqliteGeneStorePersistAdapter] persist_gene error: {e}");
+            tracing::warn!(error = %e, "SqliteGeneStorePersistAdapter: persist_gene failed");
         }
         result.is_ok()
     }
@@ -306,14 +307,11 @@ impl GeneStorePersistPort for SqliteGeneStorePersistAdapter {
         // Log capsule IDs for traceability (store doesn't have capsule-level
         // reuse tracking in this minimal integration path).
         if !capsule_ids.is_empty() {
-            eprintln!(
-                "[SqliteGeneStorePersistAdapter] mark_reused gene={} capsules={:?}",
-                gene_id, capsule_ids
-            );
+            tracing::debug!(gene_id = %gene_id, ?capsule_ids, "SqliteGeneStorePersistAdapter: mark_reused");
         }
 
         if let Err(ref e) = result {
-            eprintln!("[SqliteGeneStorePersistAdapter] mark_reused error: {e}");
+            tracing::warn!(error = %e, "SqliteGeneStorePersistAdapter: mark_reused failed");
         }
         result.is_ok()
     }
@@ -495,7 +493,7 @@ impl EvaluatePort for MutationEvaluatorAdapter {
                 }
             }
             Err(e) => {
-                eprintln!("[MutationEvaluatorAdapter] evaluate error: {e}");
+                tracing::warn!(error = %e, "MutationEvaluatorAdapter: evaluate failed");
                 // Fail-closed: return a neutral score and require human review.
                 EvaluationResult {
                     score: 0.0,
