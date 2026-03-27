@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── Defaults ──
-OPENCODE_MODEL="${OPENCODE_MODEL:-anthropic/claude-sonnet-4}"
+OPENCODE_MODEL="${OPENCODE_MODEL:-minimax/MiniMax-M2.7-highspeed}"
 HOST_MODE_MAX_RETRIES="${HOST_MODE_MAX_RETRIES:-1}"
 HOST_MODE_TIMEOUT="${HOST_MODE_TIMEOUT:-300}"
 LOG_DIR="${PROJECT_ROOT}/.host-mode-logs"
