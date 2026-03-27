@@ -1354,7 +1354,91 @@ impl StoreReplayExecutor {
                 economics_evidence,
             });
         };
+
         let remote_publisher = self.publisher_for_capsule(&capsule.id);
+
+        // Confidence policy gating: reject replay when policy evidence is incomplete.
+        // This check ensures decisions are gating points, not only logs.
+        // Connect replay decisions to confidence-aware policy interaction.
+        //
+        // For remote quarantined/shadow-validated assets, replay is allowed to collect
+        // evidence for shadow progression (see requires_shadow_progression below).
+        // For local assets, we require confidence and state to meet policy thresholds.
+        let is_remote_asset = remote_publisher.is_some();
+        let requires_shadow_progression = is_remote_asset
+            && matches!(
+                capsule.state,
+                AssetState::Quarantined | AssetState::ShadowValidated
+            );
+
+        // Only gate on confidence/state for non-shadow-progression replays
+        if !requires_shadow_progression {
+            if capsule.confidence < MIN_REPLAY_CONFIDENCE {
+                detect_evidence
+                    .mismatch_reasons
+                    .push("confidence_below_minimum_threshold".to_string());
+                let reason = format!(
+                    "capsule confidence {:.3} below MIN_REPLAY_CONFIDENCE {:.3}",
+                    capsule.confidence, MIN_REPLAY_CONFIDENCE
+                );
+                let economics_evidence = self.build_replay_economics_evidence(
+                    input,
+                    Some(&best),
+                    Some(&capsule.id),
+                    false,
+                    ReplayRoiReasonCode::ReplayMissScoreBelowThreshold,
+                    &reason,
+                );
+                self.record_replay_economics(
+                    replay_run_id,
+                    Some(&best),
+                    Some(&capsule.id),
+                    economics_evidence.clone(),
+                )?;
+                return Ok(ReplayDecision {
+                    used_capsule: false,
+                    capsule_id: Some(capsule.id.clone()),
+                    fallback_to_planner: true,
+                    reason,
+                    detect_evidence,
+                    select_evidence,
+                    economics_evidence,
+                });
+            }
+
+            if !matches!(best.gene.state, AssetState::Promoted) {
+                detect_evidence
+                    .mismatch_reasons
+                    .push("gene_state_not_promoted".to_string());
+                let reason = format!(
+                    "gene state {:?} not eligible for replay; only Promoted assets may be replayed",
+                    best.gene.state
+                );
+                let economics_evidence = self.build_replay_economics_evidence(
+                    input,
+                    Some(&best),
+                    Some(&capsule.id),
+                    false,
+                    ReplayRoiReasonCode::ReplayMissScoreBelowThreshold,
+                    &reason,
+                );
+                self.record_replay_economics(
+                    replay_run_id,
+                    Some(&best),
+                    Some(&capsule.id),
+                    economics_evidence.clone(),
+                )?;
+                return Ok(ReplayDecision {
+                    used_capsule: false,
+                    capsule_id: Some(capsule.id.clone()),
+                    fallback_to_planner: true,
+                    reason,
+                    detect_evidence,
+                    select_evidence,
+                    economics_evidence,
+                });
+            }
+        }
 
         let Some(mutation) = find_declared_mutation(self.store.as_ref(), &capsule.mutation_id)
             .map_err(|err| ReplayError::Store(err.to_string()))?
