@@ -1,5 +1,6 @@
 //! Evolution domain model, append-only event store, projections, and selector logic.
 
+pub mod approval;
 pub mod confidence;
 mod core;
 pub mod evolver;
@@ -9,6 +10,10 @@ pub mod port;
 pub mod semantic_match;
 pub mod task_class;
 
+pub use approval::{
+    ApprovalCheckpoint, EscalationPolicy, EscalationTrigger, Evidence, EvidenceCompleteness,
+    HumanReviewRequirement,
+};
 pub use confidence::*;
 pub use core::*;
 pub use evolver::*;

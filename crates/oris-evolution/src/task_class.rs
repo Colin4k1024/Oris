@@ -26,6 +26,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::approval::ApprovalCheckpoint;
+
 // ─── TaskClass ────────────────────────────────────────────────────────────────
 
 /// A named category of semantically equivalent tasks.
@@ -211,12 +213,27 @@ pub struct TaskClassDefinition {
     pub description: String,
     /// Lowercase keywords used for overlap-based classification.
     pub signal_keywords: Vec<String>,
+    /// Optional approval checkpoint for sensitive work in this class.
+    pub approval_checkpoint: Option<ApprovalCheckpoint>,
 }
 
 impl TaskClassDefinition {
     /// Convert into a lightweight `TaskClass` (drops the description field).
     pub fn into_task_class(self) -> TaskClass {
         TaskClass::new(self.id, self.name, self.signal_keywords)
+    }
+
+    /// Whether this task class requires human review at its approval checkpoint.
+    pub fn requires_human_review(&self) -> bool {
+        self.approval_checkpoint
+            .as_ref()
+            .map(|cp| cp.requires_human_review())
+            .unwrap_or(false)
+    }
+
+    /// Return a reference to this class's approval checkpoint, if any.
+    pub fn approval_checkpoint(&self) -> Option<&ApprovalCheckpoint> {
+        self.approval_checkpoint.as_ref()
     }
 }
 
@@ -245,6 +262,7 @@ pub fn builtin_task_class_definitions() -> Vec<TaskClassDefinition> {
             .into_iter()
             .map(String::from)
             .collect(),
+            approval_checkpoint: None,
         },
         TaskClassDefinition {
             id: "type-mismatch".to_string(),
@@ -263,6 +281,7 @@ pub fn builtin_task_class_definitions() -> Vec<TaskClassDefinition> {
             .into_iter()
             .map(String::from)
             .collect(),
+            approval_checkpoint: None,
         },
         TaskClassDefinition {
             id: "borrow-conflict".to_string(),
@@ -276,6 +295,7 @@ pub fn builtin_task_class_definitions() -> Vec<TaskClassDefinition> {
             .into_iter()
             .map(String::from)
             .collect(),
+            approval_checkpoint: None,
         },
         TaskClassDefinition {
             id: "test-failure".to_string(),
@@ -285,6 +305,7 @@ pub fn builtin_task_class_definitions() -> Vec<TaskClassDefinition> {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+            approval_checkpoint: None,
         },
         TaskClassDefinition {
             id: "performance".to_string(),
@@ -296,6 +317,7 @@ pub fn builtin_task_class_definitions() -> Vec<TaskClassDefinition> {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+            approval_checkpoint: None,
         },
     ]
 }
