@@ -21,18 +21,38 @@
 //! MutationBuilder -> Evolution Store
 //! ```
 
+pub mod admission;
 mod continuous;
+pub mod evidence;
 mod mutation;
+pub mod planning;
 mod prioritize;
+pub mod proposal;
 mod rules;
 #[cfg(feature = "webhook")]
 pub mod server;
 mod signal;
 mod source;
 
+pub use admission::{
+    AdmissionConfig, AdmissionDecision, AdmissionGate, AdmissionInput, RejectionFeedback,
+};
 pub use continuous::*;
+pub use evidence::{
+    is_bundle_deliverable, validate_bundle, BundleValidationResult, EvidenceBundle,
+    EvidenceBundleBuilder, EvidenceCompleteness,
+};
 pub use mutation::*;
+pub use planning::{
+    builtin_planning_contracts, EvidenceType, PlanningContract, PlanningContractRegistry,
+    PlanValidationResult, PlanViolation, RequiredEvidence,
+};
 pub use prioritize::*;
+pub use proposal::{
+    validate_proposal, ProposalBuilder, ProposalContract, ProposalEffect, ProposalIntent,
+    ProposalRollback, ProposalScope, ProposalValidation, ProposalValidationResult,
+    RollbackStrategy,
+};
 pub use rules::*;
 pub use signal::*;
 pub use source::*;
