@@ -44,8 +44,8 @@ pub use evidence::{
 };
 pub use mutation::*;
 pub use planning::{
-    builtin_planning_contracts, EvidenceType, PlanningContract, PlanningContractRegistry,
-    PlanValidationResult, PlanViolation, RequiredEvidence,
+    builtin_planning_contracts, EvidenceType, PlanValidationResult, PlanViolation,
+    PlanningContract, PlanningContractRegistry, RequiredEvidence,
 };
 pub use prioritize::*;
 pub use proposal::{

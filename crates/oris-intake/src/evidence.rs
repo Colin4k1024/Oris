@@ -189,7 +189,10 @@ impl EvidenceBundleBuilder {
 
     /// Finalise the bundle and check completeness.
     pub fn build(mut self) -> EvidenceBundle {
-        let proposal_id = self.proposal_id.take().unwrap_or_else(|| "unknown-proposal".into());
+        let proposal_id = self
+            .proposal_id
+            .take()
+            .unwrap_or_else(|| "unknown-proposal".into());
         let completeness = self.check_completeness();
         EvidenceBundle {
             bundle_id: self.bundle_id,
@@ -223,7 +226,9 @@ impl EvidenceBundleBuilder {
         if missing.is_empty() {
             EvidenceCompleteness::Complete
         } else {
-            EvidenceCompleteness::Incomplete { missing_items: missing }
+            EvidenceCompleteness::Incomplete {
+                missing_items: missing,
+            }
         }
     }
 }
@@ -244,10 +249,7 @@ pub fn validate_bundle(bundle: &EvidenceBundle) -> BundleValidationResult {
         issues.push("Missing rustc_version in environment".into());
     }
 
-    let validation_passed = bundle
-        .validation_outputs
-        .iter()
-        .any(|o| o.passed);
+    let validation_passed = bundle.validation_outputs.iter().any(|o| o.passed);
 
     if bundle.validation_outputs.is_empty() {
         issues.push("No validation outputs recorded".into());
@@ -255,10 +257,7 @@ pub fn validate_bundle(bundle: &EvidenceBundle) -> BundleValidationResult {
         issues.push("No validation command passed".into());
     }
 
-    if matches!(
-        bundle.completeness,
-        EvidenceCompleteness::Incomplete { .. }
-    ) {
+    if matches!(bundle.completeness, EvidenceCompleteness::Incomplete { .. }) {
         issues.push("Bundle is incomplete".into());
     }
 
@@ -268,7 +267,10 @@ pub fn validate_bundle(bundle: &EvidenceBundle) -> BundleValidationResult {
             issues: vec![],
         }
     } else {
-        BundleValidationResult { valid: false, issues }
+        BundleValidationResult {
+            valid: false,
+            issues,
+        }
     }
 }
 
@@ -480,6 +482,9 @@ mod tests {
             })
             .build();
         assert_eq!(bundle.policy_links.len(), 1);
-        assert_eq!(bundle.policy_links[0].policy_name, "GovernedEvolutionPolicy");
+        assert_eq!(
+            bundle.policy_links[0].policy_name,
+            "GovernedEvolutionPolicy"
+        );
     }
 }

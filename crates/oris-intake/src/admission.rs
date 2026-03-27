@@ -231,8 +231,8 @@ impl AdmissionGate {
         }
 
         // Blast radius: smaller = higher feasibility (up to 0.3)
-        let blast_ratio = (input.estimated_files as f32 / self.config.max_files_changed as f32)
-            .min(1.0);
+        let blast_ratio =
+            (input.estimated_files as f32 / self.config.max_files_changed as f32).min(1.0);
         score += (1.0 - blast_ratio) * 0.3;
 
         score
@@ -416,15 +416,16 @@ mod tests {
     #[test]
     fn feasibility_increases_with_more_signals() {
         let gate = AdmissionGate::default();
-        let few = make_input(
-            Some(BoundedTaskClass::LintFix),
-            vec!["s1".into()],
-            1,
-            10,
-        );
+        let few = make_input(Some(BoundedTaskClass::LintFix), vec!["s1".into()], 1, 10);
         let many = make_input(
             Some(BoundedTaskClass::LintFix),
-            vec!["s1".into(), "s2".into(), "s3".into(), "s4".into(), "s5".into()],
+            vec![
+                "s1".into(),
+                "s2".into(),
+                "s3".into(),
+                "s4".into(),
+                "s5".into(),
+            ],
             1,
             10,
         );

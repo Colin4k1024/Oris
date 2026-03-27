@@ -205,10 +205,7 @@ impl SemanticTaskMatcher {
         // Phase 2: bounded equivalence matching
         let mut best_equiv: Option<(&str, f32)> = None;
         for eq_class in &self.equivalence_classes {
-            let match_count = normalised
-                .iter()
-                .filter(|ns| eq_class.matches(ns))
-                .count();
+            let match_count = normalised.iter().filter(|ns| eq_class.matches(ns)).count();
             if match_count > 0 {
                 let score = match_count as f32 / normalised.len().max(1) as f32;
                 match best_equiv {
@@ -293,12 +290,11 @@ mod tests {
     #[test]
     fn semantic_matcher_equivalence_only_match() {
         // Use a signal that matches equivalence but has low keyword overlap
-        let matcher = SemanticTaskMatcher::with_builtins()
-            .with_config(SemanticMatchConfig {
-                min_confidence: 0.2,
-                keyword_weight: 0.5,
-                equivalence_weight: 0.5,
-            });
+        let matcher = SemanticTaskMatcher::with_builtins().with_config(SemanticMatchConfig {
+            min_confidence: 0.2,
+            keyword_weight: 0.5,
+            equivalence_weight: 0.5,
+        });
         let signals = vec!["cannot borrow `x` as mutable".into()];
         let result = matcher.match_signals(&signals);
         assert!(result.equivalence_match);
@@ -307,12 +303,11 @@ mod tests {
 
     #[test]
     fn semantic_matcher_no_match_below_threshold() {
-        let matcher = SemanticTaskMatcher::with_builtins()
-            .with_config(SemanticMatchConfig {
-                min_confidence: 0.99,
-                keyword_weight: 0.5,
-                equivalence_weight: 0.5,
-            });
+        let matcher = SemanticTaskMatcher::with_builtins().with_config(SemanticMatchConfig {
+            min_confidence: 0.99,
+            keyword_weight: 0.5,
+            equivalence_weight: 0.5,
+        });
         let signals = vec!["completely unrelated signal about networking".into()];
         let result = matcher.match_signals(&signals);
         assert!(result.task_class_id.is_none());

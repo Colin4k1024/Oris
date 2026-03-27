@@ -152,9 +152,18 @@ pub struct PlanValidationResult {
 #[derive(Clone, Debug)]
 pub enum PlanViolation {
     NoContract,
-    ExceedsFileLimit { proposed: usize, limit: usize },
-    ExceedsLineLimit { proposed: usize, limit: usize },
-    ExceedsRiskTier { proposed: AutonomousRiskTier, limit: AutonomousRiskTier },
+    ExceedsFileLimit {
+        proposed: usize,
+        limit: usize,
+    },
+    ExceedsLineLimit {
+        proposed: usize,
+        limit: usize,
+    },
+    ExceedsRiskTier {
+        proposed: AutonomousRiskTier,
+        limit: AutonomousRiskTier,
+    },
 }
 
 // ─── Built-in contracts ──────────────────────────────────────────────────────
@@ -282,12 +291,8 @@ mod tests {
     #[test]
     fn valid_plan_passes_validation() {
         let registry = PlanningContractRegistry::with_builtins();
-        let result = registry.validate_plan(
-            &BoundedTaskClass::LintFix,
-            2,
-            50,
-            &AutonomousRiskTier::Low,
-        );
+        let result =
+            registry.validate_plan(&BoundedTaskClass::LintFix, 2, 50, &AutonomousRiskTier::Low);
         assert!(result.valid);
         assert!(result.violations.is_empty());
     }
@@ -302,33 +307,34 @@ mod tests {
             &AutonomousRiskTier::Low,
         );
         assert!(!result.valid);
-        assert!(result.violations.iter().any(|v| matches!(v, PlanViolation::ExceedsFileLimit { .. })));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, PlanViolation::ExceedsFileLimit { .. })));
     }
 
     #[test]
     fn plan_exceeding_risk_tier_rejected() {
         let registry = PlanningContractRegistry::with_builtins();
-        let result = registry.validate_plan(
-            &BoundedTaskClass::LintFix,
-            1,
-            10,
-            &AutonomousRiskTier::High,
-        );
+        let result =
+            registry.validate_plan(&BoundedTaskClass::LintFix, 1, 10, &AutonomousRiskTier::High);
         assert!(!result.valid);
-        assert!(result.violations.iter().any(|v| matches!(v, PlanViolation::ExceedsRiskTier { .. })));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, PlanViolation::ExceedsRiskTier { .. })));
     }
 
     #[test]
     fn unknown_task_class_returns_no_contract_violation() {
         let registry = PlanningContractRegistry::new(vec![]);
-        let result = registry.validate_plan(
-            &BoundedTaskClass::LintFix,
-            1,
-            10,
-            &AutonomousRiskTier::Low,
-        );
+        let result =
+            registry.validate_plan(&BoundedTaskClass::LintFix, 1, 10, &AutonomousRiskTier::Low);
         assert!(!result.valid);
-        assert!(result.violations.iter().any(|v| matches!(v, PlanViolation::NoContract)));
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| matches!(v, PlanViolation::NoContract)));
     }
 
     #[test]
