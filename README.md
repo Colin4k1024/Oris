@@ -66,7 +66,7 @@ Oris maps EvoMap concepts to concrete framework behavior:
 | Bounty System | Issue intake and prioritization |
 | A2A Protocol | `oris-evolution-network` experimental protocol |
 
-See [EvoMap alignment details](docs/evokernel/evomap.md).
+See [EvoMap alignment details](docs/evomap-vs-oris-comparison.md).
 
 ---
 
