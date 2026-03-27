@@ -16,7 +16,21 @@
       "Bash(git push)",
       "Bash(cargo check:*)",
       "Bash(cargo build:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(OPENCODE_MODEL=anthropic/claude-sonnet-4-20250514 opencode --list-models)",
+      "Bash(opencode auth:*)",
+      "Bash(git -C /Users/jiafan/Desktop/poc/Oris show HEAD:scripts/host_mode.sh)",
+      "Bash(git log:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git checkout:*)",
+      "Bash(timeout 15 opencode run --model \"minimax/MiniMax-M2.7-highspeed\" \"Say hello in exactly 3 words.\")",
+      "Bash(gh pr:*)",
+      "Bash(for i:*)",
+      "Bash(do)",
+      "Bash(gh issue:*)",
+      "Bash(done)",
+      "Bash(echo \"Closed #$i\")",
+      "Bash(git push:*)"
     ]
   }
 }
