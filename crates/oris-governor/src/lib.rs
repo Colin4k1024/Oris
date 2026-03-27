@@ -45,6 +45,49 @@ pub enum RevocationReason {
     ReplayRegression,
     ValidationFailure,
     Manual(String),
+    EvidenceIncomplete,
+    EnvironmentIncompatible,
+    BoundedTaskClassDenied,
+}
+
+/// Evidence completeness status for promotion gating.
+///
+/// Promotion requires evidence completeness to prevent incomplete
+/// mutations from being promoted to the gene pool.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EvidenceCompletenessStatus {
+    /// Evidence bundle is complete and validated.
+    Complete,
+    /// Evidence bundle is present but not yet validated.
+    PendingValidation,
+    /// Evidence bundle is incomplete - missing required items.
+    Incomplete,
+}
+
+impl Default for EvidenceCompletenessStatus {
+    fn default() -> Self {
+        Self::Incomplete
+    }
+}
+
+/// Environment compatibility status for promotion gating.
+///
+/// Tracks whether the mutation is compatible with the current
+/// environment and policy constraints.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EnvironmentCompatibilityStatus {
+    /// Environment is compatible - safe to promote.
+    Compatible,
+    /// Environment has drifted - requires revalidation.
+    DriftDetected,
+    /// Environment is incompatible - promotion blocked.
+    Incompatible,
+}
+
+impl Default for EnvironmentCompatibilityStatus {
+    fn default() -> Self {
+        Self::Incompatible
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,6 +100,16 @@ pub struct GovernorInput {
     pub current_confidence: f32,
     pub historical_peak_confidence: f32,
     pub confidence_last_updated_secs: Option<u64>,
+    /// Evidence completeness status - gates promotion if not Complete.
+    #[serde(default)]
+    pub evidence_completeness: EvidenceCompletenessStatus,
+    /// Environment compatibility status - gates promotion if not Compatible.
+    #[serde(default)]
+    pub environment_compatibility: EnvironmentCompatibilityStatus,
+    /// Whether the task class is bounded and approved for autonomous promotion.
+    /// None means task class is not applicable or unknown.
+    #[serde(default)]
+    pub bounded_task_class_approved: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -197,6 +250,59 @@ impl Governor for DefaultGovernor {
             };
         }
 
+        // Evidence completeness gate: require complete evidence before promotion.
+        if input.evidence_completeness != EvidenceCompletenessStatus::Complete {
+            let reason = match &input.evidence_completeness {
+                EvidenceCompletenessStatus::Incomplete => {
+                    "evidence bundle incomplete - missing required items".into()
+                }
+                EvidenceCompletenessStatus::PendingValidation => {
+                    "evidence bundle pending validation".into()
+                }
+                EvidenceCompletenessStatus::Complete => unreachable!(),
+            };
+            return GovernorDecision {
+                target_state: AssetState::Candidate,
+                reason,
+                reason_code: TransitionReasonCode::CandidateCollectingEvidence,
+                cooling_window: self.cooling_window_for(self.config.retry_cooldown_secs),
+                revocation_reason: Some(RevocationReason::EvidenceIncomplete),
+            };
+        }
+
+        // Environment compatibility gate: require compatible environment before promotion.
+        if input.environment_compatibility != EnvironmentCompatibilityStatus::Compatible {
+            let reason = match &input.environment_compatibility {
+                EnvironmentCompatibilityStatus::Incompatible => {
+                    "environment incompatible with current policy".into()
+                }
+                EnvironmentCompatibilityStatus::DriftDetected => {
+                    "environment drift detected - revalidation required".into()
+                }
+                EnvironmentCompatibilityStatus::Compatible => unreachable!(),
+            };
+            return GovernorDecision {
+                target_state: AssetState::Candidate,
+                reason,
+                reason_code: TransitionReasonCode::CandidateCollectingEvidence,
+                cooling_window: self.cooling_window_for(self.config.retry_cooldown_secs),
+                revocation_reason: Some(RevocationReason::EnvironmentIncompatible),
+            };
+        }
+
+        // Bounded task class gate: require approved task class for autonomous promotion.
+        if let Some(bounded_approved) = input.bounded_task_class_approved {
+            if !bounded_approved {
+                return GovernorDecision {
+                    target_state: AssetState::Candidate,
+                    reason: "task class not approved for autonomous promotion".into(),
+                    reason_code: TransitionReasonCode::CandidateCollectingEvidence,
+                    cooling_window: self.cooling_window_for(self.config.retry_cooldown_secs),
+                    revocation_reason: Some(RevocationReason::BoundedTaskClassDenied),
+                };
+            }
+        }
+
         if input.success_count >= self.config.promote_after_successes {
             return GovernorDecision {
                 target_state: AssetState::Promoted,
@@ -241,6 +347,9 @@ mod tests {
             current_confidence: 0.7,
             historical_peak_confidence: 0.7,
             confidence_last_updated_secs: Some(0),
+            evidence_completeness: EvidenceCompletenessStatus::Complete,
+            environment_compatibility: EnvironmentCompatibilityStatus::Compatible,
+            bounded_task_class_approved: Some(true),
         }
     }
 
@@ -412,6 +521,9 @@ mod tests {
             current_confidence: 0.5,
             historical_peak_confidence: 0.9,
             confidence_last_updated_secs: Some(0), // no decay, but raw diff is 0.4 >= 0.2
+            evidence_completeness: EvidenceCompletenessStatus::Complete,
+            environment_compatibility: EnvironmentCompatibilityStatus::Compatible,
+            bounded_task_class_approved: Some(true),
         };
         let result = governor.evaluate(input);
         assert_eq!(result.target_state, AssetState::Revoked);
@@ -439,6 +551,9 @@ mod tests {
             current_confidence: 0.7,
             historical_peak_confidence: 0.9,
             confidence_last_updated_secs: Some(0),
+            evidence_completeness: EvidenceCompletenessStatus::Complete,
+            environment_compatibility: EnvironmentCompatibilityStatus::Compatible,
+            bounded_task_class_approved: Some(true),
         };
         let result = governor.evaluate(input);
         // drop is 0.2, threshold is 0.35 → no revocation
@@ -461,6 +576,9 @@ mod tests {
             current_confidence: 0.8,
             historical_peak_confidence: 0.8,
             confidence_last_updated_secs: Some(24 * 3600), // 24 hours
+            evidence_completeness: EvidenceCompletenessStatus::Complete,
+            environment_compatibility: EnvironmentCompatibilityStatus::Compatible,
+            bounded_task_class_approved: Some(true),
         };
         let result = governor.evaluate(input);
         // decayed = 0.8 * exp(-0.05*24) ≈ 0.24, peak=0.8, drop=0.56 >= 0.35
@@ -479,5 +597,119 @@ mod tests {
             r1.revocation_reason,
             Some(RevocationReason::ReplayRegression)
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Evidence completeness gating tests (Issue #393)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn incomplete_evidence_blocks_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(10, 1, 100, 0);
+        input.evidence_completeness = EvidenceCompletenessStatus::Incomplete;
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Candidate);
+        assert!(matches!(
+            result.revocation_reason,
+            Some(RevocationReason::EvidenceIncomplete)
+        ));
+    }
+
+    #[test]
+    fn pending_validation_blocks_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(10, 1, 100, 0);
+        input.evidence_completeness = EvidenceCompletenessStatus::PendingValidation;
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Candidate);
+        assert!(matches!(
+            result.revocation_reason,
+            Some(RevocationReason::EvidenceIncomplete)
+        ));
+    }
+
+    #[test]
+    fn complete_evidence_allows_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(3, 1, 100, 0);
+        input.evidence_completeness = EvidenceCompletenessStatus::Complete;
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Promoted);
+    }
+
+    // -----------------------------------------------------------------------
+    // Environment compatibility gating tests (Issue #393)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn incompatible_environment_blocks_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(10, 1, 100, 0);
+        input.environment_compatibility = EnvironmentCompatibilityStatus::Incompatible;
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Candidate);
+        assert!(matches!(
+            result.revocation_reason,
+            Some(RevocationReason::EnvironmentIncompatible)
+        ));
+    }
+
+    #[test]
+    fn drift_detected_blocks_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(10, 1, 100, 0);
+        input.environment_compatibility = EnvironmentCompatibilityStatus::DriftDetected;
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Candidate);
+        assert!(matches!(
+            result.revocation_reason,
+            Some(RevocationReason::EnvironmentIncompatible)
+        ));
+    }
+
+    #[test]
+    fn compatible_environment_allows_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(3, 1, 100, 0);
+        input.environment_compatibility = EnvironmentCompatibilityStatus::Compatible;
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Promoted);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bounded task class gating tests (Issue #393)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn denied_bounded_task_class_blocks_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(10, 1, 100, 0);
+        input.bounded_task_class_approved = Some(false);
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Candidate);
+        assert!(matches!(
+            result.revocation_reason,
+            Some(RevocationReason::BoundedTaskClassDenied)
+        ));
+    }
+
+    #[test]
+    fn approved_bounded_task_class_allows_promotion() {
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(3, 1, 100, 0);
+        input.bounded_task_class_approved = Some(true);
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Promoted);
+    }
+
+    #[test]
+    fn none_bounded_task_class_allows_promotion() {
+        // When bounded_task_class_approved is None, promotion proceeds based on other gates
+        let governor = DefaultGovernor::new(GovernorConfig::default());
+        let mut input = create_test_input(3, 1, 100, 0);
+        input.bounded_task_class_approved = None;
+        let result = governor.evaluate(input);
+        assert_eq!(result.target_state, AssetState::Promoted);
     }
 }

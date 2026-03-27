@@ -1,5 +1,8 @@
 use oris_evolution::{AssetState, BlastRadius, CandidateSource, TransitionReasonCode};
-use oris_governor::{DefaultGovernor, Governor, GovernorConfig, GovernorInput, RevocationReason};
+use oris_governor::{
+    DefaultGovernor, EnvironmentCompatibilityStatus, EvidenceCompletenessStatus, Governor,
+    GovernorConfig, GovernorInput, RevocationReason,
+};
 
 fn input(
     success_count: u64,
@@ -19,6 +22,9 @@ fn input(
         current_confidence: 0.7,
         historical_peak_confidence: 0.7,
         confidence_last_updated_secs: Some(0),
+        evidence_completeness: EvidenceCompletenessStatus::Complete,
+        environment_compatibility: EnvironmentCompatibilityStatus::Compatible,
+        bounded_task_class_approved: Some(true),
     }
 }
 

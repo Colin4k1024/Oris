@@ -1779,6 +1779,9 @@ impl StoreReplayExecutor {
             current_confidence: confidence_context.current_confidence,
             historical_peak_confidence: confidence_context.historical_peak_confidence,
             confidence_last_updated_secs: confidence_context.confidence_last_updated_secs,
+            evidence_completeness: oris_governor::EvidenceCompletenessStatus::Complete,
+            environment_compatibility: oris_governor::EnvironmentCompatibilityStatus::Compatible,
+            bounded_task_class_approved: None,
         });
 
         if matches!(governor_decision.target_state, AssetState::Revoked) {
@@ -2647,6 +2650,9 @@ impl<S: KernelState> EvoKernel<S> {
             current_confidence: confidence_context.current_confidence,
             historical_peak_confidence: confidence_context.historical_peak_confidence,
             confidence_last_updated_secs: confidence_context.confidence_last_updated_secs,
+            evidence_completeness: oris_governor::EvidenceCompletenessStatus::Complete,
+            environment_compatibility: oris_governor::EnvironmentCompatibilityStatus::Compatible,
+            bounded_task_class_approved: None,
         });
 
         gene.state = governor_decision.target_state.clone();
