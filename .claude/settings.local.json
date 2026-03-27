@@ -16,7 +16,8 @@
       "Bash(git push)",
       "Bash(cargo check:*)",
       "Bash(cargo build:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }
