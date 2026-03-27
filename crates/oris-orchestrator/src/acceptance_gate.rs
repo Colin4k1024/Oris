@@ -85,7 +85,7 @@ pub struct AcceptableOutcome {
 }
 
 /// Error returned when the gate rejects a run.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptanceGateError {
     pub abort: AbortReason,
     pub detail: String,
