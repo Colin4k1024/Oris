@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    AssetState, Capsule, GeneId, MIN_REPLAY_CONFIDENCE, REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR,
+    AssetState, GeneId, MIN_REPLAY_CONFIDENCE, REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR,
 };
 
 /// Confidence scheduler configuration
@@ -553,6 +553,862 @@ impl BayesianConfidenceUpdater {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Multi-dimensional Confidence Profile (Issue #384)
+// ---------------------------------------------------------------------------
+
+/// Freshness dimension: how recently the asset was validated.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct FreshnessDimension {
+    /// Last validation timestamp in milliseconds since epoch.
+    pub last_validated_ms: i64,
+    /// Freshness score in [0.0, 1.0], decays over time.
+    pub score: f32,
+    /// Maximum age in hours before the asset is considered stale.
+    pub max_age_hours: f32,
+}
+
+impl Default for FreshnessDimension {
+    fn default() -> Self {
+        Self {
+            last_validated_ms: 0,
+            score: 1.0,
+            max_age_hours: 24.0,
+        }
+    }
+}
+
+impl FreshnessDimension {
+    /// Recompute freshness score based on current time.
+    pub fn refresh_score(&mut self, now_ms: i64) {
+        let age_hours = (now_ms - self.last_validated_ms) as f32 / 3_600_000.0;
+        self.score = if age_hours <= 0.0 {
+            1.0
+        } else {
+            (-REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR * age_hours)
+                .exp()
+                .clamp(0.0, 1.0)
+        };
+    }
+
+    /// Returns true if the asset is stale (age exceeds max_age_hours).
+    pub fn is_stale(&self, now_ms: i64) -> bool {
+        let age_hours = (now_ms - self.last_validated_ms) as f32 / 3_600_000.0;
+        age_hours > self.max_age_hours
+    }
+
+    /// Record a fresh validation.
+    pub fn record_validation(&mut self, now_ms: i64) {
+        self.last_validated_ms = now_ms;
+        self.score = 1.0;
+    }
+}
+
+/// Compatibility dimension: how well the asset matches the current environment.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CompatibilityDimension {
+    /// Environment fingerprint hash at last validation.
+    pub validated_env_hash: String,
+    /// Compatibility score in [0.0, 1.0].
+    pub score: f32,
+    /// Number of environment changes detected since last validation.
+    pub drift_count: u32,
+    /// Maximum tolerated drift count before requiring revalidation.
+    pub max_drift_tolerance: u32,
+}
+
+impl Default for CompatibilityDimension {
+    fn default() -> Self {
+        Self {
+            validated_env_hash: String::new(),
+            score: 1.0,
+            drift_count: 0,
+            max_drift_tolerance: 3,
+        }
+    }
+}
+
+impl CompatibilityDimension {
+    /// Record a detected environment drift event, reducing compatibility.
+    pub fn record_drift(&mut self) {
+        self.drift_count += 1;
+        let penalty = self.drift_count as f32 * 0.15;
+        self.score = (1.0 - penalty).clamp(0.0, 1.0);
+    }
+
+    /// Reset compatibility after revalidation in the current environment.
+    pub fn record_revalidation(&mut self, env_hash: String) {
+        self.validated_env_hash = env_hash;
+        self.score = 1.0;
+        self.drift_count = 0;
+    }
+
+    /// Returns true if drift exceeds tolerance.
+    pub fn exceeds_drift_tolerance(&self) -> bool {
+        self.drift_count > self.max_drift_tolerance
+    }
+}
+
+/// Reuse evidence dimension: track record of successful reuse.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReuseEvidenceDimension {
+    /// Total successful reuses.
+    pub success_count: u32,
+    /// Total failed reuses.
+    pub failure_count: u32,
+    /// Reuse score in [0.0, 1.0] based on success rate.
+    pub score: f32,
+}
+
+impl Default for ReuseEvidenceDimension {
+    fn default() -> Self {
+        Self {
+            success_count: 0,
+            failure_count: 0,
+            score: 0.667, // Prior: 2/(2+1) matching Bayesian prior
+        }
+    }
+}
+
+impl ReuseEvidenceDimension {
+    /// Record a successful reuse.
+    pub fn record_success(&mut self) {
+        self.success_count += 1;
+        self.recompute_score();
+    }
+
+    /// Record a failed reuse.
+    pub fn record_failure(&mut self) {
+        self.failure_count += 1;
+        self.recompute_score();
+    }
+
+    fn recompute_score(&mut self) {
+        // Beta-Bernoulli with prior alpha=2, beta=1
+        let alpha = 2.0 + self.success_count as f32;
+        let beta = 1.0 + self.failure_count as f32;
+        self.score = alpha / (alpha + beta);
+    }
+
+    /// Total observations.
+    pub fn total_observations(&self) -> u32 {
+        self.success_count + self.failure_count
+    }
+}
+
+/// Thresholds for replay admissibility based on confidence profile.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReplayAdmissibilityThresholds {
+    /// Minimum freshness score for replay eligibility.
+    pub min_freshness: f32,
+    /// Minimum compatibility score for replay eligibility.
+    pub min_compatibility: f32,
+    /// Minimum reuse evidence score for replay eligibility.
+    pub min_reuse_evidence: f32,
+    /// Minimum composite score for replay eligibility.
+    pub min_composite: f32,
+}
+
+impl Default for ReplayAdmissibilityThresholds {
+    fn default() -> Self {
+        Self {
+            min_freshness: MIN_REPLAY_CONFIDENCE,
+            min_compatibility: 0.5,
+            min_reuse_evidence: 0.3,
+            min_composite: MIN_REPLAY_CONFIDENCE,
+        }
+    }
+}
+
+/// Lifecycle state of a confidence profile.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConfidenceLifecycleState {
+    /// Newly created, not yet fully evaluated.
+    Initial,
+    /// Actively maintained with recent evidence.
+    Active,
+    /// Freshness or compatibility is degrading.
+    Degrading,
+    /// Requires revalidation before replay.
+    NeedsRevalidation,
+    /// Demoted due to failures or drift.
+    Demoted,
+    /// Fully revoked, not eligible for any use.
+    Revoked,
+}
+
+impl Default for ConfidenceLifecycleState {
+    fn default() -> Self {
+        Self::Initial
+    }
+}
+
+/// Multi-dimensional confidence profile that models confidence as a lifecycle.
+///
+/// Instead of a single f32 score, confidence is decomposed into three
+/// orthogonal dimensions: freshness (time-based decay), compatibility
+/// (environment drift), and reuse evidence (historical success rate).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConfidenceProfile {
+    /// Asset identifier this profile belongs to.
+    pub asset_id: String,
+    /// Freshness dimension.
+    pub freshness: FreshnessDimension,
+    /// Compatibility dimension.
+    pub compatibility: CompatibilityDimension,
+    /// Reuse evidence dimension.
+    pub reuse_evidence: ReuseEvidenceDimension,
+    /// Lifecycle state derived from dimension scores.
+    pub lifecycle_state: ConfidenceLifecycleState,
+    /// Thresholds for replay admissibility.
+    pub thresholds: ReplayAdmissibilityThresholds,
+    /// Creation timestamp in milliseconds.
+    pub created_at_ms: i64,
+    /// Last update timestamp in milliseconds.
+    pub updated_at_ms: i64,
+}
+
+impl ConfidenceProfile {
+    /// Create a new profile for an asset.
+    pub fn new(asset_id: impl Into<String>, now_ms: i64) -> Self {
+        let mut freshness = FreshnessDimension::default();
+        freshness.last_validated_ms = now_ms;
+        Self {
+            asset_id: asset_id.into(),
+            freshness,
+            compatibility: CompatibilityDimension::default(),
+            reuse_evidence: ReuseEvidenceDimension::default(),
+            lifecycle_state: ConfidenceLifecycleState::Initial,
+            thresholds: ReplayAdmissibilityThresholds::default(),
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        }
+    }
+
+    /// Compute the composite confidence score (weighted mean of dimensions).
+    pub fn composite_score(&self) -> f32 {
+        let score = 0.4 * self.freshness.score
+            + 0.35 * self.compatibility.score
+            + 0.25 * self.reuse_evidence.score;
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Check if this asset is eligible for replay.
+    pub fn is_replay_eligible(&self) -> bool {
+        self.freshness.score >= self.thresholds.min_freshness
+            && self.compatibility.score >= self.thresholds.min_compatibility
+            && self.reuse_evidence.score >= self.thresholds.min_reuse_evidence
+            && self.composite_score() >= self.thresholds.min_composite
+            && !matches!(
+                self.lifecycle_state,
+                ConfidenceLifecycleState::Demoted
+                    | ConfidenceLifecycleState::Revoked
+                    | ConfidenceLifecycleState::NeedsRevalidation
+            )
+    }
+
+    /// Update the lifecycle state based on current dimension scores.
+    pub fn update_lifecycle_state(&mut self, now_ms: i64) {
+        self.freshness.refresh_score(now_ms);
+        self.updated_at_ms = now_ms;
+
+        if matches!(self.lifecycle_state, ConfidenceLifecycleState::Revoked) {
+            return; // Revoked is terminal unless explicitly reinstated
+        }
+
+        if self.compatibility.exceeds_drift_tolerance() {
+            self.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        } else if self.freshness.is_stale(now_ms) {
+            self.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        } else if self.freshness.score < self.thresholds.min_freshness
+            || self.compatibility.score < self.thresholds.min_compatibility
+        {
+            self.lifecycle_state = ConfidenceLifecycleState::Degrading;
+        } else if self.reuse_evidence.total_observations() == 0 {
+            self.lifecycle_state = ConfidenceLifecycleState::Initial;
+        } else {
+            self.lifecycle_state = ConfidenceLifecycleState::Active;
+        }
+    }
+
+    /// Demote this profile (e.g., after repeated failures).
+    pub fn demote(&mut self, now_ms: i64) {
+        self.lifecycle_state = ConfidenceLifecycleState::Demoted;
+        self.updated_at_ms = now_ms;
+    }
+
+    /// Revoke this profile permanently.
+    pub fn revoke(&mut self, now_ms: i64) {
+        self.lifecycle_state = ConfidenceLifecycleState::Revoked;
+        self.updated_at_ms = now_ms;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Decay Rules (Issue #385)
+// ---------------------------------------------------------------------------
+
+/// Configuration for multi-dimensional decay rules.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DecayRulesConfig {
+    /// Freshness decay rate per hour (exponential).
+    pub freshness_decay_rate_per_hour: f32,
+    /// Compatibility penalty per drift event.
+    pub drift_penalty_per_event: f32,
+    /// Minimum composite confidence for promotion eligibility.
+    pub min_promotion_confidence: f32,
+    /// Minimum composite confidence for replay eligibility.
+    pub min_replay_confidence: f32,
+    /// Hours after which an asset is considered stale.
+    pub stale_threshold_hours: f32,
+    /// Enable automatic demotion when composite drops below threshold.
+    pub auto_demote_enabled: bool,
+}
+
+impl Default for DecayRulesConfig {
+    fn default() -> Self {
+        Self {
+            freshness_decay_rate_per_hour: REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR,
+            drift_penalty_per_event: 0.15,
+            min_promotion_confidence: 0.6,
+            min_replay_confidence: MIN_REPLAY_CONFIDENCE,
+            stale_threshold_hours: 24.0,
+            auto_demote_enabled: true,
+        }
+    }
+}
+
+/// Result of applying decay rules to a confidence profile.
+#[derive(Clone, Debug)]
+pub struct DecayResult {
+    /// Previous composite score.
+    pub previous_composite: f32,
+    /// New composite score.
+    pub new_composite: f32,
+    /// Whether the asset was demoted by this decay pass.
+    pub demoted: bool,
+    /// Whether the asset now requires revalidation.
+    pub needs_revalidation: bool,
+    /// Individual dimension changes.
+    pub freshness_delta: f32,
+    pub compatibility_delta: f32,
+}
+
+/// Apply decay rules to a confidence profile based on elapsed time and drift events.
+///
+/// This function updates the profile's freshness dimension based on time elapsed,
+/// applies drift penalties, and transitions the lifecycle state as needed.
+pub fn apply_decay_rules(
+    profile: &mut ConfidenceProfile,
+    now_ms: i64,
+    drift_events: u32,
+    config: &DecayRulesConfig,
+) -> DecayResult {
+    let previous_composite = profile.composite_score();
+    let old_freshness = profile.freshness.score;
+    let old_compatibility = profile.compatibility.score;
+
+    // Apply freshness decay
+    profile.freshness.refresh_score(now_ms);
+
+    // Apply drift penalties
+    for _ in 0..drift_events {
+        profile.compatibility.record_drift();
+    }
+
+    // Update lifecycle state
+    profile.update_lifecycle_state(now_ms);
+
+    let new_composite = profile.composite_score();
+
+    // Auto-demotion check
+    let demoted = config.auto_demote_enabled
+        && new_composite < config.min_replay_confidence
+        && !matches!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::Demoted | ConfidenceLifecycleState::Revoked
+        );
+
+    if demoted {
+        profile.demote(now_ms);
+    }
+
+    let needs_revalidation = matches!(
+        profile.lifecycle_state,
+        ConfidenceLifecycleState::NeedsRevalidation
+    );
+
+    DecayResult {
+        previous_composite,
+        new_composite,
+        demoted,
+        needs_revalidation,
+        freshness_delta: profile.freshness.score - old_freshness,
+        compatibility_delta: profile.compatibility.score - old_compatibility,
+    }
+}
+
+/// Batch-process decay for multiple profiles.
+pub fn apply_decay_batch(
+    profiles: &mut [ConfidenceProfile],
+    now_ms: i64,
+    drift_events_per_asset: &HashMap<String, u32>,
+    config: &DecayRulesConfig,
+) -> Vec<(String, DecayResult)> {
+    profiles
+        .iter_mut()
+        .map(|p| {
+            let drift = drift_events_per_asset
+                .get(&p.asset_id)
+                .copied()
+                .unwrap_or(0);
+            let result = apply_decay_rules(p, now_ms, drift, config);
+            (p.asset_id.clone(), result)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Drift-Aware Trust Degradation (Issue #387)
+// ---------------------------------------------------------------------------
+
+/// Categories of environment drift that affect replay trust.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DriftSignalKind {
+    /// Rust compiler version changed.
+    CompilerVersionChange,
+    /// Cargo.lock dependency graph changed.
+    DependencyChange,
+    /// Target triple changed.
+    TargetTripleChange,
+    /// OS version changed.
+    OsChange,
+    /// Custom drift signal.
+    Custom(String),
+}
+
+/// A single drift signal detected from the environment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DriftSignal {
+    /// Kind of drift detected.
+    pub kind: DriftSignalKind,
+    /// Old value (for diagnostics).
+    pub old_value: String,
+    /// New value (for diagnostics).
+    pub new_value: String,
+    /// Severity weight in [0.0, 1.0]. Higher = more impactful.
+    pub severity: f32,
+    /// Timestamp when drift was detected (ms).
+    pub detected_at_ms: i64,
+}
+
+/// Configuration for drift-aware trust degradation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DriftDegradationConfig {
+    /// Base penalty per drift event (multiplied by severity).
+    pub base_penalty: f32,
+    /// Maximum cumulative drift penalty before forced revalidation.
+    pub max_cumulative_penalty: f32,
+    /// Whether compiler version changes force immediate revalidation.
+    pub compiler_change_forces_revalidation: bool,
+}
+
+impl Default for DriftDegradationConfig {
+    fn default() -> Self {
+        Self {
+            base_penalty: 0.15,
+            max_cumulative_penalty: 0.6,
+            compiler_change_forces_revalidation: true,
+        }
+    }
+}
+
+/// Result of applying drift signals to a profile.
+#[derive(Clone, Debug)]
+pub struct DriftDegradationResult {
+    /// Total penalty applied.
+    pub total_penalty: f32,
+    /// Whether forced revalidation was triggered.
+    pub forced_revalidation: bool,
+    /// Number of drift signals processed.
+    pub signals_processed: u32,
+    /// Previous composite score.
+    pub previous_composite: f32,
+    /// New composite score.
+    pub new_composite: f32,
+}
+
+/// Apply drift signals to a confidence profile, degrading trust proportionally.
+pub fn apply_drift_degradation(
+    profile: &mut ConfidenceProfile,
+    signals: &[DriftSignal],
+    now_ms: i64,
+    config: &DriftDegradationConfig,
+) -> DriftDegradationResult {
+    let previous_composite = profile.composite_score();
+    let mut total_penalty: f32 = 0.0;
+    let mut forced_revalidation = false;
+
+    for signal in signals {
+        let penalty = config.base_penalty * signal.severity;
+        total_penalty += penalty;
+        profile.compatibility.record_drift();
+
+        if config.compiler_change_forces_revalidation
+            && signal.kind == DriftSignalKind::CompilerVersionChange
+        {
+            forced_revalidation = true;
+        }
+    }
+
+    total_penalty = total_penalty.min(config.max_cumulative_penalty);
+
+    if forced_revalidation || total_penalty >= config.max_cumulative_penalty {
+        profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        forced_revalidation = true;
+        // Only refresh freshness score, don't override lifecycle state
+        profile.freshness.refresh_score(now_ms);
+        profile.updated_at_ms = now_ms;
+    } else {
+        profile.update_lifecycle_state(now_ms);
+    }
+
+    DriftDegradationResult {
+        total_penalty,
+        forced_revalidation,
+        signals_processed: signals.len() as u32,
+        previous_composite,
+        new_composite: profile.composite_score(),
+    }
+}
+
+/// Compare two environment fingerprint hashes and produce drift signals.
+pub fn detect_drift_signals(
+    old_env_hash: &str,
+    new_env_hash: &str,
+    old_components: &[(&str, &str)],
+    new_components: &[(&str, &str)],
+    now_ms: i64,
+) -> Vec<DriftSignal> {
+    if old_env_hash == new_env_hash {
+        return Vec::new();
+    }
+
+    let old_map: HashMap<&str, &str> = old_components.iter().copied().collect();
+    let new_map: HashMap<&str, &str> = new_components.iter().copied().collect();
+
+    let mut signals = Vec::new();
+
+    for (key, new_val) in &new_map {
+        if let Some(old_val) = old_map.get(key) {
+            if old_val != new_val {
+                let (kind, severity) = match *key {
+                    "rustc_version" => (DriftSignalKind::CompilerVersionChange, 0.9),
+                    "cargo_lock_hash" => (DriftSignalKind::DependencyChange, 0.6),
+                    "target_triple" => (DriftSignalKind::TargetTripleChange, 0.8),
+                    "os" => (DriftSignalKind::OsChange, 0.5),
+                    other => (DriftSignalKind::Custom(other.to_string()), 0.4),
+                };
+                signals.push(DriftSignal {
+                    kind,
+                    old_value: old_val.to_string(),
+                    new_value: new_val.to_string(),
+                    severity,
+                    detected_at_ms: now_ms,
+                });
+            }
+        }
+    }
+
+    signals
+}
+
+// ---------------------------------------------------------------------------
+// Remote Trust with Local Evidence (Issue #389)
+// ---------------------------------------------------------------------------
+
+/// Origin of an asset's trust evidence.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TrustOrigin {
+    /// Validated locally on this node.
+    Local,
+    /// Received from a remote peer via the evolution network.
+    Remote { peer_id: String },
+}
+
+impl Default for TrustOrigin {
+    fn default() -> Self {
+        Self::Local
+    }
+}
+
+/// Local evidence record for a remote asset.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct LocalEvidenceRecord {
+    /// Timestamp of last local validation (ms).
+    pub last_local_validation_ms: i64,
+    /// Whether local validation passed.
+    pub local_validation_passed: bool,
+    /// Number of local validations performed.
+    pub local_validation_count: u32,
+}
+
+/// Policy for requiring local evidence on remote assets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteTrustPolicy {
+    /// Maximum age (hours) of local evidence before remote asset becomes untrusted.
+    pub max_local_evidence_age_hours: f32,
+    /// Whether remote assets without any local evidence are trusted.
+    pub trust_unvalidated_remote: bool,
+    /// Minimum local validations required before a remote asset is trusted.
+    pub min_local_validations: u32,
+}
+
+impl Default for RemoteTrustPolicy {
+    fn default() -> Self {
+        Self {
+            max_local_evidence_age_hours: 12.0,
+            trust_unvalidated_remote: false,
+            min_local_validations: 1,
+        }
+    }
+}
+
+/// Check whether a remote asset has sufficient local evidence to remain trusted.
+pub fn remote_asset_has_local_evidence(
+    origin: &TrustOrigin,
+    local_evidence: Option<&LocalEvidenceRecord>,
+    now_ms: i64,
+    policy: &RemoteTrustPolicy,
+) -> bool {
+    // Local assets are always trusted (they are the evidence)
+    if matches!(origin, TrustOrigin::Local) {
+        return true;
+    }
+
+    let evidence = match local_evidence {
+        Some(e) => e,
+        None => return policy.trust_unvalidated_remote,
+    };
+
+    if !evidence.local_validation_passed {
+        return false;
+    }
+
+    if evidence.local_validation_count < policy.min_local_validations {
+        return false;
+    }
+
+    let age_hours = (now_ms - evidence.last_local_validation_ms) as f32 / 3_600_000.0;
+    age_hours <= policy.max_local_evidence_age_hours
+}
+
+/// Apply remote trust policy to a confidence profile, demoting if local evidence is stale.
+pub fn enforce_remote_trust_policy(
+    profile: &mut ConfidenceProfile,
+    origin: &TrustOrigin,
+    local_evidence: Option<&LocalEvidenceRecord>,
+    now_ms: i64,
+    policy: &RemoteTrustPolicy,
+) -> bool {
+    if remote_asset_has_local_evidence(origin, local_evidence, now_ms, policy) {
+        return true;
+    }
+
+    // Remote asset without sufficient local evidence → needs revalidation
+    profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+    profile.updated_at_ms = now_ms;
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Shadow Revalidation Scheduling (Issue #386)
+// ---------------------------------------------------------------------------
+
+/// Priority class for revalidation scheduling.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RevalidationPriority {
+    /// Low priority: asset is still above thresholds but aging.
+    Low,
+    /// Medium priority: asset is degrading.
+    Medium,
+    /// High priority: asset is below threshold or has high reuse count.
+    High,
+    /// Critical: asset was demoted and needs immediate revalidation.
+    Critical,
+}
+
+/// A scheduled revalidation target.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevalidationTarget {
+    /// Asset identifier.
+    pub asset_id: String,
+    /// Priority of this revalidation.
+    pub priority: RevalidationPriority,
+    /// Current composite confidence score.
+    pub current_composite: f32,
+    /// Whether the freshness dimension is stale.
+    pub freshness_stale: bool,
+    /// Whether compatibility drift exceeds tolerance.
+    pub drift_exceeded: bool,
+    /// Total reuse count (higher reuse = higher value asset).
+    pub reuse_count: u32,
+    /// Scheduled revalidation timestamp (ms). 0 means ASAP.
+    pub scheduled_at_ms: i64,
+}
+
+/// Configuration for the revalidation scheduler.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RevalidationSchedulerConfig {
+    /// Maximum number of concurrent revalidations.
+    pub max_concurrent: usize,
+    /// Interval between revalidation sweeps in seconds.
+    pub sweep_interval_secs: u64,
+    /// High-value threshold: assets with reuse_count above this get priority boost.
+    pub high_value_reuse_threshold: u32,
+    /// Confidence threshold below which revalidation is scheduled.
+    pub revalidation_confidence_threshold: f32,
+}
+
+impl Default for RevalidationSchedulerConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 5,
+            sweep_interval_secs: 300,
+            high_value_reuse_threshold: 10,
+            revalidation_confidence_threshold: 0.5,
+        }
+    }
+}
+
+/// Outcome of a shadow revalidation attempt.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ShadowRevalidationOutcome {
+    /// Asset passed revalidation, confidence restored.
+    Passed,
+    /// Asset failed revalidation, confidence reduced further.
+    Failed,
+    /// Revalidation was skipped (e.g., asset was revoked).
+    Skipped,
+}
+
+/// Result of processing a revalidation.
+#[derive(Clone, Debug)]
+pub struct RevalidationResult {
+    pub asset_id: String,
+    pub outcome: ShadowRevalidationOutcome,
+    pub old_composite: f32,
+    pub new_composite: f32,
+}
+
+/// Scan profiles and produce a priority-sorted list of revalidation targets.
+pub fn schedule_revalidations(
+    profiles: &[ConfidenceProfile],
+    now_ms: i64,
+    config: &RevalidationSchedulerConfig,
+) -> Vec<RevalidationTarget> {
+    let mut targets: Vec<RevalidationTarget> = profiles
+        .iter()
+        .filter(|p| {
+            !matches!(
+                p.lifecycle_state,
+                ConfidenceLifecycleState::Revoked | ConfidenceLifecycleState::Active
+            )
+        })
+        .filter(|p| {
+            matches!(
+                p.lifecycle_state,
+                ConfidenceLifecycleState::Demoted | ConfidenceLifecycleState::NeedsRevalidation
+            ) || p.composite_score() < config.revalidation_confidence_threshold
+        })
+        .map(|p| {
+            let reuse_count = p.reuse_evidence.total_observations();
+            let priority = compute_revalidation_priority(p, config);
+            RevalidationTarget {
+                asset_id: p.asset_id.clone(),
+                priority,
+                current_composite: p.composite_score(),
+                freshness_stale: p.freshness.is_stale(now_ms),
+                drift_exceeded: p.compatibility.exceeds_drift_tolerance(),
+                reuse_count,
+                scheduled_at_ms: 0, // ASAP
+            }
+        })
+        .collect();
+
+    // Sort by priority (Critical first), then by composite (lowest first)
+    targets.sort_by(|a, b| {
+        b.priority.cmp(&a.priority).then_with(|| {
+            a.current_composite
+                .partial_cmp(&b.current_composite)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+
+    // Limit to max_concurrent
+    targets.truncate(config.max_concurrent);
+    targets
+}
+
+fn compute_revalidation_priority(
+    profile: &ConfidenceProfile,
+    config: &RevalidationSchedulerConfig,
+) -> RevalidationPriority {
+    if matches!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted) {
+        return RevalidationPriority::Critical;
+    }
+    if profile.composite_score() < MIN_REPLAY_CONFIDENCE {
+        return RevalidationPriority::High;
+    }
+    if profile.reuse_evidence.total_observations() >= config.high_value_reuse_threshold {
+        return RevalidationPriority::High;
+    }
+    if matches!(
+        profile.lifecycle_state,
+        ConfidenceLifecycleState::NeedsRevalidation
+    ) {
+        return RevalidationPriority::Medium;
+    }
+    RevalidationPriority::Low
+}
+
+/// Apply a revalidation outcome to a profile, adjusting confidence.
+pub fn apply_revalidation_outcome(
+    profile: &mut ConfidenceProfile,
+    outcome: ShadowRevalidationOutcome,
+    now_ms: i64,
+    env_hash: Option<String>,
+) -> RevalidationResult {
+    let old_composite = profile.composite_score();
+
+    match outcome {
+        ShadowRevalidationOutcome::Passed => {
+            profile.freshness.record_validation(now_ms);
+            if let Some(hash) = env_hash {
+                profile.compatibility.record_revalidation(hash);
+            }
+            profile.reuse_evidence.record_success();
+            profile.update_lifecycle_state(now_ms);
+        }
+        ShadowRevalidationOutcome::Failed => {
+            profile.reuse_evidence.record_failure();
+            profile.update_lifecycle_state(now_ms);
+            // If already degrading and fails, demote
+            if profile.composite_score() < MIN_REPLAY_CONFIDENCE {
+                profile.demote(now_ms);
+            }
+        }
+        ShadowRevalidationOutcome::Skipped => {}
+    }
+
+    RevalidationResult {
+        asset_id: profile.asset_id.clone(),
+        outcome,
+        old_composite,
+        new_composite: profile.composite_score(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,5 +1692,604 @@ mod tests {
 
         assert!((seq.posterior_mean() - bulk.posterior_mean()).abs() < 1e-6);
         assert!((seq.posterior_variance() - bulk.posterior_variance()).abs() < 1e-9);
+    }
+
+    // -----------------------------------------------------------------------
+    // ConfidenceProfile tests (Issue #384)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn confidence_profile_new_has_initial_state() {
+        let now = 1_700_000_000_000i64;
+        let profile = ConfidenceProfile::new("asset-1", now);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Initial);
+        assert!(profile.is_replay_eligible());
+        assert!(profile.composite_score() > 0.8);
+    }
+
+    #[test]
+    fn confidence_profile_freshness_decay() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-2", now);
+        let later = now + 25 * 3_600_000;
+        profile.update_lifecycle_state(later);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn confidence_profile_drift_triggers_revalidation() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-3", now);
+        for _ in 0..4 {
+            profile.compatibility.record_drift();
+        }
+        profile.update_lifecycle_state(now + 1000);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn confidence_profile_reuse_evidence_updates() {
+        let mut reuse = ReuseEvidenceDimension::default();
+        reuse.record_success();
+        reuse.record_success();
+        reuse.record_failure();
+        assert!((reuse.score - 0.667).abs() < 0.01);
+        assert_eq!(reuse.total_observations(), 3);
+    }
+
+    #[test]
+    fn confidence_profile_composite_score_weighted() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-4", now);
+        profile.freshness.score = 0.8;
+        profile.compatibility.score = 0.6;
+        profile.reuse_evidence.score = 0.5;
+        assert!((profile.composite_score() - 0.655).abs() < 0.01);
+    }
+
+    #[test]
+    fn confidence_profile_demote_and_revoke() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-5", now);
+        profile.demote(now + 1000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted);
+        assert!(!profile.is_replay_eligible());
+
+        profile.revoke(now + 2000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+        profile.update_lifecycle_state(now + 3000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+    }
+
+    #[test]
+    fn compatibility_revalidation_resets_drift() {
+        let mut compat = CompatibilityDimension::default();
+        compat.record_drift();
+        compat.record_drift();
+        assert_eq!(compat.drift_count, 2);
+        assert!(compat.score < 1.0);
+        compat.record_revalidation("new-env-hash".to_string());
+        assert_eq!(compat.drift_count, 0);
+        assert!((compat.score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn replay_admissibility_thresholds_gate_correctly() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("asset-6", now);
+        profile.compatibility.score = 0.3;
+        assert!(!profile.is_replay_eligible());
+    }
+
+    // -----------------------------------------------------------------------
+    // Decay Rules tests (Issue #385)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decay_rules_freshness_decays_over_time() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-1", now);
+        let config = DecayRulesConfig::default();
+        let later = now + 10 * 3_600_000; // 10 hours later
+        let result = apply_decay_rules(&mut profile, later, 0, &config);
+        assert!(result.freshness_delta < 0.0);
+        assert!(result.new_composite < result.previous_composite);
+    }
+
+    #[test]
+    fn decay_rules_drift_events_reduce_compatibility() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-2", now);
+        let config = DecayRulesConfig::default();
+        let result = apply_decay_rules(&mut profile, now + 1000, 2, &config);
+        assert!(result.compatibility_delta < 0.0);
+        assert_eq!(profile.compatibility.drift_count, 2);
+    }
+
+    #[test]
+    fn decay_rules_auto_demotion_below_threshold() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-3", now);
+        let config = DecayRulesConfig::default();
+        // Fast-forward 48 hours so freshness decays heavily
+        let far_future = now + 48 * 3_600_000;
+        let result = apply_decay_rules(&mut profile, far_future, 5, &config);
+        assert!(result.demoted || result.needs_revalidation);
+    }
+
+    #[test]
+    fn decay_rules_batch_processing() {
+        let now = 1_700_000_000_000i64;
+        let mut profiles = vec![
+            ConfidenceProfile::new("batch-1", now),
+            ConfidenceProfile::new("batch-2", now),
+        ];
+        let mut drift_map = HashMap::new();
+        drift_map.insert("batch-1".to_string(), 1u32);
+        drift_map.insert("batch-2".to_string(), 0u32);
+        let config = DecayRulesConfig::default();
+        let results = apply_decay_batch(&mut profiles, now + 3_600_000, &drift_map, &config);
+        assert_eq!(results.len(), 2);
+        // batch-1 had drift, should have lower compatibility
+        assert!(profiles[0].compatibility.score < profiles[1].compatibility.score);
+    }
+
+    #[test]
+    fn decay_rules_no_demotion_when_disabled() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-4", now);
+        let config = DecayRulesConfig {
+            auto_demote_enabled: false,
+            ..DecayRulesConfig::default()
+        };
+        let far_future = now + 48 * 3_600_000;
+        let result = apply_decay_rules(&mut profile, far_future, 5, &config);
+        assert!(!result.demoted);
+    }
+
+    // -----------------------------------------------------------------------
+    // Revalidation Scheduling tests (Issue #386)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn revalidation_schedules_degrading_profiles() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("reval-1", now);
+        // Make it degrading
+        profile.freshness.score = 0.3;
+        profile.compatibility.score = 0.4;
+        profile.lifecycle_state = ConfidenceLifecycleState::Degrading;
+
+        let config = RevalidationSchedulerConfig::default();
+        let targets = schedule_revalidations(&[profile], now, &config);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].asset_id, "reval-1");
+    }
+
+    #[test]
+    fn revalidation_skips_active_and_revoked() {
+        let now = 1_700_000_000_000i64;
+        let mut active = ConfidenceProfile::new("active", now);
+        active.lifecycle_state = ConfidenceLifecycleState::Active;
+
+        let mut revoked = ConfidenceProfile::new("revoked", now);
+        revoked.lifecycle_state = ConfidenceLifecycleState::Revoked;
+
+        let config = RevalidationSchedulerConfig::default();
+        let targets = schedule_revalidations(&[active, revoked], now, &config);
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn revalidation_priority_demoted_is_critical() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("demoted-1", now);
+        profile.lifecycle_state = ConfidenceLifecycleState::Demoted;
+        profile.freshness.score = 0.2;
+
+        let config = RevalidationSchedulerConfig::default();
+        let targets = schedule_revalidations(&[profile], now, &config);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].priority, RevalidationPriority::Critical);
+    }
+
+    #[test]
+    fn revalidation_respects_max_concurrent() {
+        let now = 1_700_000_000_000i64;
+        let profiles: Vec<ConfidenceProfile> = (0..10)
+            .map(|i| {
+                let mut p = ConfidenceProfile::new(format!("asset-{i}"), now);
+                p.freshness.score = 0.2;
+                p.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+                p
+            })
+            .collect();
+
+        let config = RevalidationSchedulerConfig {
+            max_concurrent: 3,
+            ..Default::default()
+        };
+        let targets = schedule_revalidations(&profiles, now, &config);
+        assert_eq!(targets.len(), 3);
+    }
+
+    #[test]
+    fn apply_revalidation_passed_restores_confidence() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("reval-pass", now);
+        profile.freshness.score = 0.3;
+        profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+        let old = profile.composite_score();
+
+        let result = apply_revalidation_outcome(
+            &mut profile,
+            ShadowRevalidationOutcome::Passed,
+            now + 1000,
+            Some("env-hash-new".to_string()),
+        );
+        assert_eq!(result.outcome, ShadowRevalidationOutcome::Passed);
+        assert!(result.new_composite > old);
+    }
+
+    #[test]
+    fn apply_revalidation_failed_may_demote() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("reval-fail", now);
+        // Set last_validated far in the past so refresh_score keeps freshness low
+        profile.freshness.last_validated_ms = now - 30 * 3_600_000; // 30 hours ago
+        profile.freshness.score = 0.2;
+        profile.compatibility.score = 0.3;
+        profile.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
+
+        let result = apply_revalidation_outcome(
+            &mut profile,
+            ShadowRevalidationOutcome::Failed,
+            now + 1000,
+            None,
+        );
+        assert_eq!(result.outcome, ShadowRevalidationOutcome::Failed);
+        // With low freshness and compatibility, should be demoted
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted);
+    }
+
+    // -----------------------------------------------------------------------
+    // Drift-Aware Trust Degradation tests (Issue #387)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn drift_degradation_reduces_compatibility() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("drift-1", now);
+        let signals = vec![DriftSignal {
+            kind: DriftSignalKind::DependencyChange,
+            old_value: "hash-a".to_string(),
+            new_value: "hash-b".to_string(),
+            severity: 0.6,
+            detected_at_ms: now,
+        }];
+        let config = DriftDegradationConfig::default();
+        let result = apply_drift_degradation(&mut profile, &signals, now + 100, &config);
+        assert_eq!(result.signals_processed, 1);
+        assert!(result.new_composite < result.previous_composite);
+        assert!(!result.forced_revalidation);
+    }
+
+    #[test]
+    fn drift_compiler_change_forces_revalidation() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("drift-2", now);
+        let signals = vec![DriftSignal {
+            kind: DriftSignalKind::CompilerVersionChange,
+            old_value: "1.75.0".to_string(),
+            new_value: "1.76.0".to_string(),
+            severity: 0.9,
+            detected_at_ms: now,
+        }];
+        let config = DriftDegradationConfig::default();
+        let result = apply_drift_degradation(&mut profile, &signals, now + 100, &config);
+        assert!(result.forced_revalidation);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn drift_multiple_signals_cumulative() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("drift-3", now);
+        let signals = vec![
+            DriftSignal {
+                kind: DriftSignalKind::DependencyChange,
+                old_value: "a".to_string(),
+                new_value: "b".to_string(),
+                severity: 0.6,
+                detected_at_ms: now,
+            },
+            DriftSignal {
+                kind: DriftSignalKind::OsChange,
+                old_value: "linux".to_string(),
+                new_value: "macos".to_string(),
+                severity: 0.5,
+                detected_at_ms: now,
+            },
+        ];
+        let config = DriftDegradationConfig::default();
+        let result = apply_drift_degradation(&mut profile, &signals, now + 100, &config);
+        assert_eq!(result.signals_processed, 2);
+        assert_eq!(profile.compatibility.drift_count, 2);
+    }
+
+    #[test]
+    fn detect_drift_signals_finds_changes() {
+        let now = 1_700_000_000_000i64;
+        let old_components = vec![
+            ("rustc_version", "1.75.0"),
+            ("cargo_lock_hash", "abc"),
+            ("target_triple", "x86_64-unknown-linux-gnu"),
+        ];
+        let new_components = vec![
+            ("rustc_version", "1.76.0"),
+            ("cargo_lock_hash", "def"),
+            ("target_triple", "x86_64-unknown-linux-gnu"),
+        ];
+        let signals = detect_drift_signals(
+            "hash-old",
+            "hash-new",
+            &old_components,
+            &new_components,
+            now,
+        );
+        assert_eq!(signals.len(), 2);
+        assert!(signals
+            .iter()
+            .any(|s| s.kind == DriftSignalKind::CompilerVersionChange));
+        assert!(signals
+            .iter()
+            .any(|s| s.kind == DriftSignalKind::DependencyChange));
+    }
+
+    #[test]
+    fn detect_drift_signals_same_env_returns_empty() {
+        let now = 1_700_000_000_000i64;
+        let components = vec![("rustc_version", "1.75.0")];
+        let signals = detect_drift_signals("same", "same", &components, &components, now);
+        assert!(signals.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Demotion/revocation propagation tests (Issue #388)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn demotion_prevents_replay_eligibility() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("demote-gate-1", now);
+        assert!(profile.is_replay_eligible());
+        profile.demote(now + 1000);
+        assert!(!profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn revocation_is_terminal() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("revoke-1", now);
+        profile.revoke(now + 1000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+
+        // update_lifecycle_state should not change Revoked state
+        profile.freshness.record_validation(now + 2000);
+        profile.compatibility.record_revalidation("new".to_string());
+        profile.update_lifecycle_state(now + 3000);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Revoked);
+        assert!(!profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn demotion_via_decay_propagates_correctly() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("decay-demote", now);
+        let config = DecayRulesConfig::default();
+        // Large time gap + many drift events → auto-demotion
+        let far = now + 100 * 3_600_000;
+        let result = apply_decay_rules(&mut profile, far, 7, &config);
+        // Should be either demoted or needs revalidation
+        assert!(
+            result.demoted || result.needs_revalidation,
+            "expected demotion or revalidation, got demoted={}, needs_reval={}",
+            result.demoted,
+            result.needs_revalidation
+        );
+        assert!(!profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn revalidation_can_restore_demoted_profile() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("restore-1", now);
+        profile.demote(now + 1000);
+        assert!(!profile.is_replay_eligible());
+
+        // Successful revalidation restores to Active
+        profile.freshness.record_validation(now + 2000);
+        profile
+            .compatibility
+            .record_revalidation("env-v2".to_string());
+        profile.reuse_evidence.record_success();
+        profile.lifecycle_state = ConfidenceLifecycleState::Active;
+        profile.update_lifecycle_state(now + 2000);
+        assert!(profile.is_replay_eligible());
+    }
+
+    #[test]
+    fn repeated_failures_escalate_to_demotion() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("escalate-1", now);
+        // Set freshness low and compatibility low
+        profile.freshness.last_validated_ms = now - 48 * 3_600_000;
+        profile.freshness.refresh_score(now);
+        profile.compatibility.score = 0.2;
+
+        // Record many failures to drop reuse evidence
+        for _ in 0..10 {
+            profile.reuse_evidence.record_failure();
+        }
+
+        // Apply revalidation failure
+        let _result = apply_revalidation_outcome(
+            &mut profile,
+            ShadowRevalidationOutcome::Failed,
+            now + 1000,
+            None,
+        );
+        // Should be demoted due to very low composite
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Demoted,);
+    }
+
+    #[test]
+    fn policy_aware_confidence_gating_with_controller() {
+        let mut ctrl = ConfidenceController::with_default_config();
+        // Record failures to push confidence below selectable threshold
+        ctrl.record_failure("gated-asset", NOW);
+        ctrl.record_failure("gated-asset", NOW + 1);
+        ctrl.record_failure("gated-asset", NOW + 2);
+        ctrl.record_failure("gated-asset", NOW + 3);
+        ctrl.record_failure("gated-asset", NOW + 4);
+
+        // Multiple downgrades should bring it near or below threshold
+        let _events = ctrl.run_downgrade_check(NOW + 10);
+        let conf = ctrl.confidence("gated-asset");
+
+        // After downgrade events, check if requiring revalidation
+        if conf < MIN_REPLAY_CONFIDENCE {
+            assert!(!ctrl.is_selectable("gated-asset"));
+            assert!(ctrl
+                .assets_requiring_revalidation()
+                .contains(&"gated-asset".to_string()));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Remote Trust with Local Evidence tests (Issue #389)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn local_assets_always_trusted() {
+        let policy = RemoteTrustPolicy::default();
+        assert!(remote_asset_has_local_evidence(
+            &TrustOrigin::Local,
+            None,
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_without_evidence_untrusted_by_default() {
+        let policy = RemoteTrustPolicy::default();
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        assert!(!remote_asset_has_local_evidence(
+            &origin, None, NOW, &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_with_fresh_local_evidence_trusted() {
+        let policy = RemoteTrustPolicy::default();
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: NOW - 3_600_000, // 1 hour ago
+            local_validation_passed: true,
+            local_validation_count: 1,
+        };
+        assert!(remote_asset_has_local_evidence(
+            &origin,
+            Some(&evidence),
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_with_stale_evidence_untrusted() {
+        let policy = RemoteTrustPolicy::default(); // max 12 hours
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: NOW - 24 * 3_600_000, // 24 hours ago
+            local_validation_passed: true,
+            local_validation_count: 5,
+        };
+        assert!(!remote_asset_has_local_evidence(
+            &origin,
+            Some(&evidence),
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn remote_asset_with_failed_validation_untrusted() {
+        let policy = RemoteTrustPolicy::default();
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: NOW,
+            local_validation_passed: false,
+            local_validation_count: 1,
+        };
+        assert!(!remote_asset_has_local_evidence(
+            &origin,
+            Some(&evidence),
+            NOW,
+            &policy
+        ));
+    }
+
+    #[test]
+    fn enforce_remote_policy_demotes_stale_remote() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("remote-1", now);
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let policy = RemoteTrustPolicy::default();
+        let trusted = enforce_remote_trust_policy(&mut profile, &origin, None, now, &policy);
+        assert!(!trusted);
+        assert_eq!(
+            profile.lifecycle_state,
+            ConfidenceLifecycleState::NeedsRevalidation
+        );
+    }
+
+    #[test]
+    fn enforce_remote_policy_keeps_valid_remote_active() {
+        let now = 1_700_000_000_000i64;
+        let mut profile = ConfidenceProfile::new("remote-2", now);
+        let origin = TrustOrigin::Remote {
+            peer_id: "peer-1".to_string(),
+        };
+        let evidence = LocalEvidenceRecord {
+            last_local_validation_ms: now - 3_600_000,
+            local_validation_passed: true,
+            local_validation_count: 2,
+        };
+        let policy = RemoteTrustPolicy::default();
+        let trusted =
+            enforce_remote_trust_policy(&mut profile, &origin, Some(&evidence), now, &policy);
+        assert!(trusted);
+        assert_eq!(profile.lifecycle_state, ConfidenceLifecycleState::Initial);
     }
 }
