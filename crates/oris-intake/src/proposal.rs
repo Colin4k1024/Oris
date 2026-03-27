@@ -261,10 +261,12 @@ pub fn validate_proposal(proposal: &ProposalContract) -> ProposalValidationResul
         .iter()
         .filter(|e| e.mandatory)
         .collect();
-    if mandatory_evidence.is_empty() && !matches!(
-        proposal.intent.task_class,
-        BoundedTaskClass::DocsSingleFile | BoundedTaskClass::DocsMultiFile
-    ) {
+    if mandatory_evidence.is_empty()
+        && !matches!(
+            proposal.intent.task_class,
+            BoundedTaskClass::DocsSingleFile | BoundedTaskClass::DocsMultiFile
+        )
+    {
         issues.push("Non-docs proposal has no mandatory evidence requirements".into());
     }
 
