@@ -132,6 +132,15 @@ cargo run -p oris_operator_cli
 cargo fmt --all
 ```
 
+### Project Statistics (LOC & Git Contributions)
+```bash
+# Count total lines of code (Rust + TOML + Markdown) and all-author git stats
+./scripts/count_loc.sh
+
+# Show git contribution stats for a specific author
+./scripts/count_loc.sh "Colin4k1024"
+```
+
 ### Publishing
 ```bash
 # Dry-run before real publish
