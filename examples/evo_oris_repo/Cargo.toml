@@ -29,3 +29,11 @@ path = "src/bin/confidence_lifecycle_demo.rs"
 [[bin]]
 name = "network_exchange"
 path = "src/bin/network_exchange.rs"
+
+[[bin]]
+name = "self_evolution_demo"
+path = "src/bin/self_evolution_demo.rs"
+
+[[test]]
+name = "self_evolution_demo_test"
+path = "tests/self_evolution_demo_test.rs"

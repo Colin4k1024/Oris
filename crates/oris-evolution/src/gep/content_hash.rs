@@ -3,7 +3,7 @@
 //! Every GEP asset has a deterministic asset_id computed from its content,
 //! enabling deduplication and tamper detection.
 
-use serde::{Serialize, Serializer};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 

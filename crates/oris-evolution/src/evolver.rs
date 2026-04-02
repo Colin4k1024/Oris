@@ -158,6 +158,7 @@ pub struct EvolverAutomation {
     config: EvolverConfig,
     signals: Arc<RwLock<Vec<EvolutionSignal>>>,
     proposals: Arc<RwLock<Vec<MutationProposal>>>,
+    #[allow(dead_code)]
     local_peer_id: String,
 }
 

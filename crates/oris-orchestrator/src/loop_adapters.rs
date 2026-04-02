@@ -281,6 +281,7 @@ impl EvolutionPipelinePort for StandardPipelineAdapter {
             PipelineStage::Validate,
             PipelineStage::Evaluate,
         ] {
+            #[allow(deprecated)]
             match self.pipeline.execute_stage(stage, &mut context) {
                 Ok(state) => stage_states.push(StageState {
                     stage_name: stage.as_str().to_string(),

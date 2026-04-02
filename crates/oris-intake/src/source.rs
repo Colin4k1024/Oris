@@ -1,6 +1,6 @@
 //! Intake source definitions and implementations
 
-use crate::{IntakeError, IntakeResult, IntakeSourceConfig};
+use crate::{IntakeError, IntakeResult};
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 

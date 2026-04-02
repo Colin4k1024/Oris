@@ -2,7 +2,6 @@
 
 use crate::signal::ExtractedSignal;
 use crate::source::IntakeEvent;
-use crate::{IntakeError, IntakeResult};
 use serde::{Deserialize, Serialize};
 
 /// A mutation proposal generated from intake events
@@ -74,6 +73,7 @@ impl From<crate::source::IssueSeverity> for MutationRisk {
 }
 
 /// Builder for creating mutations from intake events
+#[allow(dead_code)]
 pub struct MutationBuilder {
     /// Default risk level
     default_risk: MutationRisk,
