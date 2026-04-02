@@ -1,4 +1,5 @@
 pub mod benchmark;
+pub mod visualization;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

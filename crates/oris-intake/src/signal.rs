@@ -1,6 +1,5 @@
 //! Signal extraction from intake events
 
-use crate::{IntakeError, IntakeResult, IntakeSourceType};
 use regex_lite::Regex;
 use serde::{Deserialize, Serialize};
 

@@ -303,7 +303,7 @@ impl RuleEngine {
         }
 
         // Check title pattern
-        if let Some(ref pattern) = conditions.title_pattern {
+        if let Some(ref _pattern) = conditions.title_pattern {
             let key = format!("{}:title", "");
             if let Some(re) = self.compiled_patterns.get(&key) {
                 if !re.is_match(&event.title) {
@@ -313,7 +313,7 @@ impl RuleEngine {
         }
 
         // Check description pattern
-        if let Some(ref pattern) = conditions.description_pattern {
+        if let Some(ref _pattern) = conditions.description_pattern {
             let key = format!("{}:desc", "");
             if let Some(re) = self.compiled_patterns.get(&key) {
                 if !re.is_match(&event.description) {

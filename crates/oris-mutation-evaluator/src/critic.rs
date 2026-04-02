@@ -94,6 +94,7 @@ Evaluate the mutation and return the JSON object as specified."#,
 
 /// Raw JSON shape returned by the critic LLM.
 #[derive(Debug, Deserialize, Serialize)]
+#[allow(dead_code)]
 pub(crate) struct CriticResponse {
     pub signal_alignment: f64,
     pub semantic_correctness: f64,
@@ -104,6 +105,7 @@ pub(crate) struct CriticResponse {
 }
 
 impl CriticResponse {
+    #[allow(dead_code)]
     pub fn into_scores_and_rationale(self) -> (DimensionScores, String) {
         let scores = DimensionScores {
             signal_alignment: self.signal_alignment.clamp(0.0, 1.0),

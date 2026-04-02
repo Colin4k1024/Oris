@@ -30,7 +30,7 @@ use crate::acceptance_gate::{AcceptanceGate, PipelineOutcomeView};
 use crate::github_adapter::{CreatedPullRequest, PrPayload};
 use crate::release_gate::ReleaseDecision;
 use crate::task_planner::{
-    bounded_task_classes, plan_autonomous_candidate, AutonomousPlanReasonCode, BoundedTaskClass,
+    bounded_task_classes, plan_autonomous_candidate, BoundedTaskClass,
 };
 
 // ── Ports ──────────────────────────────────────────────────────────────────

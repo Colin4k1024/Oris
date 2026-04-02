@@ -118,6 +118,7 @@ impl std::error::Error for PipelineOrchestratorError {}
 pub struct PipelineOrchestrator {
     classifier: Option<Box<dyn ClassifierPort>>,
     evolution_run: Box<dyn EvolutionRunPort>,
+    #[allow(dead_code)]
     config: OrchestratorConfig,
 }
 

@@ -4,7 +4,6 @@
 //! the evolution, which gene was used, the outcome, and the actual code changes.
 
 use super::content_hash::{compute_asset_id, AssetIdError};
-use super::gene::GeneCategory;
 use serde::{Deserialize, Serialize};
 
 /// Capsule content - structured description of the evolution

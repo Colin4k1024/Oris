@@ -121,6 +121,7 @@ Generate a mutation to fix these signals and return the JSON object."#,
 
 /// Raw JSON shape that LLM mutation backends are expected to return.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct MutationResponse {
     pub intent: String,
     pub proposed: String,
