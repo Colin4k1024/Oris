@@ -194,9 +194,7 @@ fn tokenise(s: &str) -> Vec<String> {
 /// A convenience wrapper around `TaskClassMatcher::classify`.
 pub fn signals_match_class(signals: &[String], class_id: &str, registry: &[TaskClass]) -> bool {
     let matcher = TaskClassMatcher::new(registry.to_vec());
-    matcher
-        .classify(signals)
-        .map_or(false, |c| c.id == class_id)
+    matcher.classify(signals).is_some_and(|c| c.id == class_id)
 }
 
 // ─── TaskClassDefinition ──────────────────────────────────────────────────────

@@ -83,7 +83,9 @@ impl Selector for DemoGenePool {
                     .signals
                     .iter()
                     .filter(|s| {
-                        input.signals.iter()
+                        input
+                            .signals
+                            .iter()
                             .any(|i| i.to_lowercase().contains(&s.to_lowercase()))
                     })
                     .count() as f32;
@@ -136,10 +138,16 @@ fn test_pipeline_executes_full_evolution_cycle() {
     let result = pipeline.execute(ctx).expect("pipeline execution failed");
 
     // Verify pipeline succeeded
-    assert!(result.success, "Pipeline should succeed: {:?}", result.error);
+    assert!(
+        result.success,
+        "Pipeline should succeed: {:?}",
+        result.error
+    );
 
     // Verify all stages completed
-    let stage_names = ["detect", "select", "mutate", "execute", "validate", "evaluate", "solidify", "reuse"];
+    let stage_names = [
+        "detect", "select", "mutate", "execute", "validate", "evaluate", "solidify", "reuse",
+    ];
 
     for stage_name in stage_names {
         let stage = result
@@ -188,7 +196,10 @@ fn test_gene_selection_with_signal_overlap() {
     let candidates = gene_pool.select(&input);
 
     // Should select the serialize gene
-    assert!(!candidates.is_empty(), "Should select at least one candidate");
+    assert!(
+        !candidates.is_empty(),
+        "Should select at least one candidate"
+    );
     assert_eq!(
         candidates[0].gene.id, "550e8400-e29b-41d4-a716-446655440001",
         "Should select the Serialize gene"
@@ -205,10 +216,7 @@ fn test_gene_selection_with_no_overlap() {
 
     // Test with non-matching signals
     let input = SelectorInput {
-        signals: vec![
-            "E0601".to_string(),
-            "main function not found".to_string(),
-        ],
+        signals: vec!["E0601".to_string(), "main function not found".to_string()],
         env: oris_evolution::EnvFingerprint {
             rustc_version: "1.77.0".to_string(),
             cargo_lock_hash: String::new(),
@@ -243,7 +251,9 @@ fn test_multiple_pipeline_executions() {
         ..Default::default()
     };
 
-    let result1 = pipeline.execute(ctx1).expect("first pipeline execution failed");
+    let result1 = pipeline
+        .execute(ctx1)
+        .expect("first pipeline execution failed");
     assert!(result1.success, "First execution should succeed");
 
     // Second execution with similar error
@@ -257,7 +267,9 @@ fn test_multiple_pipeline_executions() {
         ..Default::default()
     };
 
-    let result2 = pipeline.execute(ctx2).expect("second pipeline execution failed");
+    let result2 = pipeline
+        .execute(ctx2)
+        .expect("second pipeline execution failed");
     assert!(result2.success, "Second execution should succeed");
 
     // Both should complete all stages
@@ -275,9 +287,7 @@ fn test_pipeline_with_different_error_types() {
     // Test with a different error type that shouldn't match
     let ctx = PipelineContext {
         extractor_input: Some(SignalExtractorInput {
-            compiler_output: Some(
-                "error[E0601]: main function not found in crate".to_string(),
-            ),
+            compiler_output: Some("error[E0601]: main function not found in crate".to_string()),
             ..Default::default()
         }),
         ..Default::default()
@@ -285,5 +295,8 @@ fn test_pipeline_with_different_error_types() {
 
     let result = pipeline.execute(ctx).expect("pipeline execution failed");
     // Pipeline should still succeed (selector returns empty but that's valid)
-    assert!(result.success, "Pipeline should succeed even with no matching genes");
+    assert!(
+        result.success,
+        "Pipeline should succeed even with no matching genes"
+    );
 }

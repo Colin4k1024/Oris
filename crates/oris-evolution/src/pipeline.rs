@@ -1137,6 +1137,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_execute_stage_validate_uses_injected_port_and_fallback() {
         let validator = Arc::new(RecordingValidatePort::new(false));
         let pipeline = StandardEvolutionPipeline::new(
@@ -1205,6 +1206,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_execute_stage_evaluate_uses_injected_port_and_fallback() {
         let evaluator = Arc::new(RecordingEvaluatePort::new());
         let pipeline = StandardEvolutionPipeline::new(

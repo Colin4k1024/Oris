@@ -500,7 +500,7 @@ impl EvomapSemanticTaskStatus {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapSemanticTaskRecord {
+pub struct EvomapSemanticTaskRecord {
     task_id: String,
     title: String,
     summary: String,
@@ -517,7 +517,7 @@ struct EvomapSemanticTaskRecord {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapSemanticSubmissionRecord {
+pub struct EvomapSemanticSubmissionRecord {
     submission_id: String,
     task_id: String,
     submitted_by: String,
@@ -531,7 +531,7 @@ struct EvomapSemanticSubmissionRecord {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapAssetVerificationRecord {
+pub struct EvomapAssetVerificationRecord {
     verification_id: String,
     asset_id: String,
     sender_id: String,
@@ -545,7 +545,7 @@ struct EvomapAssetVerificationRecord {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapAssetVoteRecord {
+pub struct EvomapAssetVoteRecord {
     vote_id: String,
     asset_id: String,
     sender_id: String,
@@ -583,7 +583,7 @@ impl EvomapCouncilSessionStatus {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapCouncilSessionRecord {
+pub struct EvomapCouncilSessionRecord {
     session_id: String,
     status: EvomapCouncilSessionStatus,
     opened_by: String,
@@ -598,7 +598,7 @@ struct EvomapCouncilSessionRecord {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapCouncilProposalRecord {
+pub struct EvomapCouncilProposalRecord {
     proposal_id: String,
     session_id: String,
     title: String,
@@ -671,7 +671,7 @@ impl EvomapProjectStatus {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapProjectRecord {
+pub struct EvomapProjectRecord {
     project_id: String,
     title: String,
     summary: Option<String>,
@@ -696,7 +696,7 @@ struct EvomapProjectRecord {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapServiceRecord {
+pub struct EvomapServiceRecord {
     service_id: String,
     title: String,
     summary: Option<String>,
@@ -750,7 +750,7 @@ impl EvomapBidStatus {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapBidRecord {
+pub struct EvomapBidRecord {
     bid_id: String,
     service_id: String,
     bidder_id: String,
@@ -770,7 +770,7 @@ struct EvomapBidRecord {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-struct EvomapDisputeRuleRecord {
+pub struct EvomapDisputeRuleRecord {
     dispute_id: String,
     bid_id: Option<String>,
     decision: String,
@@ -4322,11 +4322,6 @@ fn parse_audit_target(method: &axum::http::Method, path: &str) -> Option<AuditTa
                 resource_id: None,
             }),
             // EvoMap semantic endpoints audit targets
-            ["a2a", "task", "swarm"] => Some(AuditTarget {
-                action: "a2a.semantic.task.swarm",
-                resource_type: "task",
-                resource_id: None,
-            }),
             ["a2a", "bounty", "create"] => Some(AuditTarget {
                 action: "a2a.semantic.bounty.create",
                 resource_type: "bounty",
@@ -27036,7 +27031,7 @@ pub async fn evomap_bounty_create(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_bounty_accept(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Path(bounty_id): Path<String>,
     Json(_req): Json<Value>,
@@ -27064,7 +27059,7 @@ pub async fn evomap_bounty_accept(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_bounty_close(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Path(bounty_id): Path<String>,
     Json(_req): Json<Value>,
@@ -27139,7 +27134,7 @@ pub struct ChildTask {
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_swarm_propose_decomposition(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapSwarmDecompositionRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapSwarmDecompositionResponse>>, ApiError> {
@@ -27215,7 +27210,7 @@ pub struct EvomapWorkerRegisterResponse {
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_worker_register(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapWorkerRegisterRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapWorkerRegisterResponse>>, ApiError> {
@@ -27274,7 +27269,7 @@ pub struct EvomapRecipeResponse {
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_recipe_create(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapRecipeCreateRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
@@ -27302,7 +27297,7 @@ pub async fn evomap_recipe_create(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_recipe_get(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Path(recipe_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
@@ -27328,10 +27323,10 @@ pub async fn evomap_recipe_get(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_recipe_fork(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Path(recipe_id): Path<String>,
-    Json(req): Json<Value>,
+    Json(_req): Json<Value>,
 ) -> Result<Json<ApiEnvelope<EvomapRecipeResponse>>, ApiError> {
     let rid = request_id(&headers);
     let new_recipe_id = format!("recipe-{}", uuid::Uuid::new_v4());
@@ -27382,7 +27377,7 @@ pub struct EvomapOrganismResponse {
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_organism_express(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapOrganismExpressRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapOrganismResponse>>, ApiError> {
@@ -27412,7 +27407,7 @@ pub async fn evomap_organism_express(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_organism_get(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Path(organism_id): Path<String>,
 ) -> Result<Json<ApiEnvelope<EvomapOrganismResponse>>, ApiError> {
@@ -27487,7 +27482,7 @@ pub struct EvomapSessionResponse {
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_session_join(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapSessionJoinRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapSessionResponse>>, ApiError> {
@@ -27513,9 +27508,9 @@ pub async fn evomap_session_join(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_session_message(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
-    Json(req): Json<EvomapSessionMessageRequest>,
+    Json(_req): Json<EvomapSessionMessageRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
 
@@ -27638,7 +27633,7 @@ pub struct EvomapDisputeResponse {
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_dispute_open(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapDisputeOpenRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapDisputeResponse>>, ApiError> {
@@ -27666,9 +27661,9 @@ pub async fn evomap_dispute_open(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_dispute_evidence(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
-    Json(req): Json<EvomapDisputeEvidenceRequest>,
+    Json(_req): Json<EvomapDisputeEvidenceRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
 
@@ -27688,7 +27683,7 @@ pub async fn evomap_dispute_evidence(
     feature = "evolution-network-experimental"
 ))]
 pub async fn evomap_dispute_resolve(
-    state: State<ExecutionApiState>,
+    _state: State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapDisputeResolveRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapDisputeResponse>>, ApiError> {
@@ -27725,7 +27720,7 @@ fn evomap_value_response(rid: String, data: Value) -> Json<ApiEnvelope<Value>> {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapValidateRequest {
+pub struct EvomapValidateRequest {
     sender_id: Option<String>,
     required_model_tier: Option<String>,
     model_tier: Option<String>,
@@ -27737,7 +27732,7 @@ struct EvomapValidateRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapSemanticReportRequest {
+pub struct EvomapSemanticReportRequest {
     task_id: String,
     sender_id: Option<String>,
     status: Option<String>,
@@ -27750,7 +27745,7 @@ struct EvomapSemanticReportRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapDecisionRequest {
+pub struct EvomapDecisionRequest {
     task_id: String,
     submission_id: Option<String>,
     decision: String,
@@ -27764,7 +27759,7 @@ struct EvomapDecisionRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapTaskSubmitRequest {
+pub struct EvomapTaskSubmitRequest {
     task_id: Option<String>,
     title: Option<String>,
     summary: Option<String>,
@@ -27777,7 +27772,7 @@ struct EvomapTaskSubmitRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapTaskReleaseRequest {
+pub struct EvomapTaskReleaseRequest {
     task_id: String,
     sender_id: Option<String>,
     reason: Option<String>,
@@ -27788,7 +27783,7 @@ struct EvomapTaskReleaseRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapTaskAcceptSubmissionRequest {
+pub struct EvomapTaskAcceptSubmissionRequest {
     task_id: String,
     submission_id: String,
     sender_id: Option<String>,
@@ -27799,7 +27794,7 @@ struct EvomapTaskAcceptSubmissionRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapAskRequest {
+pub struct EvomapAskRequest {
     sender_id: Option<String>,
     question: String,
     details: Option<String>,
@@ -27810,7 +27805,7 @@ struct EvomapAskRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapTaskListQuery {
+pub struct EvomapTaskListQuery {
     limit: Option<usize>,
     offset: Option<usize>,
     status: Option<String>,
@@ -27822,7 +27817,7 @@ struct EvomapTaskListQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
-struct EvomapAssetDiscoveryQuery {
+pub struct EvomapAssetDiscoveryQuery {
     sender_id: Option<String>,
     q: Option<String>,
     signals: Option<String>,
@@ -27848,7 +27843,7 @@ pub struct EvomapAssetGovernanceQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapAssetVerifyRequest {
+pub struct EvomapAssetVerifyRequest {
     sender_id: Option<String>,
     status: Option<String>,
     verdict: Option<String>,
@@ -27861,7 +27856,7 @@ struct EvomapAssetVerifyRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapAssetVoteRequest {
+pub struct EvomapAssetVoteRequest {
     sender_id: Option<String>,
     vote: Option<String>,
     choice: Option<String>,
@@ -27873,7 +27868,7 @@ struct EvomapAssetVoteRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapCouncilSessionRequest {
+pub struct EvomapCouncilSessionRequest {
     sender_id: Option<String>,
     action: Option<String>,
     session_id: Option<String>,
@@ -27886,7 +27881,7 @@ struct EvomapCouncilSessionRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapCouncilProposeRequest {
+pub struct EvomapCouncilProposeRequest {
     sender_id: Option<String>,
     proposal_id: Option<String>,
     session_id: Option<String>,
@@ -27899,7 +27894,7 @@ struct EvomapCouncilProposeRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapCouncilVoteRequest {
+pub struct EvomapCouncilVoteRequest {
     sender_id: Option<String>,
     proposal_id: Option<String>,
     vote: Option<String>,
@@ -27911,7 +27906,7 @@ struct EvomapCouncilVoteRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapCouncilExecuteRequest {
+pub struct EvomapCouncilExecuteRequest {
     sender_id: Option<String>,
     proposal_id: Option<String>,
 }
@@ -27921,7 +27916,7 @@ struct EvomapCouncilExecuteRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectProposeRequest {
+pub struct EvomapProjectProposeRequest {
     sender_id: Option<String>,
     project_id: Option<String>,
     title: Option<String>,
@@ -27935,7 +27930,7 @@ struct EvomapProjectProposeRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectClaimRequest {
+pub struct EvomapProjectClaimRequest {
     sender_id: Option<String>,
     idempotency_key: Option<String>,
 }
@@ -27945,7 +27940,7 @@ struct EvomapProjectClaimRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectProgressRequest {
+pub struct EvomapProjectProgressRequest {
     sender_id: Option<String>,
     progress_pct: Option<u8>,
     note: Option<String>,
@@ -27957,7 +27952,7 @@ struct EvomapProjectProgressRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectReviewRequest {
+pub struct EvomapProjectReviewRequest {
     sender_id: Option<String>,
     verdict: Option<String>,
     decision: Option<String>,
@@ -27971,7 +27966,7 @@ struct EvomapProjectReviewRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectMergeRequest {
+pub struct EvomapProjectMergeRequest {
     sender_id: Option<String>,
     idempotency_key: Option<String>,
 }
@@ -27981,7 +27976,7 @@ struct EvomapProjectMergeRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectListRequest {
+pub struct EvomapProjectListRequest {
     sender_id: Option<String>,
     status: Option<String>,
     owner_id: Option<String>,
@@ -27996,7 +27991,7 @@ struct EvomapProjectListRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectSuggestionsQuery {
+pub struct EvomapProjectSuggestionsQuery {
     sender_id: Option<String>,
     status: Option<String>,
     limit: Option<usize>,
@@ -28008,7 +28003,7 @@ struct EvomapProjectSuggestionsQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectCreateRequest {
+pub struct EvomapProjectCreateRequest {
     sender_id: Option<String>,
     project_id: Option<String>,
     title: Option<String>,
@@ -28022,7 +28017,7 @@ struct EvomapProjectCreateRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectStateRequest {
+pub struct EvomapProjectStateRequest {
     sender_id: Option<String>,
     state: Option<String>,
     idempotency_key: Option<String>,
@@ -28033,7 +28028,7 @@ struct EvomapProjectStateRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectGetListQuery {
+pub struct EvomapProjectGetListQuery {
     sender_id: Option<String>,
     status: Option<String>,
     owner_id: Option<String>,
@@ -28048,7 +28043,7 @@ struct EvomapProjectGetListQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapProjectIdSuggestionsQuery {
+pub struct EvomapProjectIdSuggestionsQuery {
     sender_id: Option<String>,
 }
 
@@ -28057,7 +28052,7 @@ struct EvomapProjectIdSuggestionsQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapServicePublishRequest {
+pub struct EvomapServicePublishRequest {
     sender_id: Option<String>,
     service_id: Option<String>,
     title: Option<String>,
@@ -28074,7 +28069,7 @@ struct EvomapServicePublishRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapBidCreateRequest {
+pub struct EvomapBidCreateRequest {
     sender_id: Option<String>,
     bid_id: Option<String>,
     service_id: Option<String>,
@@ -28089,7 +28084,7 @@ struct EvomapBidCreateRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapBidAcceptRequest {
+pub struct EvomapBidAcceptRequest {
     sender_id: Option<String>,
     idempotency_key: Option<String>,
 }
@@ -28099,7 +28094,7 @@ struct EvomapBidAcceptRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapBidListQuery {
+pub struct EvomapBidListQuery {
     sender_id: Option<String>,
     service_id: Option<String>,
     bidder_id: Option<String>,
@@ -28114,7 +28109,7 @@ struct EvomapBidListQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapDisputeRuleRequest {
+pub struct EvomapDisputeRuleRequest {
     sender_id: Option<String>,
     dispute_id: Option<String>,
     bid_id: Option<String>,
@@ -28133,7 +28128,7 @@ struct EvomapDisputeRuleRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapServiceRegisterRequest {
+pub struct EvomapServiceRegisterRequest {
     sender_id: Option<String>,
     service_id: Option<String>,
     title: Option<String>,
@@ -28150,7 +28145,7 @@ struct EvomapServiceRegisterRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapServiceListQuery {
+pub struct EvomapServiceListQuery {
     sender_id: Option<String>,
     category: Option<String>,
     status: Option<String>,
@@ -28166,7 +28161,7 @@ struct EvomapServiceListQuery {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapBidSubmitRequest {
+pub struct EvomapBidSubmitRequest {
     sender_id: Option<String>,
     bid_id: Option<String>,
     service_id: Option<String>,
@@ -28181,7 +28176,7 @@ struct EvomapBidSubmitRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapBidEvaluateRequest {
+pub struct EvomapBidEvaluateRequest {
     sender_id: Option<String>,
     service_id: Option<String>,
     strategy: Option<String>,
@@ -28193,7 +28188,7 @@ struct EvomapBidEvaluateRequest {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
-struct EvomapDisputeRuleGetQuery {
+pub struct EvomapDisputeRuleGetQuery {
     sender_id: Option<String>,
     dispute_id: Option<String>,
 }
@@ -28234,7 +28229,7 @@ impl EvomapAssetDiscoveryMode {
     feature = "evolution-network-experimental"
 ))]
 #[derive(Clone, Debug)]
-struct EvomapAssetDiscoveryItem {
+pub struct EvomapAssetDiscoveryItem {
     asset_id: String,
     asset_type: &'static str,
     type_label: &'static str,
