@@ -334,7 +334,7 @@ impl MemoryGraph {
     pub fn find_similar(&self, signals: &[String]) -> Vec<(String, f32)> {
         let mut similarities = Vec::new();
 
-        for (pattern, _) in &self.statistics {
+        for pattern in self.statistics.keys() {
             // Simple token-based similarity using strings
             let pattern_tokens: std::collections::HashSet<&str> = pattern.split('_').collect();
             let signal_tokens: std::collections::HashSet<&str> =

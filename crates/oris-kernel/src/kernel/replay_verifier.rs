@@ -122,7 +122,7 @@ impl ReplayVerifier {
 
     /// Returns the tool call checksum for a run (for later verification).
     pub fn tool_checksum(store: &dyn EventStore, run_id: &RunId) -> Result<String, KernelError> {
-        Ok(compute_tool_checksum(store, run_id)?)
+        compute_tool_checksum(store, run_id)
     }
 
     /// Returns the state hash for a run (for later verification).

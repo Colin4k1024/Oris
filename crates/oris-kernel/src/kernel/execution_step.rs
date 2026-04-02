@@ -13,8 +13,9 @@ use crate::kernel::step::Next;
 use crate::kernel::KernelError;
 
 /// Version identifier for ExecutionStep contract.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionStepVersion {
+    #[default]
     V1,
 }
 
@@ -23,12 +24,6 @@ impl ExecutionStepVersion {
         match self {
             ExecutionStepVersion::V1 => "1.0",
         }
-    }
-}
-
-impl Default for ExecutionStepVersion {
-    fn default() -> Self {
-        ExecutionStepVersion::V1
     }
 }
 

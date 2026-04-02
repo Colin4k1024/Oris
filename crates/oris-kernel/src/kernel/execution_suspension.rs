@@ -10,20 +10,15 @@ use serde::{Deserialize, Serialize};
 use crate::kernel::identity::RunId;
 
 /// Execution suspension state.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionSuspensionState {
     /// Normal execution.
+    #[default]
     Running,
     /// Execution paused, worker preparing to exit and release resources.
     Suspended,
     /// Waiting for external input (human, tool, policy).
     WaitingInput,
-}
-
-impl Default for ExecutionSuspensionState {
-    fn default() -> Self {
-        ExecutionSuspensionState::Running
-    }
 }
 
 /// Execution suspension: tracks the state of execution suspension.

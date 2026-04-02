@@ -6,9 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Runtime mode for the kernel: determines whether nondeterministic operations are allowed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KernelMode {
     /// Normal execution: no restrictions.
+    #[default]
     Normal,
     /// Recording a run for later replay; event stream is the source of truth.
     Record,
@@ -16,12 +17,6 @@ pub enum KernelMode {
     Replay,
     /// Verifying: same as Replay but also check event stream hash matches expected.
     Verify,
-}
-
-impl Default for KernelMode {
-    fn default() -> Self {
-        KernelMode::Normal
-    }
 }
 
 impl KernelMode {
@@ -32,18 +27,13 @@ impl KernelMode {
 }
 
 /// High-level execution mode that controls determinism guarantees.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeterministicMode {
     /// Deterministic execution - replay-safe
     Deterministic,
     /// Live execution - full system access
+    #[default]
     Live,
-}
-
-impl Default for DeterministicMode {
-    fn default() -> Self {
-        DeterministicMode::Live
-    }
 }
 
 impl DeterministicMode {

@@ -771,8 +771,10 @@ pub struct ConfidenceProfile {
 impl ConfidenceProfile {
     /// Create a new profile for an asset.
     pub fn new(asset_id: impl Into<String>, now_ms: i64) -> Self {
-        let mut freshness = FreshnessDimension::default();
-        freshness.last_validated_ms = now_ms;
+        let freshness = FreshnessDimension {
+            last_validated_ms: now_ms,
+            ..Default::default()
+        };
         Self {
             asset_id: asset_id.into(),
             freshness,
@@ -816,9 +818,7 @@ impl ConfidenceProfile {
             return; // Revoked is terminal unless explicitly reinstated
         }
 
-        if self.compatibility.exceeds_drift_tolerance() {
-            self.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
-        } else if self.freshness.is_stale(now_ms) {
+        if self.compatibility.exceeds_drift_tolerance() || self.freshness.is_stale(now_ms) {
             self.lifecycle_state = ConfidenceLifecycleState::NeedsRevalidation;
         } else if self.freshness.score < self.thresholds.min_freshness
             || self.compatibility.score < self.thresholds.min_compatibility

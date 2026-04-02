@@ -84,7 +84,7 @@ impl<S: KernelState + PartialEq> ReplayResume<S> {
 
         let mut events_replayed = 0;
         for se in &replay_events {
-            self.reducer.apply(&mut state, &se)?;
+            self.reducer.apply(&mut state, se)?;
             events_replayed += 1;
         }
 

@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 pub fn normalise_signal(raw: &str) -> String {
     let lowered = raw.to_lowercase();
     // Strip bracket notation around error codes
-    let stripped = lowered.replace('[', " ").replace(']', " ");
+    let stripped = lowered.replace(['[', ']'], " ");
     // Remove file:line:col references
     let mut tokens: Vec<&str> = stripped
         .split(|c: char| !c.is_alphanumeric())

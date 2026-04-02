@@ -86,9 +86,9 @@ pub fn verify_event_stream_hash(
 ) -> Result<(), KernelError> {
     let actual = event_stream_hash(store, run_id)?;
     if actual != *expected_hash {
-        return Err(KernelError::Driver(format!(
-            "replay mismatch: event stream hash differs from expected (determinism verify)"
-        )));
+        return Err(KernelError::Driver(
+            "replay mismatch: event stream hash differs from expected (determinism verify)".into(),
+        ));
     }
     Ok(())
 }

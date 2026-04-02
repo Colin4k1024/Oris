@@ -123,7 +123,7 @@ pub fn strip_fences(raw: &str) -> &str {
     let trimmed = raw.trim();
     if trimmed.starts_with("```") {
         // drop first line and last fence
-        let inner = trimmed.splitn(2, '\n').nth(1).unwrap_or(trimmed);
+        let inner = trimmed.split_once('\n').map(|x| x.1).unwrap_or(trimmed);
         inner.trim_end_matches("```").trim()
     } else {
         trimmed

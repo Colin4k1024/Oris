@@ -218,7 +218,7 @@ impl RuleEngine {
                 continue;
             }
 
-            let matched = self.matches_conditions(&rule.conditions, event, signals);
+            let matched = self.matches_conditions(&rule.id, &rule.conditions, event, signals);
 
             if matched {
                 let application = RuleApplication {
@@ -276,6 +276,7 @@ impl RuleEngine {
     /// Check if conditions match
     fn matches_conditions(
         &self,
+        rule_id: &str,
         conditions: &RuleConditions,
         event: &IntakeEvent,
         signals: &[ExtractedSignal],
@@ -303,8 +304,8 @@ impl RuleEngine {
         }
 
         // Check title pattern
-        if let Some(ref _pattern) = conditions.title_pattern {
-            let key = format!("{}:title", "");
+        if conditions.title_pattern.is_some() {
+            let key = format!("{}:title", rule_id);
             if let Some(re) = self.compiled_patterns.get(&key) {
                 if !re.is_match(&event.title) {
                     return false;
@@ -313,8 +314,8 @@ impl RuleEngine {
         }
 
         // Check description pattern
-        if let Some(ref _pattern) = conditions.description_pattern {
-            let key = format!("{}:desc", "");
+        if conditions.description_pattern.is_some() {
+            let key = format!("{}:desc", rule_id);
             if let Some(re) = self.compiled_patterns.get(&key) {
                 if !re.is_match(&event.description) {
                     return false;

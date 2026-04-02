@@ -258,7 +258,11 @@ impl GeneStore for SqliteGeneStore {
         }
 
         // Step 3: rank by relevance desc, truncate.
-        matches.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
+        matches.sort_by(|a, b| {
+            b.relevance_score
+                .partial_cmp(&a.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         matches.truncate(query.limit);
         Ok(matches)
     }
@@ -441,7 +445,8 @@ fn row_to_gene(row: &rusqlite::Row) -> rusqlite::Result<Gene> {
     let last_boost_str: Option<String> = row.get(13)?;
 
     Ok(Gene {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
+        id: Uuid::parse_str(&row.get::<_, String>(0)?)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
         name: row.get(1)?,
         description: row.get(2)?,
         tags: serde_json::from_str(&tags_json).unwrap_or_default(),
@@ -462,8 +467,10 @@ fn row_to_capsule(row: &rusqlite::Row) -> rusqlite::Result<Capsule> {
     let created_str: String = row.get(9)?;
     let used_str: Option<String> = row.get(10)?;
     Ok(Capsule {
-        id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap(),
-        gene_id: Uuid::parse_str(&row.get::<_, String>(1)?).unwrap(),
+        id: Uuid::parse_str(&row.get::<_, String>(0)?)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+        gene_id: Uuid::parse_str(&row.get::<_, String>(1)?)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
         content: row.get(2)?,
         env_fingerprint: row.get(3)?,
         quality_score: row.get(4)?,

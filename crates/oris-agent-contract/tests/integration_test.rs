@@ -8,11 +8,8 @@ use oris_agent_contract::{
     deny_autonomous_release_gate, deny_autonomous_task_plan, deny_discovered_candidate,
     deny_semantic_replay, fail_confidence_revalidation, pass_confidence_revalidation,
     reject_self_evolution_selection_decision, AutonomousApprovalMode, AutonomousCandidateSource,
-    AutonomousIntakeReasonCode, AutonomousMutationProposal, AutonomousPrLaneDecision,
-    AutonomousProposalScope, AutonomousReleaseGateDecision, AutonomousRiskTier, BoundedTaskClass,
-    ConfidenceDemotionReasonCode, ConfidenceRevalidationResult, ConfidenceState, DemotionDecision,
-    DiscoveredCandidate, EquivalenceExplanation, MutationProposal, ReplayFallbackContract,
-    RevalidationOutcome, SelfEvolutionMutationProposalContract, SemanticReplayDecision,
+    AutonomousIntakeReasonCode, AutonomousProposalScope, AutonomousRiskTier, BoundedTaskClass,
+    ConfidenceDemotionReasonCode, ConfidenceState, EquivalenceExplanation, RevalidationOutcome,
     TaskEquivalenceClass,
 };
 
