@@ -23,7 +23,7 @@
 | 任务 | 状态 | 目录 |
 |------|------|------|
 | claude-code-evolution-integration | completed | docs/artifacts/2026-04-05-claude-code-evolution-integration/ |
-| experience-repository | plan | docs/artifacts/2026-04-09-experience-repository/ |
+| experience-repository | completed | docs/artifacts/2026-04-09-experience-repository/ |
 
 ### 任务摘要
 
