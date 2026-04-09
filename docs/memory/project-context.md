@@ -22,10 +22,12 @@
 
 | 任务 | 状态 | 目录 |
 |------|------|------|
-| claude-code-evolution-integration | challenge-complete | docs/artifacts/2026-04-05-claude-code-evolution-integration/ |
+| claude-code-evolution-integration | completed | docs/artifacts/2026-04-05-claude-code-evolution-integration/ |
+| experience-repository | plan | docs/artifacts/2026-04-09-experience-repository/ |
 
 ### 任务摘要
-将 Oris 自我进化能力集成到 Claude Code harness，采用 IPC (Unix Domain Socket) 接口形式，混合触发模式（高置信度自动固化），强制签名验证 + 来源标签 + 自动 revert。
+
+**experience-repository**：构建 Oris 经验仓库的 HTTP API 服务（第一期 MVP 仅 Fetch 只读查询，Share 功能因 P0 阻断项延后）
 
 ## 关键依赖
 
@@ -41,10 +43,10 @@
 
 | 风险 | 影响 | 缓解措施 |
 |------|------|----------|
-| IPC 延迟 | 任务变慢 | 异步执行 |
-| 误进化 | 知识污染 | 高阈值 + 自动 revert |
-| 签名验证 | 开发成本 | 使用现有 Ed25519 |
+| 外部 Agent 身份凭证体系未定义 | P0 阻断 Share 功能 | 第一期 MVP 仅实现 Fetch 只读 |
+| API Key 安全模型待设计 | 安全风险 | 二期引入 Key Service |
+| keyword matching 非语义搜索 | 查询质量限制 | 标注限制，二期引入向量搜索 |
 
 ## 最后更新
 
-2026-04-05
+2026-04-09
