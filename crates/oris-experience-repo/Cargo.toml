@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "HTTP API server for Oris Experience Repository"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Colin4k1024/Oris"
+documentation = "https://docs.rs/oris-experience-repo"
+homepage = "https://github.com/Colin4k1024/Oris"
+keywords = ["oris", "experience-repository", "gene", "capsule", "evolution"]
 
 [dependencies]
 # HTTP server
@@ -36,10 +40,12 @@ reqwest = { version = "0.12", features = ["json"] }
 url = "2.5"
 
 # Gene store (SQLite-based)
-oris-genestore = { path = "../oris-genestore" }
+# Note: oris-genestore must be published to crates.io first (currently v0.2.0)
+oris-genestore = "0.2"
 
 # Evolution types
-oris-evolution = { path = "../oris-evolution" }
+# Note: oris-evolution must be published to crates.io first (currently v0.4.1)
+oris-evolution = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

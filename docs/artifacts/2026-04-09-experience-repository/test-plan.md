@@ -3,7 +3,7 @@ artifact: test-plan
 task: experience-repository
 date: 2026-04-09
 role: qa-engineer
-status: draft
+status: completed
 ---
 
 # Test Plan — 经验仓库 (Experience Repository)
