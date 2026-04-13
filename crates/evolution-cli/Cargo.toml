@@ -5,6 +5,8 @@ edition = "2021"
 description = "CLI tool for managing Oris Evolution Gene Pool"
 license = "MIT"
 repository = "https://github.com/Colin4k1024/Oris"
+keywords = ["oris", "evolution", "gene-pool", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 authors = ["Oris Team"]
 
 [[bin]]
@@ -13,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 # IPC Protocol
-oris-evo-ipc-protocol = { path = "../oris-evo-ipc-protocol" }
+oris-evo-ipc-protocol = "0.1"
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

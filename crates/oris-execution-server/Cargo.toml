@@ -19,7 +19,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-oris-runtime = { path = "../oris-runtime", default-features = false }
+oris-runtime = { version = "0.61", default-features = false }
 
 [features]
 default = []
