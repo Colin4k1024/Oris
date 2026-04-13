@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/Colin4k1024/Oris"
 documentation = "https://docs.rs/oris-experience-repo"
 homepage = "https://github.com/Colin4k1024/Oris"
-keywords = ["oris", "experience-repository", "gene", "capsule", "evolution"]
+keywords = ["oris", "experience-repo", "gene", "capsule", "evolution"]
 
 [dependencies]
 # HTTP server
