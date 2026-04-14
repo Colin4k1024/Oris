@@ -1,8 +1,7 @@
 //! HTTP server for Experience Repository.
 
 mod handlers;
-
-use std::collections::HashMap;
+pub mod middleware;
 
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
@@ -13,31 +12,25 @@ pub use handlers::{create_routes, AppState};
 /// Server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// API keys for authentication (key -> agent_id)
-    pub api_keys: HashMap<String, String>,
     /// Server bind address
     pub bind_addr: String,
     /// Gene store path
     pub store_path: String,
+    /// Key store path (SQLite)
+    pub key_store_path: String,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            api_keys: HashMap::new(),
             bind_addr: "127.0.0.1:8080".to_string(),
-            store_path: ":memory:".to_string(),
+            store_path: ".oris/experience_repo.db".to_string(),
+            key_store_path: ".oris/key_store.db".to_string(),
         }
     }
 }
 
 impl ServerConfig {
-    /// Add an API key for authentication.
-    pub fn with_api_key(mut self, key: impl Into<String>, agent_id: impl Into<String>) -> Self {
-        self.api_keys.insert(key.into(), agent_id.into());
-        self
-    }
-
     /// Set the bind address.
     pub fn with_bind_addr(mut self, addr: impl Into<String>) -> Self {
         self.bind_addr = addr.into();
@@ -50,9 +43,9 @@ impl ServerConfig {
         self
     }
 
-    /// Set multiple API keys at once.
-    pub fn with_api_keys(mut self, keys: HashMap<String, String>) -> Self {
-        self.api_keys = keys;
+    /// Set the key store path.
+    pub fn with_key_store_path(mut self, path: impl Into<String>) -> Self {
+        self.key_store_path = path.into();
         self
     }
 }

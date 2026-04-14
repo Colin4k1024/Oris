@@ -1,22 +1,30 @@
 //! Example: Run Experience Repository server.
 
+use oris_experience_repo::key_service::KeyStore;
 use oris_experience_repo::{ExperienceRepoServer, ServerConfig};
-use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt::init();
 
-    // Create server configuration with API keys
-    let mut api_keys = HashMap::new();
-    api_keys.insert("test-api-key".to_string(), "agent-001".to_string());
-    api_keys.insert("another-key".to_string(), "agent-002".to_string());
-
+    // Create server configuration
     let config = ServerConfig::default()
-        .with_api_keys(api_keys)
         .with_bind_addr("127.0.0.1:8080")
-        .with_store_path(".oris/experience_repo.db");
+        .with_store_path(".oris/experience_repo.db")
+        .with_key_store_path(".oris/key_store.db");
+
+    // Create an initial API key
+    {
+        let key_store = KeyStore::open(".oris/key_store.db")?;
+        let (raw_key, key_info) =
+            key_store.create_key("admin", Some("Initial admin key".to_string()), None)?;
+        println!("Created initial API key:");
+        println!("  Key ID: {}", key_info.key_id);
+        println!("  API Key: {}", raw_key);
+        println!("  Agent ID: {}", key_info.agent_id);
+        println!("\nSave this API key - it won't be shown again!");
+    }
 
     // Create and run server
     let server = ExperienceRepoServer::new(config);

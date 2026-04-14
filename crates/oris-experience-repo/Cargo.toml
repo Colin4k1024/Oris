@@ -1,6 +1,6 @@
 [package]
 name = "oris-experience-repo"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "HTTP API server for Oris Experience Repository"
 license = "MIT OR Apache-2.0"
@@ -39,6 +39,12 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 reqwest = { version = "0.12", features = ["json"] }
 url = "2.5"
 
+# Cryptography
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+ed25519-dalek = "2"
+
 # Gene store (SQLite-based)
 # Note: oris-genestore must be published to crates.io first (currently v0.2.0)
 oris-genestore = "0.2"
@@ -47,6 +53,17 @@ oris-genestore = "0.2"
 # Note: oris-evolution must be published to crates.io first (currently v0.4.1)
 oris-evolution = "0.4"
 
+# Evolution Network (for signing)
+oris-evolution-network = "0.5"
+
+# SQLite
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Rate limiting
+governor = "0.7"
+futures-util = "0.3"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
+getrandom = "0.2"

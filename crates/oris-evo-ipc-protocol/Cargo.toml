@@ -6,6 +6,8 @@ description = "IPC protocol definitions for Oris Evolution integration"
 license = "MIT"
 repository = "https://github.com/Colin4k1024/Oris"
 authors = ["Oris Team"]
+keywords = ["ipc", "protocol", "evolution", "messaging"]
+categories = ["asynchronous", "network-programming"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

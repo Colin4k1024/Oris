@@ -2,6 +2,8 @@
 
 use serde::Deserialize;
 
+use crate::oen::OenEnvelope;
+
 /// Query parameters for fetching experiences.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FetchQuery {
@@ -43,6 +45,40 @@ impl FetchQuery {
             })
             .unwrap_or_default()
     }
+}
+
+/// Request body for sharing experiences.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShareRequest {
+    /// OEN Envelope containing the experience to share.
+    pub envelope: OenEnvelope,
+}
+
+/// Request body for creating an API key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateKeyRequest {
+    /// Agent ID this key belongs to.
+    pub agent_id: String,
+    /// Optional TTL in days.
+    pub ttl_days: Option<i64>,
+    /// Human-readable description.
+    pub description: Option<String>,
+}
+
+/// Request body for rotating an API key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RotateKeyRequest {
+    /// Optional TTL in days for the new key.
+    pub ttl_days: Option<i64>,
+}
+
+/// Request body for registering a public key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RegisterPublicKeyRequest {
+    /// Sender ID this public key belongs to.
+    pub sender_id: String,
+    /// 32-byte hex-encoded Ed25519 public key.
+    pub public_key_hex: String,
 }
 
 #[cfg(test)]

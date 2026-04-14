@@ -8,8 +8,12 @@
 pub mod api;
 pub mod client;
 pub mod error;
+pub mod key_service;
+pub mod oen;
 pub mod server;
 
 pub use client::ExperienceRepoClient;
 pub use error::ExperienceRepoError;
+pub use key_service::{KeyServiceError, KeyStore};
+pub use oen::{OenError, OenVerifier};
 pub use server::{ExperienceRepoServer, ServerConfig};

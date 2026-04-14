@@ -20,6 +20,7 @@ members = [
     "crates/oris-evo-ipc-protocol",
     "crates/oris-evo-server",
     "crates/oris-experience-repo",
+    "crates/oris-exp-repo-cli",
     "crates/evolution-cli",
     "examples/evo_oris_repo",
     "examples/vector_store_surrealdb",
