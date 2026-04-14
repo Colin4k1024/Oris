@@ -1,0 +1,953 @@
+openapi: 3.0.3
+info:
+  title: Experience Repository HTTP API
+  description: |
+    HTTP API for the Oris Experience Repository, which serves as a public-facing
+    facade for sharing and retrieving experiences (Genes and Capsules) from the
+    Oris Evolution Network (OEN).
+
+    ## Authentication
+
+    All endpoints except `/health` require an `X-Api-Key` header containing a valid
+    API key. Keys can be managed via the `/keys` endpoints.
+
+    ## OEN Envelope
+
+    The `POST /experience` endpoint accepts OEN (Oris Evolution Network) envelopes
+    containing signed experience data. Envelopes must include:
+
+    - A valid Ed25519 signature
+    - A timestamp within 5 minutes of server time
+    - A `sender_id` matching the authenticated agent
+
+    ## Error Codes
+
+    | Code | HTTP Status | Description |
+    |------|-------------|-------------|
+    | `API_KEY_MISSING` | 401 | X-Api-Key header not provided |
+    | `INVALID_API_KEY` | 401 | API key not found or invalid |
+    | `KEY_EXPIRED` | 401 | API key has expired |
+    | `KEY_REVOKED` | 401 | API key has been revoked |
+    | `INVALID_SIGNATURE` | 403 | OEN envelope signature verification failed |
+    | `TIMESTAMP_EXPIRED` | 403 | OEN envelope timestamp outside tolerance |
+    | `SENDER_MISMATCH` | 403 | sender_id does not match authenticated agent |
+    | `INVALID_ENVELOPE` | 400 | Malformed OEN envelope |
+    | `QUERY_ERROR` | 400 | Invalid query parameters |
+    | `DUPLICATE_GENE` | 409 | Gene with this ID already exists |
+    | `KEY_SERVICE_ERROR` | 500 | Internal key service error |
+    | `GENE_STORE_ERROR` | 500 | Internal gene storage error |
+    | `OEN_ERROR` | 500 | Internal envelope processing error |
+    | `INTERNAL_ERROR` | 500 | Unexpected internal error |
+
+  version: 0.1.0
+  contact:
+    name: Oris Maintainers
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      description: Returns the service health status and version.
+      tags:
+        - Health
+      security: []
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                version: "0.1.0"
+
+  /experience:
+    get:
+      operationId: fetchExperiences
+      summary: Fetch experiences
+      description: |
+        Retrieve experiences (Genes and Capsules) from the repository.
+        Supports filtering by problem signals and confidence threshold,
+        with cursor-based pagination.
+      tags:
+        - Experience
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: q
+          in: query
+          description: |
+            Comma-separated problem signals to filter by (e.g., "timeout,error").
+            Only assets matching all listed signals are returned.
+          required: false
+          schema:
+            type: string
+            example: "timeout,error"
+        - name: min_confidence
+          in: query
+          description: Minimum confidence threshold (default 0.5).
+          required: false
+          schema:
+            type: number
+            format: double
+            minimum: 0
+            maximum: 1
+            default: 0.5
+          example: 0.7
+        - name: limit
+          in: query
+          description: Maximum number of results to return (default 10).
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+          example: 20
+        - name: cursor
+          in: query
+          description: Pagination cursor from a previous response.
+          required: false
+          schema:
+            type: string
+          example: "eyJpZCI6MTIzfQ=="
+      responses:
+        "200":
+          description: Experiences fetched successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FetchResponse"
+              example:
+                assets:
+                  - type: gene
+                    id: "gene-abc123"
+                    signals:
+                      - timeout
+                      - error
+                    strategy:
+                      - retry_with_backoff
+                    validation:
+                      - unit_tests_pass
+                      - integration_tests_pass
+                    confidence: 0.92
+                    quality_score: 0.88
+                    use_count: 42
+                    success_count: 38
+                    created_at: "2026-04-10T12:00:00Z"
+                    contributor_id: "agent-001"
+                next_cursor: "eyJpZCI6MTI0fQ=="
+                sync_audit:
+                  scanned_count: 150
+                  applied_count: 1
+                  skipped_count: 149
+                  failed_count: 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    post:
+      operationId: shareExperience
+      summary: Share an experience
+      description: |
+        Publish an experience (Gene or Capsule) to the repository.
+        Accepts an OEN (Oris Evolution Network) envelope containing signed
+        experience data. The envelope signature, timestamp, and sender_id
+        are all verified against the authenticated agent.
+      tags:
+        - Experience
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ShareRequest"
+            example:
+              envelope:
+                sender_id: "agent-001"
+                message_type: "publish"
+                payload:
+                  gene:
+                    id: "gene-xyz789"
+                    signals:
+                      - memory_leak
+                    strategy:
+                      - streaming_iteration
+                    validation:
+                      - benchmark_improved
+                    confidence: 0.85
+                    quality_score: 0.79
+                    use_count: 12
+                    success_count: 10
+                    created_at: "2026-04-14T08:30:00Z"
+                signature: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                timestamp: "2026-04-14T10:00:00Z"
+      responses:
+        "200":
+          description: Experience published successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ShareResponse"
+              example:
+                gene_id: "gene-xyz789"
+                status: "published"
+                published_at: "2026-04-14T10:00:01Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: Duplicate gene.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "duplicate gene"
+                error_code: "DUPLICATE_GENE"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /keys:
+    get:
+      operationId: listApiKeys
+      summary: List API keys
+      description: |
+        Returns all API keys belonging to the authenticated agent.
+        Only shows keys that the authenticated user has permission to view.
+      tags:
+        - API Keys
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: API keys retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListKeysResponse"
+              example:
+                keys:
+                  - key_id: "key-001"
+                    agent_id: "agent-001"
+                    description: "Production key"
+                    status: "active"
+                    created_at: "2026-04-01T00:00:00Z"
+                    expires_at: "2026-07-01T00:00:00Z"
+                    last_used_at: "2026-04-14T09:45:00Z"
+                  - key_id: "key-002"
+                    agent_id: "agent-001"
+                    description: "Development key"
+                    status: "revoked"
+                    created_at: "2026-03-15T00:00:00Z"
+                    expires_at: null
+                    last_used_at: "2026-04-10T14:20:00Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    post:
+      operationId: createApiKey
+      summary: Create an API key
+      description: |
+        Generate a new API key for an agent. The raw API key is only returned
+        once at creation time — it cannot be retrieved again. Store it securely.
+      tags:
+        - API Keys
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateKeyRequest"
+            example:
+              agent_id: "agent-002"
+              ttl_days: 90
+              description: "Staging environment key"
+      responses:
+        "200":
+          description: API key created successfully. The raw key is shown only here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateKeyResponse"
+              example:
+                key_id: "key-003"
+                api_key: "oris_sk_01HZG3K7M0Q2P4N5X7Y9ZABCDEFG"
+                agent_id: "agent-002"
+                created_at: "2026-04-14T10:05:00Z"
+                expires_at: "2026-07-13T10:05:00Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /keys/{key_id}:
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke an API key
+      description: |
+        Immediately revokes an API key. After revocation, the key can no longer
+        be used for authentication. Revocation is permanent.
+      tags:
+        - API Keys
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: key_id
+          in: path
+          required: true
+          description: The unique identifier of the API key to revoke.
+          schema:
+            type: string
+          example: "key-003"
+      responses:
+        "204":
+          description: API key revoked successfully. No content returned.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: API key not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid api key"
+                error_code: "INVALID_API_KEY"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /keys/{key_id}/rotate:
+    post:
+      operationId: rotateApiKey
+      summary: Rotate an API key
+      description: |
+        Revokes the current key and issues a new one with the same agent_id.
+        Optionally specify a new TTL. The new raw key is shown only once.
+      tags:
+        - API Keys
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: key_id
+          in: path
+          required: true
+          description: The unique identifier of the API key to rotate.
+          schema:
+            type: string
+          example: "key-003"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RotateKeyRequest"
+            example:
+              ttl_days: 60
+      responses:
+        "200":
+          description: API key rotated successfully. The new raw key is shown only here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RotateKeyResponse"
+              example:
+                key_id: "key-003"
+                api_key: "oris_sk_01HZG4K8M1R3Q5P6Y8Z0CCBDDEGG"
+                rotated_at: "2026-04-14T11:00:00Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: API key not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "invalid api key"
+                error_code: "INVALID_API_KEY"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        API key for authenticating requests. Obtain keys via `POST /keys`.
+
+  schemas:
+    # ─────────────────────────────────────────────────────
+    # Shared
+    # ─────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+          example: "invalid api key"
+        error_code:
+          type: string
+          description: Machine-readable error code. Present when the error has a known code.
+          example: "INVALID_API_KEY"
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - version
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+          example: ok
+        version:
+          type: string
+          example: "0.1.0"
+
+    # ─────────────────────────────────────────────────────
+    # Experience — Fetch
+    # ─────────────────────────────────────────────────────
+
+    SyncAudit:
+      type: object
+      required:
+        - scanned_count
+        - applied_count
+        - skipped_count
+        - failed_count
+      properties:
+        scanned_count:
+          type: integer
+          description: Total number of assets scanned during sync.
+          example: 150
+        applied_count:
+          type: integer
+          description: Number of assets applied in this fetch.
+          example: 1
+        skipped_count:
+          type: integer
+          description: Number of assets skipped (e.g., below confidence threshold).
+          example: 149
+        failed_count:
+          type: integer
+          description: Number of assets that failed during processing.
+          example: 0
+
+    NetworkAsset:
+      type: object
+      required:
+        - type
+      discriminator:
+        propertyName: type
+      description: |
+        A network asset representing either a Gene or a Capsule.
+        Genes contain reusable solution patterns; Capsules are immutable snapshots
+        of successful executions.
+      properties:
+        type:
+          type: string
+          enum:
+            - gene
+            - capsule
+      oneOf:
+        - $ref: "#/components/schemas/GeneAsset"
+        - $ref: "#/components/schemas/CapsuleAsset"
+
+    GeneAsset:
+      type: object
+      required:
+        - type
+        - id
+        - signals
+        - strategy
+        - validation
+        - confidence
+        - quality_score
+        - use_count
+        - success_count
+        - created_at
+      properties:
+        type:
+          type: string
+          const: gene
+        id:
+          type: string
+          description: Unique identifier for this gene.
+          example: "gene-abc123"
+        signals:
+          type: array
+          items:
+            type: string
+          description: Problem signals this gene addresses (e.g., "timeout", "error").
+          example: ["timeout", "error"]
+        strategy:
+          type: array
+          items:
+            type: string
+          description: Solution strategies employed by this gene.
+          example: ["retry_with_backoff", "circuit_breaker"]
+        validation:
+          type: array
+          items:
+            type: string
+          description: Validation criteria this gene satisfies.
+          example: ["unit_tests_pass", "integration_tests_pass"]
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Confidence score (0–1) in the gene's effectiveness.
+          example: 0.92
+        quality_score:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Quality score (0–1) based on code review and testing.
+          example: 0.88
+        use_count:
+          type: integer
+          description: Number of times this gene has been used.
+          example: 42
+        success_count:
+          type: integer
+          description: Number of successful uses.
+          example: 38
+        created_at:
+          type: string
+          format: date-time
+          description: When the gene was created.
+          example: "2026-04-10T12:00:00Z"
+        contributor_id:
+          type: string
+          description: Agent ID of the contributor (omitted if anonymous).
+          example: "agent-001"
+
+    CapsuleAsset:
+      type: object
+      required:
+        - type
+        - id
+        - gene_id
+        - confidence
+        - quality_score
+        - use_count
+        - success_count
+        - created_at
+      properties:
+        type:
+          type: string
+          const: capsule
+        id:
+          type: string
+          description: Unique identifier for this capsule.
+          example: "capsule-def456"
+        gene_id:
+          type: string
+          description: The parent gene this capsule was derived from.
+          example: "gene-abc123"
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Confidence score (0–1) in the capsule's effectiveness.
+          example: 0.95
+        quality_score:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: Quality score (0–1) based on code review and testing.
+          example: 0.91
+        use_count:
+          type: integer
+          description: Number of times this capsule has been used.
+          example: 15
+        success_count:
+          type: integer
+          description: Number of successful uses.
+          example: 14
+        created_at:
+          type: string
+          format: date-time
+          description: When the capsule was created.
+          example: "2026-04-12T16:30:00Z"
+        contributor_id:
+          type: string
+          description: Agent ID of the contributor (omitted if anonymous).
+          example: "agent-002"
+
+    FetchResponse:
+      type: object
+      required:
+        - assets
+        - sync_audit
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetworkAsset"
+        next_cursor:
+          type: string
+          nullable: true
+          description: |
+            Pagination cursor to fetch the next page. Null if no more results.
+          example: "eyJpZCI6MTI0fQ=="
+        sync_audit:
+          $ref: "#/components/schemas/SyncAudit"
+
+    # ─────────────────────────────────────────────────────
+    # Experience — Share
+    # ─────────────────────────────────────────────────────
+
+    ShareRequest:
+      type: object
+      required:
+        - envelope
+      properties:
+        envelope:
+          $ref: "#/components/schemas/OenEnvelope"
+
+    OenEnvelope:
+      type: object
+      required:
+        - sender_id
+        - message_type
+        - payload
+        - signature
+        - timestamp
+      properties:
+        sender_id:
+          type: string
+          description: |
+            Agent identifier of the sender. Must match the authenticated agent.
+          example: "agent-001"
+        message_type:
+          type: string
+          enum:
+            - publish
+            - fetch
+            - feedback
+          description: The OEN message type.
+          example: "publish"
+        payload:
+          type: object
+          description: |
+            The message payload. For publish type, contains the Gene or Capsule
+            data to be stored. This is the data that is signed.
+          example:
+            gene:
+              id: "gene-xyz789"
+              signals: ["memory_leak"]
+              strategy: ["streaming_iteration"]
+              validation: ["benchmark_improved"]
+              confidence: 0.85
+              quality_score: 0.79
+              use_count: 12
+              success_count: 10
+              created_at: "2026-04-14T08:30:00Z"
+        signature:
+          type: string
+          description: |
+            Ed25519 signature (base64 encoded) over the payload.
+            The signature is verified using the sender_id's public key.
+          example: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        timestamp:
+          type: string
+          format: date-time
+          description: |
+            RFC3339 timestamp of when the envelope was created.
+            Must be within 5 minutes of server time.
+          example: "2026-04-14T10:00:00Z"
+
+    ShareResponse:
+      type: object
+      required:
+        - gene_id
+        - status
+        - published_at
+      properties:
+        gene_id:
+          type: string
+          description: The stored gene ID.
+          example: "gene-xyz789"
+        status:
+          type: string
+          enum:
+            - published
+          description: Publication status.
+          example: "published"
+        published_at:
+          type: string
+          format: date-time
+          description: When the gene was published.
+          example: "2026-04-14T10:00:01Z"
+
+    # ─────────────────────────────────────────────────────
+    # API Keys
+    # ─────────────────────────────────────────────────────
+
+    KeyStatus:
+      type: string
+      enum:
+        - active
+        - revoked
+        - expired
+      description: Current status of the API key.
+
+    ApiKeyInfo:
+      type: object
+      required:
+        - key_id
+        - agent_id
+        - status
+        - created_at
+      properties:
+        key_id:
+          type: string
+          description: Unique identifier for this API key.
+          example: "key-001"
+        agent_id:
+          type: string
+          description: Agent ID this key belongs to.
+          example: "agent-001"
+        description:
+          type: string
+          nullable: true
+          description: Human-readable description of this key.
+          example: "Production key"
+        status:
+          $ref: "#/components/schemas/KeyStatus"
+        created_at:
+          type: string
+          format: date-time
+          description: When the key was created.
+          example: "2026-04-01T00:00:00Z"
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the key expires (null if no TTL was set).
+          example: "2026-07-01T00:00:00Z"
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the key was last used for authentication.
+          example: "2026-04-14T09:45:00Z"
+
+    ListKeysResponse:
+      type: object
+      required:
+        - keys
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKeyInfo"
+
+    CreateKeyRequest:
+      type: object
+      required:
+        - agent_id
+      properties:
+        agent_id:
+          type: string
+          description: Agent ID this key will belong to.
+          example: "agent-002"
+        ttl_days:
+          type: integer
+          nullable: true
+          description: |
+            Time-to-live in days. If not specified, the key does not expire.
+          example: 90
+        description:
+          type: string
+          nullable: true
+          description: Human-readable description for this key.
+          example: "Staging environment key"
+
+    CreateKeyResponse:
+      type: object
+      required:
+        - key_id
+        - api_key
+        - agent_id
+        - created_at
+      properties:
+        key_id:
+          type: string
+          description: Unique identifier for the new API key.
+          example: "key-003"
+        api_key:
+          type: string
+          description: |
+            The raw API key. This is only shown once at creation time.
+            Store it securely — it cannot be retrieved again.
+          example: "oris_sk_01HZG3K7M0Q2P4N5X7Y9ZABCDEFG"
+        agent_id:
+          type: string
+          description: Agent ID this key belongs to.
+          example: "agent-002"
+        created_at:
+          type: string
+          format: date-time
+          description: When the key was created.
+          example: "2026-04-14T10:05:00Z"
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the key expires (null if no TTL was set).
+          example: "2026-07-13T10:05:00Z"
+
+    RotateKeyRequest:
+      type: object
+      properties:
+        ttl_days:
+          type: integer
+          nullable: true
+          description: |
+            New TTL in days for the rotated key. If not specified,
+            the key will not have an expiration (or inherits the current TTL).
+          example: 60
+
+    RotateKeyResponse:
+      type: object
+      required:
+        - key_id
+        - api_key
+        - rotated_at
+      properties:
+        key_id:
+          type: string
+          description: The key ID (unchanged after rotation).
+          example: "key-003"
+        api_key:
+          type: string
+          description: |
+            The new raw API key. This is only shown once.
+            Store it securely — it cannot be retrieved again.
+          example: "oris_sk_01HZG4K8M1R3Q5P6Y8Z0CCBDDEGG"
+        rotated_at:
+          type: string
+          format: date-time
+          description: When the key was rotated.
+          example: "2026-04-14T11:00:00Z"
+
+  responses:
+    Unauthorized:
+      description: Authentication failed — missing or invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missing:
+              summary: API key missing
+              value:
+                error: "api key missing"
+                error_code: "API_KEY_MISSING"
+            invalid:
+              summary: Invalid API key
+              value:
+                error: "invalid api key"
+                error_code: "INVALID_API_KEY"
+            expired:
+              summary: API key expired
+              value:
+                error: "api key expired"
+                error_code: "KEY_EXPIRED"
+            revoked:
+              summary: API key revoked
+              value:
+                error: "api key revoked"
+                error_code: "KEY_REVOKED"
+
+    Forbidden:
+      description: Request rejected due to signature or sender verification failure.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalid_signature:
+              summary: Invalid envelope signature
+              value:
+                error: "invalid signature"
+                error_code: "INVALID_SIGNATURE"
+            timestamp_expired:
+              summary: Envelope timestamp expired
+              value:
+                error: "timestamp expired"
+                error_code: "TIMESTAMP_EXPIRED"
+            sender_mismatch:
+              summary: sender_id does not match authenticated agent
+              value:
+                error: "sender mismatch"
+                error_code: "SENDER_MISMATCH"
+
+    BadRequest:
+      description: Request validation failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalid_envelope:
+              summary: Malformed OEN envelope
+              value:
+                error: "invalid envelope"
+                error_code: "INVALID_ENVELOPE"
+            query_error:
+              summary: Invalid query parameters
+              value:
+                error: "query parse error: invalid signal format"
+                error_code: "QUERY_ERROR"
+
+    InternalServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "internal error"
+            error_code: "INTERNAL_ERROR"
+
+tags:
+  - name: Health
+    description: Service health and readiness.
+  - name: Experience
+    description: Experience (Gene and Capsule) sharing and retrieval.
+  - name: API Keys
+    description: API key lifecycle management.
