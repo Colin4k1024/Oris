@@ -1,0 +1,29 @@
+[package]
+name = "oris-exp-repo-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for managing Experience Repository API keys"
+license = "MIT"
+repository = "https://github.com/Colin4k1024/Oris"
+authors = ["Oris Team"]
+
+[[bin]]
+name = "oris-exp-repo-cli"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.36", features = ["rt-multi-thread", "macros"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1.0"
