@@ -22,12 +22,19 @@
 
 | 任务 | 状态 | 目录 |
 |------|------|------|
+| experience-repo-pki | closed | docs/artifacts/2026-04-14-experience-repo-pki/ |
+| experience-repo-phase2 | released | docs/artifacts/2026-04-14-experience-repo-phase2/ |
+| project-review-0414 | completed | docs/artifacts/2026-04-14-project-review/ |
 | claude-code-evolution-integration | completed | docs/artifacts/2026-04-05-claude-code-evolution-integration/ |
 | experience-repository | completed | docs/artifacts/2026-04-09-experience-repository/ |
 
 ### 任务摘要
 
-**experience-repository**：构建 Oris 经验仓库的 HTTP API 服务（第一期 MVP 仅 Fetch 只读查询，Share 功能因 P0 阻断项延后）
+**experience-repo-pki**：PKI 公钥注册表 + Ed25519 签名验证 + Rate Limiting + 公钥版本管理（25 单元测试 + 13 集成测试 = 38/38 通过，100% 完成度）
+
+**experience-repo-phase2**：实现 Share 功能（OEN Envelope + Ed25519 签名验证 + Key Service），预计工期 10 天
+
+**experience-repository**：构建 Oris 经验仓库的 HTTP API 服务（第一期 MVP 已完成 Fetch 只读查询）
 
 ## 关键依赖
 
@@ -49,4 +56,4 @@
 
 ## 最后更新
 
-2026-04-09
+2026-04-14
