@@ -35,10 +35,37 @@ pub fn apply_linux_limits(command: &mut Command, policy: &SandboxPolicy) {
     let max_cpu = policy.max_cpu_secs;
     let use_pg = policy.use_process_group;
 
-    // SAFETY: pre_exec runs in the forked child before exec; only async-signal-
-    // safe operations are allowed.  nix::sys::resource::setrlimit and
-    // nix::unistd::setsid are both async-signal-safe wrappers around the
-    // corresponding syscalls.
+    // SAFETY:
+    // =========
+    // `pre_exec` is called in the child process after `fork()` but before `exec()`.
+    // At this point the child has a copy of the parent's address space but runs in
+    // a single-threaded context (POSIX guarantees that only the calling thread survives
+    // in the child after fork()). The restrictions below are REQUIRED to maintain soundness:
+    //
+    // 1. **No memory allocation or dynamic dispatch**: The child cannot safely call
+    //    malloc, new, or any function that might invoke a dynamic linker. We only call
+    //    async-signal-safe functions.
+    //
+    // 2. **setrlimit is async-signal-safe**: The nix crate's setrlimit() wraps the
+    //    setrlimit(2) syscall directly. Per POSIX, setrlimit(2) is async-signal-safe.
+    //
+    // 3. **setsid is async-signal-safe**: The nix crate's setsid() wraps setsid(2),
+    //    which is also async-signal-safe per POSIX.
+    //
+    // 4. **No use of Rust's std library**: The closure captures only primitive types
+    //    (Option<u64> values) copied from the parent. It does not capture pointers,
+    //    references, or any Rust objects that might be in an invalid state post-fork.
+    //
+    // 5. **Error handling via map_err**: Errors from setrlimit/setsid are converted
+    //    to std::io::Error using from_raw_os_error (a trivial cast, no allocation).
+    //    Returning an error from pre_exec causes the child process to exit immediately,
+    //    which is the correct fail-safe behavior.
+    //
+    // Invariants that MUST be maintained:
+    // - `max_mem`, `max_cpu`, and `use_pg` must be `Copy` types (u64) captured by value
+    // - No references or pointers to parent memory may be captured
+    // - No mutexes, condition variables, or synchronization primitives from the parent
+    // - The closure must not panic (would cause undefined behavior in child)
     unsafe {
         command.pre_exec(move || {
             if let Some(mem_limit) = max_mem {

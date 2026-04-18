@@ -1,15 +1,25 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
+use crate::error::ToolError;
 use crate::tools::Tool;
+
+/// Allowlist of permitted commands for sandboxed execution
+const ALLOWED_COMMANDS: &[&str] = &[
+    "ls", "cat", "echo", "pwd", "cd", "mkdir", "rmdir", "touch", "rm",
+    "cp", "mv", "head", "tail", "wc", "grep", "find", "sort", "uniq",
+    "git", "cargo", "rustc", "md5sum", "sha256sum",
+];
 
 pub struct CommandExecutor {
     platform: String,
+    allowed_commands: HashSet<String>,
 }
 
 impl CommandExecutor {
-    /// Create a new CommandExecutor instance
+    /// Create a new CommandExecutor instance with default allowlist
     /// # Example
     /// ```rust,ignore
     /// let tool = CommandExecutor::new("linux");
@@ -17,7 +27,63 @@ impl CommandExecutor {
     pub fn new<S: Into<String>>(platform: S) -> Self {
         Self {
             platform: platform.into(),
+            allowed_commands: ALLOWED_COMMANDS.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// Create a new CommandExecutor with a custom allowlist (for testing/admin purposes)
+    /// This is intentionally not pub - use `new()` for normal use
+    fn new_with_allowlist<S: Into<String>>(platform: S, allowlist: HashSet<String>) -> Self {
+        Self {
+            platform: platform.into(),
+            allowed_commands: allowlist,
+        }
+    }
+
+    /// Validate a command against the allowlist
+    fn validate_command(&self, cmd: &str) -> Result<(), ToolError> {
+        let cmd_name = cmd.split_whitespace().next().unwrap_or(cmd);
+        if !self.allowed_commands.contains(cmd_name) {
+            return Err(ToolError::ExecutionError(format!(
+                "Command '{}' not allowed. Allowed commands: {:?}",
+                cmd_name, self.allowed_commands
+            )));
+        }
+        Ok(())
+    }
+
+    /// Execute commands with allowlist validation (sandboxed execution)
+    async fn execute_sandboxed(&self, input: Value) -> Result<String, ToolError> {
+        let commands: Vec<CommandInput> = serde_json::from_value(input)
+            .map_err(|e| ToolError::ParsingError(e.to_string()))?;
+        let mut result = String::new();
+
+        for command in commands {
+            // Validate command against allowlist
+            self.validate_command(&command.cmd)?;
+
+            let mut command_to_execute = std::process::Command::new(&command.cmd);
+            command_to_execute.args(&command.args);
+
+            let output = command_to_execute
+                .output()
+                .map_err(|e| ToolError::ExecutionError(e.to_string()))?;
+
+            result.push_str(&format!(
+                "Command: {}\nOutput: {}",
+                command.cmd,
+                String::from_utf8_lossy(&output.stdout),
+            ));
+
+            if !output.status.success() {
+                return Err(ToolError::ExecutionError(format!(
+                    "Command {} failed with status: {}",
+                    command.cmd, output.status
+                )));
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -126,33 +192,7 @@ impl Tool for CommandExecutor {
     }
 
     async fn run(&self, input: Value) -> Result<String, crate::error::ToolError> {
-        let commands: Vec<CommandInput> = serde_json::from_value(input)
-            .map_err(|e| crate::error::ToolError::ParsingError(e.to_string()))?;
-        let mut result = String::new();
-
-        for command in commands {
-            let mut command_to_execute = std::process::Command::new(&command.cmd);
-            command_to_execute.args(&command.args);
-
-            let output = command_to_execute
-                .output()
-                .map_err(|e| crate::error::ToolError::ExecutionError(e.to_string()))?;
-
-            result.push_str(&format!(
-                "Command: {}\nOutput: {}",
-                command.cmd,
-                String::from_utf8_lossy(&output.stdout),
-            ));
-
-            if !output.status.success() {
-                return Err(crate::error::ToolError::ExecutionError(format!(
-                    "Command {} failed with status: {}",
-                    command.cmd, output.status
-                )));
-            }
-        }
-
-        Ok(result)
+        self.execute_sandboxed(input).await
     }
 }
 

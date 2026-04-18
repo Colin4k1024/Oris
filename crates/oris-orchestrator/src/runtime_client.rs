@@ -259,20 +259,18 @@ struct InMemoryRuntimeState {
 }
 
 impl InMemoryRuntimeA2aClient {
-    pub fn accepted_handshakes(&self) -> usize {
+    pub fn accepted_handshakes(&self) -> Result<usize, RuntimeClientError> {
         self.inner
             .lock()
-            .expect("in-memory runtime lock")
-            .accepted_handshakes
+            .map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))
+            .map(|state| state.accepted_handshakes)
     }
 
-    pub fn completion(&self, session_id: &str) -> Option<A2aTaskSessionCompletionResponse> {
+    pub fn completion(&self, session_id: &str) -> Result<Option<A2aTaskSessionCompletionResponse>, RuntimeClientError> {
         self.inner
             .lock()
-            .expect("in-memory runtime lock")
-            .completions
-            .get(session_id)
-            .cloned()
+            .map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))
+            .map(|state| state.completions.get(session_id).cloned())
     }
 }
 
@@ -288,7 +286,7 @@ impl RuntimeA2aClient for InMemoryRuntimeA2aClient {
             ));
         }
 
-        let mut state = self.inner.lock().expect("in-memory runtime lock");
+        let mut state = self.inner.lock().map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
         state.accepted_handshakes += 1;
 
         Ok(A2aHandshakeResponse::accept(vec![
@@ -306,13 +304,13 @@ impl RuntimeA2aClient for InMemoryRuntimeA2aClient {
             .validate()
             .map_err(|e| RuntimeClientError::new(e.to_string()))?;
 
-        let mut state = self.inner.lock().expect("in-memory runtime lock");
+        let mut state = self.inner.lock().map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
         state.next_session_id += 1;
 
         let session_id = format!("a2a-session-{}", state.next_session_id);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("system time should be after epoch")
+            .map_err(|_| RuntimeClientError::new("system time is before Unix epoch"))?
             .as_millis() as u64;
 
         let ack = A2aTaskSessionAck {
@@ -340,7 +338,7 @@ impl RuntimeA2aClient for InMemoryRuntimeA2aClient {
             ));
         }
 
-        let mut state = self.inner.lock().expect("in-memory runtime lock");
+        let mut state = self.inner.lock().map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
         let session =
             state.sessions.get(session_id).cloned().ok_or_else(|| {
                 RuntimeClientError::new(format!("session not found: {}", session_id))

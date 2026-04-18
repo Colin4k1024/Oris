@@ -96,7 +96,7 @@ impl EventStore for SqliteEventStore {
         let _guard = self
             .lock
             .lock()
-            .map_err(|_| map_event_err("lock poisoned", "mutex poisoned"))?;
+            .map_err(|_| map_event_err("lock poisoned", "FATAL: mutex poisoned - previous holder panicked while holding lock; state may be corrupted"))?;
         let mut conn = self.open_connection()?;
 
         if events.is_empty() {
@@ -142,7 +142,7 @@ impl EventStore for SqliteEventStore {
         let _guard = self
             .lock
             .lock()
-            .map_err(|_| map_event_err("lock poisoned", "mutex poisoned"))?;
+            .map_err(|_| map_event_err("lock poisoned", "FATAL: mutex poisoned - previous holder panicked while holding lock; state may be corrupted"))?;
         let conn = self.open_connection()?;
         let mut stmt = conn
             .prepare(
@@ -180,7 +180,7 @@ impl EventStore for SqliteEventStore {
         let _guard = self
             .lock
             .lock()
-            .map_err(|_| map_event_err("lock poisoned", "mutex poisoned"))?;
+            .map_err(|_| map_event_err("lock poisoned", "FATAL: mutex poisoned - previous holder panicked while holding lock; state may be corrupted"))?;
         let conn = self.open_connection()?;
         let head: i64 = conn
             .query_row(
@@ -254,7 +254,7 @@ where
         let _guard = self
             .lock
             .lock()
-            .map_err(|_| map_snapshot_err("lock poisoned", "mutex poisoned"))?;
+            .map_err(|_| map_snapshot_err("lock poisoned", "FATAL: mutex poisoned - previous holder panicked while holding lock; state may be corrupted"))?;
         let conn = self.open_connection()?;
         let row = conn
             .query_row(
@@ -291,7 +291,7 @@ where
         let _guard = self
             .lock
             .lock()
-            .map_err(|_| map_snapshot_err("lock poisoned", "mutex poisoned"))?;
+            .map_err(|_| map_snapshot_err("lock poisoned", "FATAL: mutex poisoned - previous holder panicked while holding lock; state may be corrupted"))?;
         let conn = self.open_connection()?;
         let json = serde_json::to_string(&snapshot.state)
             .map_err(|e| map_snapshot_err("encode state", e))?;
