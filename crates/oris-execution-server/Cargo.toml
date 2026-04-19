@@ -30,3 +30,6 @@ a2a-production = ["execution-server", "oris-runtime/a2a-production"]
 evolution-network-experimental = ["oris-runtime/evolution-network-experimental"]
 full-evolution-experimental = ["oris-runtime/full-evolution-experimental"]
 mcp-experimental = ["execution-server", "oris-runtime/mcp-experimental"]
+
+[dev-dependencies]
+serde_json = "1.0"
