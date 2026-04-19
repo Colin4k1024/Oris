@@ -73,18 +73,26 @@ pub enum RuleAction {
 /// Result of applying a rule
 #[derive(Clone, Debug)]
 pub struct RuleApplication {
+    /// ID of the rule that was evaluated.
     pub rule_id: String,
+    /// `true` if the rule's conditions matched the event.
     pub matched: bool,
+    /// Actions that were applied (empty if the rule did not match or is disabled).
     pub actions_applied: Vec<RuleAction>,
+    /// The event after applying this rule's actions, if it was modified.
     pub modified_event: Option<IntakeEvent>,
+    /// `true` if a `Skip` action was applied, suppressing further processing.
     pub should_skip: bool,
 }
 
 /// Result of applying all matching rules to a single intake event.
 #[derive(Clone, Debug)]
 pub struct RuleProcessingResult {
+    /// The final event after all rules have been applied.
     pub event: IntakeEvent,
+    /// Per-rule evaluation records for audit and debugging.
     pub applications: Vec<RuleApplication>,
+    /// `true` if any matched rule requested that the event be skipped.
     pub should_skip: bool,
 }
 

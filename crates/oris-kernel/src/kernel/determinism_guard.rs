@@ -19,10 +19,12 @@ use crate::kernel::KernelError;
 /// operation; they return [Err] in Replay/Verify mode.
 #[derive(Clone, Debug)]
 pub struct DeterminismGuard {
+    /// The kernel's current execution mode (Normal, Record, Replay, or Verify).
     pub mode: KernelMode,
 }
 
 impl DeterminismGuard {
+    /// Creates a guard for the given execution mode.
     pub fn new(mode: KernelMode) -> Self {
         Self { mode }
     }

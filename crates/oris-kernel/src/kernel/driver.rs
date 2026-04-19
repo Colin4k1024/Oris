@@ -26,32 +26,48 @@ pub enum RunStatus {
     /// Run is still advancing (optional; used when yielding before blocking).
     Running,
     /// Run failed; recoverable indicates whether resume/retry is possible.
-    Failed { recoverable: bool },
+    Failed {
+        /// `true` if the failure is transient and the run may be resumed or retried.
+        recoverable: bool,
+    },
 }
 
+/// State of a run that has paused and is waiting for an external input.
 #[derive(Clone, Debug)]
 pub struct BlockedInfo {
+    /// Set when the run is blocked on a human-in-the-loop interrupt.
     pub interrupt: Option<InterruptInfo>,
+    /// Set when the run is waiting for a named external signal.
     pub wait_signal: Option<String>,
 }
 
 /// Signal to resume a blocked run (e.g. human approval, external event).
 #[derive(Clone, Debug)]
 pub enum Signal {
+    /// Resume an interrupt with a resolved value (e.g. human-approved payload).
     Resume(serde_json::Value),
+    /// Deliver a named external signal to unblock a `WaitSignal` action.
     Signal {
+        /// Name of the signal channel being delivered.
         name: String,
+        /// Payload carried by the signal.
         value: serde_json::Value,
     },
 }
 
 /// Kernel: event store, optional snapshot store, reducer, executor, step fn, policy, optional effect sink, execution mode.
 pub struct Kernel<S: KernelState> {
+    /// Append-only event log; the source of truth for all run state.
     pub events: Box<dyn EventStore>,
+    /// Optional snapshot store for fast replay (avoids full log scan on resume).
     pub snaps: Option<Box<dyn SnapshotStore<S>>>,
+    /// Applies events to the run state.
     pub reducer: Box<dyn Reducer<S>>,
+    /// Executes actions (tool calls, LLM calls, sleeps).
     pub exec: Box<dyn ActionExecutor>,
+    /// Computes the next step given the current state.
     pub step: Box<dyn StepFn<S>>,
+    /// Governs which actions are allowed and how to retry on failure.
     pub policy: Box<dyn Policy>,
     /// When set, every runtime effect (LLM/tool call, state write, interrupt) is recorded here.
     pub effect_sink: Option<Box<dyn EffectSink>>,

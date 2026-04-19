@@ -29,13 +29,29 @@ pub enum Event {
         payload: Value,
     },
     /// The action completed successfully; output is stored for replay.
-    ActionSucceeded { action_id: String, output: Value },
+    ActionSucceeded {
+        /// Matches the `action_id` from the corresponding `ActionRequested` event.
+        action_id: String,
+        /// JSON output returned by the executor.
+        output: Value,
+    },
     /// The action failed; error is stored for audit and retry policy.
-    ActionFailed { action_id: String, error: String },
+    ActionFailed {
+        /// Matches the `action_id` from the corresponding `ActionRequested` event.
+        action_id: String,
+        /// Error message from the executor.
+        error: String,
+    },
     /// Execution was interrupted (e.g. human-in-the-loop).
-    Interrupted { value: Value },
+    Interrupted {
+        /// Interrupt payload forwarded to the resolver.
+        value: Value,
+    },
     /// Execution was resumed with a value after an interrupt.
-    Resumed { value: Value },
+    Resumed {
+        /// Resume value provided by the caller (e.g. human approval payload).
+        value: Value,
+    },
     /// The run completed.
     Completed,
 }
@@ -43,7 +59,9 @@ pub enum Event {
 /// An event with its assigned sequence number (store may assign seq on append).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SequencedEvent {
+    /// Monotonically increasing sequence number within the run.
     pub seq: Seq,
+    /// The event payload.
     pub event: Event,
 }
 
@@ -68,14 +86,19 @@ pub trait EventStore: Send + Sync {
 /// Kernel-level error type.
 #[derive(Debug, thiserror::Error)]
 pub enum KernelError {
+    /// An error originating from the event store (append or scan).
     #[error("EventStore error: {0}")]
     EventStore(String),
+    /// An error originating from the snapshot store.
     #[error("SnapshotStore error: {0}")]
     SnapshotStore(String),
+    /// An error returned by the state reducer when applying an event.
     #[error("Reducer error: {0}")]
     Reducer(String),
+    /// A policy rejection (unauthorized action, budget exceeded, etc.).
     #[error("Policy error: {0}")]
     Policy(String),
+    /// An error in the kernel driver (replay, step, or run-loop logic).
     #[error("Driver error: {0}")]
     Driver(String),
     /// Executor returned a structured action error (for policy retry decisions).

@@ -17,28 +17,48 @@ use crate::kernel::identity::{RunId, Seq};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RuntimeEffect {
     /// An LLM was invoked (provider + input).
-    LLMCall { provider: String, input: Value },
+    LLMCall {
+        /// LLM provider identifier (e.g. `"openai"`).
+        provider: String,
+        /// JSON input sent to the provider.
+        input: Value,
+    },
     /// A tool was invoked (tool name + input).
-    ToolCall { tool: String, input: Value },
+    ToolCall {
+        /// Name of the tool that was called.
+        tool: String,
+        /// JSON input passed to the tool.
+        input: Value,
+    },
     /// State was written (e.g. after a step; step_id and payload).
     StateWrite {
+        /// Optional step identifier associated with the write.
         step_id: Option<String>,
+        /// Serialized new state payload.
         payload: Value,
     },
     /// An interrupt was raised (e.g. human-in-the-loop; value for resolver).
-    InterruptRaise { value: Value },
+    InterruptRaise {
+        /// Interrupt payload forwarded to the interrupt resolver.
+        value: Value,
+    },
 }
 
 /// A log entry capturing runtime effects for audit and replay.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EffectLog {
+    /// Run this effect belongs to.
     pub run_id: RunId,
+    /// Sequence number within the run at the time of capture.
     pub seq: Seq,
+    /// The captured effect.
     pub effect: RuntimeEffect,
+    /// Optional wall-clock timestamp in milliseconds since the Unix epoch.
     pub timestamp_ms: Option<i64>,
 }
 
 impl EffectLog {
+    /// Creates a new effect log entry without a timestamp.
     pub fn new(run_id: RunId, seq: Seq, effect: RuntimeEffect) -> Self {
         Self {
             run_id,
@@ -47,9 +67,11 @@ impl EffectLog {
             timestamp_ms: None,
         }
     }
+    /// Returns `true` if this entry records an LLM call.
     pub fn is_llm_call(&self) -> bool {
         matches!(self.effect, RuntimeEffect::LLMCall { .. })
     }
+    /// Returns `true` if this entry records a tool call.
     pub fn is_tool_call(&self) -> bool {
         matches!(self.effect, RuntimeEffect::ToolCall { .. })
     }

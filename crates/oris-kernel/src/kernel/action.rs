@@ -11,19 +11,28 @@ use crate::kernel::KernelError;
 /// System action: the only way the kernel interacts with the outside world.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Action {
+    /// Invoke a named tool with a JSON payload.
     CallTool {
+        /// Name of the tool to invoke.
         tool: String,
+        /// JSON input passed to the tool.
         input: Value,
     },
+    /// Invoke an LLM provider with a JSON input.
     CallLLM {
+        /// Identifier of the LLM provider (e.g. `"openai"`).
         provider: String,
+        /// JSON input (prompt, messages, params).
         input: Value,
     },
+    /// Suspend execution for a fixed duration.
     Sleep {
+        /// Duration in milliseconds.
         millis: u64,
     },
     /// Human-in-the-loop or external signal.
     WaitSignal {
+        /// Name of the expected signal channel.
         name: String,
     },
 }
@@ -31,7 +40,9 @@ pub enum Action {
 /// Result of executing an action (must be turned into events by the driver).
 #[derive(Clone, Debug)]
 pub enum ActionResult {
+    /// The action completed; the value is recorded as the action output.
     Success(Value),
+    /// The action failed; the string is the error message recorded in the event log.
     Failure(String),
 }
 
@@ -49,12 +60,16 @@ pub enum ActionErrorKind {
 /// Structured error from action execution; used by Policy for retry decisions.
 #[derive(Clone, Debug)]
 pub struct ActionError {
+    /// Whether the failure is transient, permanent, or rate-limited.
     pub kind: ActionErrorKind,
+    /// Human-readable error message for logging and auditing.
     pub message: String,
+    /// For rate-limited errors: suggested retry delay in milliseconds.
     pub retry_after_ms: Option<u64>,
 }
 
 impl ActionError {
+    /// Creates a transient error (network blip, timeout). The policy may retry.
     pub fn transient(message: impl Into<String>) -> Self {
         Self {
             kind: ActionErrorKind::Transient,
@@ -63,6 +78,7 @@ impl ActionError {
         }
     }
 
+    /// Creates a permanent error (bad input, not-found). The policy must not retry.
     pub fn permanent(message: impl Into<String>) -> Self {
         Self {
             kind: ActionErrorKind::Permanent,
@@ -71,6 +87,7 @@ impl ActionError {
         }
     }
 
+    /// Creates a rate-limited error with the suggested backoff delay in milliseconds.
     pub fn rate_limited(message: impl Into<String>, retry_after_ms: u64) -> Self {
         Self {
             kind: ActionErrorKind::RateLimited,
@@ -99,5 +116,9 @@ impl std::fmt::Display for ActionError {
 /// Executes an action. The driver records ActionRequested, then calls this, then records ActionSucceeded/ActionFailed.
 /// Return `Err(KernelError::Executor(ActionError))` for structured retry decisions; other `KernelError` are treated as permanent.
 pub trait ActionExecutor: Send + Sync {
+    /// Performs the given action for `run_id` and returns its result.
+    ///
+    /// Return `Ok(ActionResult::Failure(_))` for logical failures the policy should not retry.
+    /// Return `Err(KernelError::Executor(_))` to let the policy decide on retry.
     fn execute(&self, run_id: &RunId, action: &Action) -> Result<ActionResult, KernelError>;
 }

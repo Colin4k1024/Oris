@@ -13,21 +13,33 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Stable identifier for a pending or applied mutation.
 pub type MutationId = String;
+/// Stable identifier for a Gene (reusable solution template).
 pub type GeneId = String;
+/// Stable identifier for a Capsule (concrete, validated mutation result).
 pub type CapsuleId = String;
 
+/// Hourly confidence decay applied to replayed capsules.
 pub const REPLAY_CONFIDENCE_DECAY_RATE_PER_HOUR: f32 = 0.05;
+/// Minimum confidence below which a capsule is not eligible for replay.
 pub const MIN_REPLAY_CONFIDENCE: f32 = 0.35;
 
+/// Lifecycle state of a Gene or Capsule asset in the evolution store.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AssetState {
+    /// Newly created; awaiting validation or promotion.
     Candidate,
+    /// Validated and active; eligible for replay and reuse.
     #[default]
     Promoted,
+    /// Deliberately withdrawn; no longer used for new replays.
     Revoked,
+    /// Superseded or retired; retained for audit only.
     Archived,
+    /// Flagged for investigation; not used for new replays.
     Quarantined,
+    /// Passed shadow validation; candidate for full promotion.
     ShadowValidated,
 }
 
@@ -45,187 +57,327 @@ pub fn asset_state_to_evomap_compat(state: &AssetState) -> &'static str {
     }
 }
 
+/// Origin of a candidate asset — whether it was produced locally or received from a peer.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CandidateSource {
+    /// Produced by the local evolution runtime.
     #[default]
     Local,
+    /// Received from a remote peer via the evolution network.
     Remote,
 }
 
+/// Machine-readable reason code recorded when an asset changes state.
+///
+/// Used in `PromotionEvaluated` events to explain why a Gene was promoted,
+/// downgraded, rate-limited, or put in cooldown.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitionReasonCode {
+    /// No specific reason recorded.
     #[default]
     Unspecified,
+    /// Gene met the success-rate threshold for promotion.
     PromotionSuccessThreshold,
+    /// Gene was promoted after remote replay validation passed.
     PromotionRemoteReplayValidated,
+    /// Gene promoted via built-in cold-start compatibility check.
     PromotionBuiltinColdStartCompatibility,
+    /// Gene promoted based on a trusted local validation report.
     PromotionTrustedLocalReport,
+    /// Gene re-entered validation due to confidence decay over time.
     RevalidationConfidenceDecay,
+    /// Gene was downgraded because replay performance regressed.
     DowngradeReplayRegression,
+    /// Gene was downgraded because its confidence score fell below threshold.
     DowngradeConfidenceRegression,
+    /// Remote-sourced gene requires local validation before promotion.
     DowngradeRemoteRequiresLocalValidation,
+    /// Bootstrap-phase gene requires local validation before promotion.
     DowngradeBootstrapRequiresLocalValidation,
+    /// Built-in gene requires explicit validation pass before promotion.
     DowngradeBuiltinRequiresValidation,
+    /// Gene is held as candidate due to rate limiting.
     CandidateRateLimited,
+    /// Gene is in a mandatory cooling window after a failure.
     CandidateCoolingWindow,
+    /// Gene exceeds allowed blast-radius limits.
     CandidateBlastRadiusExceeded,
+    /// Gene is actively collecting replay evidence before promotion.
     CandidateCollectingEvidence,
+    /// Gene passed shadow validation and is eligible for full promotion.
     PromotionShadowValidationPassed,
+    /// Gene reached shadow-mode replay threshold.
     PromotionShadowThresholdPassed,
+    /// Gene is in shadow mode collecting replay evidence.
     ShadowCollectingReplayEvidence,
 }
 
+/// Reason code for a replay ROI (return-on-investment) accounting record.
+///
+/// Captured in `ReplayEconomicsRecorded` events. `ReplayHit` means the
+/// capsule was reused successfully; `ReplayMiss*` variants explain why it was not.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayRoiReasonCode {
+    /// No specific reason recorded.
     #[default]
     Unspecified,
+    /// The capsule was successfully replayed (cache hit).
     ReplayHit,
+    /// No gene matched the incoming signal pattern.
     ReplayMissNoMatchingGene,
+    /// The best candidate's score was below the replay threshold.
     ReplayMissScoreBelowThreshold,
+    /// The matched gene has no associated capsule to replay.
     ReplayMissCandidateHasNoCapsule,
+    /// The capsule's mutation diff payload is missing from the store.
     ReplayMissMutationPayloadMissing,
+    /// Applying the capsule's patch to the workspace failed.
     ReplayMissPatchApplyFailed,
+    /// The replayed patch failed validation (build or tests).
     ReplayMissValidationFailed,
 }
 
+/// Evidence snapshot attached to a `PromotionEvaluated` event.
+///
+/// Fields are optional; only those relevant to the specific transition reason are populated.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TransitionEvidence {
+    /// Total replay attempts used to compute the success rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_attempts: Option<u64>,
+    /// Number of replay attempts that succeeded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_successes: Option<u64>,
+    /// Ratio of successes to attempts (in `[0.0, 1.0]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_success_rate: Option<f32>,
+    /// How closely the current environment matches the capsule's build environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_match_factor: Option<f32>,
+    /// Confidence score after applying time-based decay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decayed_confidence: Option<f32>,
+    /// Ratio of decayed confidence to original confidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_decay_ratio: Option<f32>,
+    /// Human-readable summary of the transition evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
 }
 
+/// Economic accounting record for a single replay attempt.
+///
+/// Attached to `ReplayEconomicsRecorded` events and used by `oris-economics`
+/// to update the local EVU ledger and gene reputation scores.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ReplayRoiEvidence {
+    /// `true` if the replay was successful (patch applied and validated).
     pub success: bool,
+    /// Machine-readable reason for the replay outcome.
     #[serde(default)]
     pub reason_code: ReplayRoiReasonCode,
+    /// Task class ID that was matched for this replay.
     pub task_class_id: String,
+    /// Human-readable label for the matched task class.
     pub task_label: String,
+    /// LLM reasoning tokens saved by replaying instead of re-mutating.
     pub reasoning_avoided_tokens: u64,
+    /// Cost (in tokens or EVU) of the replay fallback path.
     pub replay_fallback_cost: u64,
+    /// Net ROI of the replay: `reasoning_avoided_tokens - replay_fallback_cost`.
     pub replay_roi: f64,
+    /// Origin identifier of the asset that was replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_origin: Option<String>,
+    /// Peer sender ID if the asset was received from a remote node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_sender_id: Option<String>,
+    /// Context dimensions used to match the task class.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_dimensions: Vec<String>,
 }
 
+/// Estimated scope of a mutation, used by the governor to enforce safety limits.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BlastRadius {
+    /// Number of source files touched by the mutation.
     pub files_changed: usize,
+    /// Number of lines added or removed by the mutation.
     pub lines_changed: usize,
 }
 
+/// Estimated risk of applying a mutation to the codebase.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum RiskLevel {
+    /// Minor, well-contained change.
     Low,
+    /// Moderate change; review recommended.
     Medium,
+    /// Broad or structural change; careful validation required.
     High,
 }
 
+/// Wire encoding used for a mutation artifact payload.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ArtifactEncoding {
+    /// Standard unified diff format (`--- a/...` / `+++ b/...`).
     UnifiedDiff,
 }
 
+/// Scope constraint for where a mutation is allowed to apply changes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MutationTarget {
+    /// Any path under the Cargo workspace root.
     WorkspaceRoot,
-    Crate { name: String },
-    Paths { allow: Vec<String> },
+    /// A specific named crate within the workspace.
+    Crate {
+        /// Crate name as it appears in `Cargo.toml`.
+        name: String,
+    },
+    /// An explicit allowlist of file or directory paths.
+    Paths {
+        /// Allowed paths (relative to workspace root).
+        allow: Vec<String>,
+    },
 }
 
+/// Declarative intent for a mutation: what to change and why.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationIntent {
+    /// Unique identifier for this mutation intent.
     pub id: MutationId,
+    /// Human-readable description of the goal.
     pub intent: String,
+    /// Scope constraint (workspace, crate, or explicit paths).
     pub target: MutationTarget,
+    /// Expected observable effect after the mutation is applied.
     pub expected_effect: String,
+    /// Estimated risk level for governor policy decisions.
     pub risk: RiskLevel,
+    /// Diagnostic signals that triggered or inform this mutation.
     pub signals: Vec<String>,
+    /// Optional OUSL spec contract that this mutation satisfies.
     #[serde(default)]
     pub spec_id: Option<String>,
 }
 
+/// Concrete patch artifact produced by the mutation step.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MutationArtifact {
+    /// Encoding format of `payload` (currently always `UnifiedDiff`).
     pub encoding: ArtifactEncoding,
+    /// The patch payload (e.g. a unified diff string).
     pub payload: String,
+    /// Git revision the diff was generated against, if known.
     pub base_revision: Option<String>,
+    /// SHA-256 hex hash of `payload` for integrity verification.
     pub content_hash: String,
 }
 
+/// A mutation ready for sandbox execution: intent paired with its artifact.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreparedMutation {
+    /// Declarative description of what the mutation should do.
     pub intent: MutationIntent,
+    /// Concrete patch to apply.
     pub artifact: MutationArtifact,
 }
 
+/// Immutable record of one validation run (build + test suite).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ValidationSnapshot {
+    /// `true` if the build and all tests passed.
     pub success: bool,
+    /// Name of the validation profile used (e.g. `"release"`, `"full"`).
     pub profile: String,
+    /// Wall-clock duration of the validation run in milliseconds.
     pub duration_ms: u64,
+    /// Human-readable summary (pass/fail counts, first failure, etc.).
     pub summary: String,
 }
 
+/// Final result recorded when a sandboxed mutation execution completes.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Outcome {
+    /// `true` if the build and test suite passed.
     pub success: bool,
+    /// Name of the validation profile used.
     pub validation_profile: String,
+    /// Total validation time in milliseconds.
     pub validation_duration_ms: u64,
+    /// Relative paths of files modified by the mutation.
     pub changed_files: Vec<String>,
+    /// Hash identifying the validator binary or configuration.
     pub validator_hash: String,
+    /// Total lines added and removed (used for blast-radius accounting).
     #[serde(default)]
     pub lines_changed: usize,
+    /// `true` if the mutation has been verified by a replay run.
     #[serde(default)]
     pub replay_verified: bool,
 }
 
+/// Snapshot of the build environment at the time a Capsule was created.
+///
+/// Two capsules with different `EnvFingerprint`s may not be safely interchangeable;
+/// the selector uses this to bias toward environment-matching candidates.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnvFingerprint {
+    /// Rustc version string (e.g. `"rustc 1.76.0 (07dca489a 2024-02-04)"`).
     pub rustc_version: String,
+    /// SHA-256 hash of `Cargo.lock` at build time.
     pub cargo_lock_hash: String,
+    /// Target triple (e.g. `"x86_64-unknown-linux-gnu"`).
     pub target_triple: String,
+    /// Operating system name (e.g. `"linux"`).
     pub os: String,
 }
 
+/// A validated, immutable record of one successful mutation execution.
+///
+/// A `Capsule` is the unit of reuse: when a matching signal pattern is seen again,
+/// the pipeline replays the capsule's diff instead of re-running the full mutation.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Capsule {
+    /// Unique identifier for this capsule.
     pub id: CapsuleId,
+    /// Gene this capsule was derived from.
     pub gene_id: GeneId,
+    /// Mutation run that produced this capsule.
     pub mutation_id: MutationId,
+    /// Kernel run ID of the execution that produced this capsule.
     pub run_id: RunId,
+    /// Content hash of the diff artifact (for integrity checks and deduplication).
     pub diff_hash: String,
+    /// Confidence score in `[0.0, 1.0]`; decays over time.
     pub confidence: f32,
+    /// Build-environment snapshot captured at capsule creation time.
     pub env: EnvFingerprint,
+    /// Detailed outcome from the validation run.
     pub outcome: Outcome,
+    /// Current lifecycle state of this capsule.
     #[serde(default)]
     pub state: AssetState,
 }
 
+/// A reusable solution template derived from one or more successful mutations.
+///
+/// A `Gene` captures the signal pattern, mutation strategy, and validation
+/// commands for a class of recurring problems. The selector matches genes
+/// against incoming signals to decide which capsule to replay.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Gene {
+    /// Unique identifier for this gene.
     pub id: GeneId,
+    /// Diagnostic signal patterns that this gene is designed to address.
     pub signals: Vec<String>,
+    /// Ordered mutation strategy steps (e.g. instructions for the LLM mutator).
     pub strategy: Vec<String>,
+    /// Validation commands to confirm the mutation succeeded.
     pub validation: Vec<String>,
+    /// Current lifecycle state (promoted, revoked, etc.).
     #[serde(default)]
     pub state: AssetState,
     /// Optional task-class ID from `oris_evolution::task_class::TaskClass`.
@@ -237,176 +389,303 @@ pub struct Gene {
     pub task_class_id: Option<String>,
 }
 
+/// Domain event for the evolution pipeline's append-only event store.
+///
+/// Every state change in the evolution lifecycle — from mutation declaration
+/// through gene promotion or revocation — is recorded as one of these variants.
+/// The projection is rebuilt by replaying the full event sequence.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EvolutionEvent {
+    /// A new mutation has been declared and is ready for sandbox execution.
     MutationDeclared {
+        /// The prepared mutation (intent + artifact) to execute.
         mutation: PreparedMutation,
     },
+    /// The mutation's patch was successfully applied to the workspace.
     MutationApplied {
+        /// ID of the mutation that was applied.
         mutation_id: MutationId,
+        /// Content hash of the applied patch.
         patch_hash: String,
+        /// Paths of files modified by the patch.
         changed_files: Vec<String>,
     },
+    /// Diagnostic signals were extracted from the mutation context.
     SignalsExtracted {
+        /// ID of the mutation the signals were extracted from.
         mutation_id: MutationId,
+        /// Hash of the signal set (for deduplication).
         hash: String,
+        /// Extracted signal strings.
         signals: Vec<String>,
     },
+    /// The mutation was rejected (policy, validation, or blast-radius limit).
     MutationRejected {
+        /// ID of the rejected mutation.
         mutation_id: MutationId,
+        /// Human-readable rejection reason.
         reason: String,
+        /// Machine-readable reason code.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason_code: Option<String>,
+        /// Optional hint for the operator on how to recover.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recovery_hint: Option<String>,
+        /// If `true`, the pipeline was halted (no further candidates tried).
         #[serde(default)]
         fail_closed: bool,
     },
+    /// Build and tests passed for the mutation.
     ValidationPassed {
+        /// ID of the mutation that was validated.
         mutation_id: MutationId,
+        /// Snapshot of the validation run results.
         report: ValidationSnapshot,
+        /// Gene this validation is attributed to, if known.
         gene_id: Option<GeneId>,
     },
+    /// Build or tests failed for the mutation.
     ValidationFailed {
+        /// ID of the mutation that failed validation.
         mutation_id: MutationId,
+        /// Snapshot of the validation run results.
         report: ValidationSnapshot,
+        /// Gene this validation is attributed to, if known.
         gene_id: Option<GeneId>,
     },
+    /// A new capsule was committed to the store.
     CapsuleCommitted {
+        /// The newly committed capsule.
         capsule: Capsule,
     },
+    /// A capsule was quarantined for investigation.
     CapsuleQuarantined {
+        /// ID of the quarantined capsule.
         capsule_id: CapsuleId,
     },
+    /// A capsule was released from quarantine or revoked.
     CapsuleReleased {
+        /// ID of the capsule being released.
         capsule_id: CapsuleId,
+        /// New state of the capsule after release.
         state: AssetState,
     },
+    /// A capsule was replayed (reused) for a new run.
     CapsuleReused {
+        /// ID of the replayed capsule.
         capsule_id: CapsuleId,
+        /// Gene the capsule belongs to.
         gene_id: GeneId,
+        /// Kernel run ID of the new run that triggered the replay.
         run_id: RunId,
+        /// Kernel run ID of the replay execution, if separate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replay_run_id: Option<RunId>,
     },
+    /// A gene was projected (created or updated) from the event stream.
     GeneProjected {
+        /// The gene as projected at this point in the event stream.
         gene: Gene,
     },
+    /// A gene was promoted to active status.
     GenePromoted {
+        /// ID of the promoted gene.
         gene_id: GeneId,
     },
+    /// A gene was revoked (withdrawn from active use).
     GeneRevoked {
+        /// ID of the revoked gene.
         gene_id: GeneId,
+        /// Human-readable reason for revocation.
         reason: String,
     },
+    /// A gene was archived (retired, retained for audit).
     GeneArchived {
+        /// ID of the archived gene.
         gene_id: GeneId,
     },
+    /// The governor evaluated whether a gene should be promoted, downgraded, or held.
     PromotionEvaluated {
+        /// ID of the gene being evaluated.
         gene_id: GeneId,
+        /// New asset state resulting from the evaluation.
         state: AssetState,
+        /// Human-readable evaluation summary.
         reason: String,
+        /// Machine-readable reason code for the transition.
         #[serde(default)]
         reason_code: TransitionReasonCode,
+        /// Optional evidence data that informed the decision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         evidence: Option<TransitionEvidence>,
     },
+    /// Replay economics (ROI) were recorded for a replay attempt.
     ReplayEconomicsRecorded {
+        /// Gene associated with this replay, if known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gene_id: Option<GeneId>,
+        /// Capsule that was replayed, if known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capsule_id: Option<CapsuleId>,
+        /// Kernel run ID of the replay execution, if available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replay_run_id: Option<RunId>,
+        /// Full ROI accounting record.
         evidence: ReplayRoiEvidence,
     },
+    /// Assets were imported from a remote peer node.
     RemoteAssetImported {
+        /// Whether the assets came from a local or remote source.
         source: CandidateSource,
+        /// IDs of the imported assets.
         asset_ids: Vec<String>,
+        /// Peer node ID that sent the assets, if known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
     },
+    /// An evolution network manifest was validated (or rejected).
     ManifestValidated {
+        /// `true` if the manifest was accepted.
         accepted: bool,
+        /// Human-readable reason for the accept/reject decision.
         reason: String,
+        /// Peer node that sent the manifest, if known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender_id: Option<String>,
+        /// Publisher identity, if provided in the manifest.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         publisher: Option<String>,
+        /// Asset IDs referenced in the manifest.
         #[serde(default)]
         asset_ids: Vec<String>,
     },
+    /// A mutation was linked to an OUSL spec contract.
     SpecLinked {
+        /// ID of the mutation.
         mutation_id: MutationId,
+        /// OUSL spec contract ID that was satisfied.
         spec_id: String,
     },
+    /// A delivery (PR) was prepared for a completed task.
     DeliveryPrepared {
+        /// Orchestrator task ID this delivery belongs to.
         task_id: String,
+        /// Git branch name created for the delivery.
         branch_name: String,
+        /// Pull request title.
         pr_title: String,
+        /// Pull request body summary.
         pr_summary: String,
+        /// Human-readable delivery summary for the event log.
         delivery_summary: String,
+        /// Current delivery status (e.g. `"pending"`, `"submitted"`).
         delivery_status: String,
+        /// Current approval state (e.g. `"pending_review"`, `"approved"`).
         approval_state: String,
+        /// Machine-readable reason code for this delivery state.
         reason_code: String,
     },
+    /// An acceptance gate was evaluated for a delivered task.
     AcceptanceGateEvaluated {
+        /// Orchestrator task ID.
         task_id: String,
+        /// GitHub issue number associated with the task.
         issue_number: u64,
+        /// Summary of the acceptance gate decision.
         acceptance_gate_summary: String,
+        /// Result of the audit consistency check.
         audit_consistency_result: String,
+        /// Evidence used for the approval decision.
         approval_evidence: String,
+        /// Delivery outcome (e.g. `"accepted"`, `"rejected"`).
         delivery_outcome: String,
+        /// JSON-serialized reason code matrix for audit.
         reason_code_matrix: String,
+        /// If `true`, the pipeline was halted on failure.
         fail_closed: bool,
+        /// Primary reason code for the gate outcome.
         reason_code: String,
     },
 }
 
+/// A hash-chained envelope wrapping an `EvolutionEvent` in the JSONL event log.
+///
+/// The `prev_hash` / `record_hash` chain detects out-of-order writes or tampering.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredEvolutionEvent {
+    /// Monotonically increasing sequence number (starts at 1).
     pub seq: u64,
+    /// RFC 3339 timestamp of when the event was appended.
     pub timestamp: String,
+    /// Hash of the previous record (empty string for the first event).
     pub prev_hash: String,
+    /// SHA-256 hash of `(seq, timestamp, prev_hash, event)` for chain integrity.
     pub record_hash: String,
+    /// The domain event payload.
     pub event: EvolutionEvent,
 }
 
+/// In-memory read projection rebuilt from the evolution event log.
+///
+/// Updated on every `append_event` call and also written to disk as `genes.json`
+/// and `capsules.json` for fast cold-start recovery.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct EvolutionProjection {
+    /// All known genes (promoted and otherwise).
     pub genes: Vec<Gene>,
+    /// All known capsules.
     pub capsules: Vec<Capsule>,
+    /// Number of times each gene's capsule has been successfully replayed.
     pub reuse_counts: BTreeMap<GeneId, u64>,
+    /// Total mutation attempts attributed to each gene.
     pub attempt_counts: BTreeMap<GeneId, u64>,
+    /// Timestamp of the most recent event touching each gene.
     pub last_updated_at: BTreeMap<GeneId, String>,
+    /// OUSL spec IDs associated with each gene.
     pub spec_ids_by_gene: BTreeMap<GeneId, BTreeSet<String>>,
 }
 
+/// Input to the gene selector for a single selection query.
 #[derive(Clone, Debug)]
 pub struct SelectorInput {
+    /// Diagnostic signals extracted from the current issue.
     pub signals: Vec<String>,
+    /// Build environment to use for environment-match scoring.
     pub env: EnvFingerprint,
+    /// Optional OUSL spec ID to restrict candidates.
     pub spec_id: Option<String>,
+    /// Maximum number of candidates to return.
     pub limit: usize,
 }
 
+/// A gene candidate returned by a `Selector`, with its score and associated capsules.
 #[derive(Clone, Debug)]
 pub struct GeneCandidate {
+    /// The matched gene.
     pub gene: Gene,
+    /// Relevance score in `[0.0, 1.0]`; higher is a better match.
     pub score: f32,
+    /// Capsules belonging to this gene, sorted by confidence descending.
     pub capsules: Vec<Capsule>,
 }
 
+/// Selects candidate genes from the evolution store for a given set of signals.
 pub trait Selector: Send + Sync {
+    /// Returns up to `input.limit` candidate genes ranked by relevance score.
     fn select(&self, input: &SelectorInput) -> Vec<GeneCandidate>;
 }
 
+/// Append-only evolution event store with projection and scan support.
 pub trait EvolutionStore: Send + Sync {
+    /// Appends one event and returns the assigned sequence number.
     fn append_event(&self, event: EvolutionEvent) -> Result<u64, EvolutionError>;
+    /// Returns all events with `seq >= from_seq`, in ascending order.
     fn scan(&self, from_seq: u64) -> Result<Vec<StoredEvolutionEvent>, EvolutionError>;
+    /// Rebuilds and returns the current projection from the full event log.
     fn rebuild_projection(&self) -> Result<EvolutionProjection, EvolutionError>;
 
+    /// Returns both the full event log and the current projection in a single locked read.
     fn scan_projection(
         &self,
     ) -> Result<(Vec<StoredEvolutionEvent>, EvolutionProjection), EvolutionError> {
@@ -416,22 +695,32 @@ pub trait EvolutionStore: Send + Sync {
     }
 }
 
+/// Errors returned by the evolution store and related operations.
 #[derive(Debug, Error)]
 pub enum EvolutionError {
+    /// An I/O error reading or writing the event log or projection files.
     #[error("I/O error: {0}")]
     Io(String),
+    /// A serialization or deserialization error.
     #[error("Serialization error: {0}")]
     Serde(String),
+    /// The hash chain integrity check failed (possible data corruption or tamper).
     #[error("Hash chain validation failed: {0}")]
     HashChain(String),
 }
 
+/// JSONL-backed implementation of `EvolutionStore` with a hash-chained event log.
+///
+/// Events are appended to `{root_dir}/events.jsonl`; the projection is persisted
+/// to `genes.json` and `capsules.json` after every append for fast cold-start recovery.
 pub struct JsonlEvolutionStore {
     root_dir: PathBuf,
     lock: Mutex<()>,
 }
 
 impl JsonlEvolutionStore {
+    /// Creates a new store rooted at `root_dir`. The directory and required files
+    /// are created on first use.
     pub fn new<P: Into<PathBuf>>(root_dir: P) -> Self {
         Self {
             root_dir: root_dir.into(),
@@ -439,6 +728,7 @@ impl JsonlEvolutionStore {
         }
     }
 
+    /// Returns the root directory of this store.
     pub fn root_dir(&self) -> &Path {
         &self.root_dir
     }
@@ -574,12 +864,18 @@ impl EvolutionStore for JsonlEvolutionStore {
     }
 }
 
+/// `Selector` implementation that ranks genes from an in-memory `EvolutionProjection`.
+///
+/// Scoring factors: signal overlap, environment match, capsule confidence (with time decay),
+/// and reuse-to-attempt ratio. Only `Promoted` genes with at least one `Promoted` capsule
+/// are eligible.
 pub struct ProjectionSelector {
     projection: EvolutionProjection,
     now: DateTime<Utc>,
 }
 
 impl ProjectionSelector {
+    /// Creates a selector using the current wall-clock time for confidence decay.
     pub fn new(projection: EvolutionProjection) -> Self {
         Self {
             projection,
@@ -587,6 +883,7 @@ impl ProjectionSelector {
         }
     }
 
+    /// Creates a selector with an explicit `now` timestamp (useful for deterministic tests).
     pub fn with_now(projection: EvolutionProjection, now: DateTime<Utc>) -> Self {
         Self { projection, now }
     }
@@ -717,11 +1014,16 @@ impl Selector for ProjectionSelector {
     }
 }
 
+/// `Selector` that reads the projection live from an `EvolutionStore` on every call.
+///
+/// Use this when you need the most up-to-date projection without pre-loading it.
+/// For performance-critical paths, prefer `ProjectionSelector` with a pre-loaded snapshot.
 pub struct StoreBackedSelector {
     store: std::sync::Arc<dyn EvolutionStore>,
 }
 
 impl StoreBackedSelector {
+    /// Creates a selector backed by the given store.
     pub fn new(store: std::sync::Arc<dyn EvolutionStore>) -> Self {
         Self { store }
     }
@@ -736,6 +1038,7 @@ impl Selector for StoreBackedSelector {
     }
 }
 
+/// Rebuilds an `EvolutionProjection` by replaying the given event sequence from the beginning.
 pub fn rebuild_projection_from_events(events: &[StoredEvolutionEvent]) -> EvolutionProjection {
     let mut genes = BTreeMap::<GeneId, Gene>::new();
     let mut capsules = BTreeMap::<CapsuleId, Capsule>::new();
@@ -876,16 +1179,19 @@ pub fn rebuild_projection_from_events(events: &[StoredEvolutionEvent]) -> Evolut
     }
 }
 
+/// Returns the default root directory for the evolution store (`.oris/evolution`).
 pub fn default_store_root() -> PathBuf {
     PathBuf::from(".oris").join("evolution")
 }
 
+/// Computes the SHA-256 hex digest of a UTF-8 string.
 pub fn hash_string(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
 }
 
+/// Serializes `value` to canonical JSON and returns its SHA-256 hex digest.
 pub fn stable_hash_json<T: Serialize>(value: &T) -> Result<String, EvolutionError> {
     let bytes = serde_json::to_vec(value).map_err(|err| EvolutionError::Serde(err.to_string()))?;
     let mut hasher = Sha256::new();
@@ -893,10 +1199,12 @@ pub fn stable_hash_json<T: Serialize>(value: &T) -> Result<String, EvolutionErro
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Computes the SHA-256 content hash of an artifact payload string.
 pub fn compute_artifact_hash(payload: &str) -> String {
     hash_string(payload)
 }
 
+/// Generates a time-based unique ID with the given prefix (e.g. `"gene-1a2b3c"`).
 pub fn next_id(prefix: &str) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -905,6 +1213,10 @@ pub fn next_id(prefix: &str) -> String {
     format!("{prefix}-{nanos:x}")
 }
 
+/// Applies exponential time-decay to a capsule confidence score.
+///
+/// Returns the decayed confidence clamped to `[0.0, 1.0]`.
+/// `age_secs` is the time since the capsule was created; `None` is treated as 0.
 pub fn decayed_replay_confidence(confidence: f32, age_secs: Option<u64>) -> f32 {
     if confidence <= 0.0 {
         return 0.0;

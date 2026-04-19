@@ -88,10 +88,15 @@ pub struct IntakeEvent {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IssueSeverity {
+    /// Immediate action required; system-level impact.
     Critical,
+    /// Significant failure; may block critical paths.
     High,
+    /// Degraded functionality; warrants prompt investigation.
     Medium,
+    /// Minor issue; low user impact.
     Low,
+    /// Informational event; no immediate action required.
     Info,
 }
 
@@ -116,62 +121,97 @@ impl std::fmt::Display for IssueSeverity {
 /// GitHub Actions webhook payload
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubWorkflowEvent {
+    /// Webhook action type (e.g. `"completed"`).
     pub action: Option<String>,
+    /// Workflow file name (e.g. `"ci.yml"`).
     pub workflow: Option<String>,
+    /// Numeric workflow run ID.
     pub run_id: Option<i64>,
+    /// Repository metadata.
     pub repository: Option<GithubRepository>,
+    /// Detailed workflow run information.
     pub workflow_run: Option<GithubWorkflowRun>,
+    /// Run conclusion (e.g. `"success"`, `"failure"`).
     pub conclusion: Option<String>,
 }
 
+/// Minimal GitHub repository metadata included in webhook payloads.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubRepository {
+    /// `owner/repo` full name.
     pub full_name: String,
+    /// HTML URL of the repository.
     pub html_url: String,
 }
 
+/// Details of a single GitHub Actions workflow run.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubWorkflowRun {
+    /// Branch the run was triggered on.
     pub head_branch: String,
+    /// Commit SHA the run was built from.
     pub head_sha: String,
+    /// HTML URL to view the run in the GitHub UI.
     pub html_url: String,
+    /// API URL to download the run logs.
     pub logs_url: String,
+    /// API URL to list run artifacts.
     pub artifacts_url: String,
 }
 
 /// GitLab CI webhook payload
 #[derive(Clone, Debug, Deserialize)]
 pub struct GitlabPipelineEvent {
+    /// Webhook event kind (e.g. `"pipeline"`).
     pub object_kind: Option<String>,
+    /// Pipeline-specific attributes.
     pub object_attributes: Option<GitlabPipelineAttributes>,
+    /// Project metadata.
     pub project: Option<GitlabProject>,
+    /// Individual job results within the pipeline.
     pub builds: Option<Vec<GitlabBuild>>,
 }
 
+/// Pipeline-level attributes from a GitLab CI pipeline webhook.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GitlabPipelineAttributes {
+    /// Numeric pipeline ID.
     pub id: i64,
+    /// Git ref (branch or tag) the pipeline ran on.
     #[serde(rename = "ref")]
     pub ref_: String,
+    /// Commit SHA the pipeline was built from.
     pub sha: String,
+    /// Pipeline status (e.g. `"failed"`, `"success"`).
     pub status: String,
+    /// ISO 8601 timestamp when the pipeline finished.
     pub finished_at: Option<String>,
 }
 
+/// Minimal GitLab project metadata included in pipeline webhooks.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitlabProject {
+    /// Numeric project ID.
     pub id: i64,
+    /// Project display name.
     pub name: String,
+    /// Namespace-qualified path (e.g. `"group/project"`).
     pub path_with_namespace: String,
+    /// Web URL of the project.
     pub web_url: String,
 }
 
+/// A single build/job result within a GitLab CI pipeline webhook.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GitlabBuild {
+    /// Numeric build/job ID.
     pub id: i64,
+    /// Display name of the job.
     pub name: String,
+    /// Pipeline stage this job belongs to.
     pub stage: String,
+    /// Job status (e.g. `"failed"`, `"success"`).
     pub status: String,
 }
 
@@ -292,27 +332,39 @@ pub fn from_gitlab_pipeline(event: GitlabPipelineEvent) -> IntakeResult<IntakeEv
 /// GitHub check_run event payload (check_run failed / completed)
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubCheckRunEvent {
+    /// Webhook action type (e.g. `"completed"`).
     pub action: Option<String>,
+    /// Details of the check run that triggered this event.
     pub check_run: Option<GithubCheckRun>,
+    /// Repository the check run belongs to.
     pub repository: Option<GithubRepository>,
 }
 
 /// Details of a single check run
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubCheckRun {
+    /// Numeric check run ID.
     pub id: i64,
+    /// Display name of the check run.
     pub name: String,
+    /// Commit SHA the check run was executed against.
     pub head_sha: String,
+    /// Run status (e.g. `"completed"`, `"in_progress"`).
     pub status: String,
+    /// Run conclusion (e.g. `"success"`, `"failure"`).
     pub conclusion: Option<String>,
+    /// HTML URL to view the check run in the GitHub UI.
     pub html_url: Option<String>,
+    /// Summary output from the check run.
     pub output: Option<GithubCheckRunOutput>,
 }
 
 /// Check run log output summary
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubCheckRunOutput {
+    /// Short title of the check output.
     pub title: Option<String>,
+    /// Detailed summary text (may include markdown).
     pub summary: Option<String>,
 }
 
@@ -543,15 +595,22 @@ impl IntakeSource for LogFileIntakeSource {
 /// See https://prometheus.io/docs/alerting/latest/configuration/#webhook_config
 #[derive(Clone, Debug, Deserialize)]
 pub struct AlertmanagerPayload {
+    /// Alertmanager webhook schema version (should be `"4"`).
     pub version: Option<String>,
+    /// Group-level status (`"firing"` or `"resolved"`).
     pub status: Option<String>,
+    /// Labels shared by all alerts in this group.
     #[serde(rename = "groupLabels")]
     pub group_labels: Option<std::collections::HashMap<String, String>>,
+    /// Labels common to all alerts in this notification.
     #[serde(rename = "commonLabels")]
     pub common_labels: Option<std::collections::HashMap<String, String>>,
+    /// Annotations common to all alerts in this notification.
     #[serde(rename = "commonAnnotations")]
     pub common_annotations: Option<std::collections::HashMap<String, String>>,
+    /// Individual alert instances in this notification.
     pub alerts: Option<Vec<AlertmanagerAlert>>,
+    /// External URL of the Alertmanager instance.
     #[serde(rename = "externalURL")]
     pub external_url: Option<String>,
 }
@@ -559,9 +618,13 @@ pub struct AlertmanagerPayload {
 /// Single alert within an Alertmanager payload.
 #[derive(Clone, Debug, Deserialize)]
 pub struct AlertmanagerAlert {
+    /// Alert state (`"firing"` or `"resolved"`).
     pub status: Option<String>,
+    /// Key–value labels attached to this alert instance.
     pub labels: Option<std::collections::HashMap<String, String>>,
+    /// Key–value annotations (e.g. `summary`, `description`, `runbook_url`).
     pub annotations: Option<std::collections::HashMap<String, String>>,
+    /// Stable fingerprint identifying this alert instance.
     pub fingerprint: Option<String>,
 }
 
@@ -658,40 +721,60 @@ impl IntakeSource for PrometheusIntakeSource {
 /// Minimal Sentry issue alert webhook payload.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SentryAlertPayload {
+    /// Webhook action type (e.g. `"created"`, `"resolved"`, `"triggered"`).
     pub action: Option<String>,
+    /// Actor (user or service) that triggered the alert, if known.
     pub actor: Option<SentryActor>,
+    /// Data envelope containing the issue or error details.
     pub data: Option<SentryAlertData>,
 }
 
+/// Actor information from a Sentry webhook.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SentryActor {
+    /// Display name of the actor.
     pub name: Option<String>,
 }
 
+/// Data payload within a Sentry alert webhook.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SentryAlertData {
+    /// Issue details (present for issue-alert webhooks).
     pub issue: Option<SentryIssue>,
+    /// Error details (present for error-event webhooks).
     pub error: Option<SentryError>,
 }
 
+/// Minimal Sentry issue details included in alert webhooks.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SentryIssue {
+    /// Sentry issue ID string.
     pub id: Option<String>,
+    /// Issue title (e.g. the exception class and message).
     pub title: Option<String>,
+    /// Sentry severity level (e.g. `"error"`, `"fatal"`).
     pub level: Option<String>,
+    /// Project this issue belongs to.
     pub project: Option<SentryProject>,
+    /// Permalink to the issue in the Sentry UI.
     pub permalink: Option<String>,
 }
 
+/// Minimal Sentry project metadata included in alert webhooks.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SentryProject {
+    /// URL-safe project slug.
     pub slug: Option<String>,
+    /// Project display name.
     pub name: Option<String>,
 }
 
+/// Error details included in a Sentry error-event webhook.
 #[derive(Clone, Debug, Deserialize)]
 pub struct SentryError {
+    /// Error message text.
     pub message: Option<String>,
+    /// Sentry severity level for this error.
     pub level: Option<String>,
 }
 

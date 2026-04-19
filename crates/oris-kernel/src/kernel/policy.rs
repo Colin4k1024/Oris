@@ -15,22 +15,29 @@ use crate::kernel::KernelError;
 /// Context passed to policy (e.g. caller identity, run metadata).
 #[derive(Clone, Debug, Default)]
 pub struct PolicyCtx {
+    /// Optional caller identity (e.g. user or service account ID).
     pub user_id: Option<String>,
+    /// Arbitrary run-level metadata for policy enforcement.
     pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// Decision after an action failure (retry, backoff, or fail).
 #[derive(Clone, Debug)]
 pub enum RetryDecision {
+    /// Retry immediately.
     Retry,
+    /// Retry after the given number of milliseconds.
     RetryAfterMs(u64),
+    /// Do not retry; propagate the failure.
     Fail,
 }
 
 /// Optional budget rules (cost, token limits, etc.).
 #[derive(Clone, Debug, Default)]
 pub struct BudgetRules {
+    /// Maximum number of tool-call actions allowed per run.
     pub max_tool_calls: Option<u64>,
+    /// Maximum LLM tokens that may be consumed per run.
     pub max_llm_tokens: Option<u64>,
 }
 
@@ -85,11 +92,14 @@ pub trait Policy: Send + Sync {
 /// **Empty set = no tools or providers allowed** for that category. Sleep and WaitSignal are
 /// always allowed. To allow all tools/providers use `AllowAllPolicy`, or populate the sets explicitly.
 pub struct AllowListPolicy {
+    /// Set of tool names that `CallTool` actions are allowed to reference.
     pub allowed_tools: HashSet<String>,
+    /// Set of provider names that `CallLLM` actions are allowed to reference.
     pub allowed_providers: HashSet<String>,
 }
 
 impl AllowListPolicy {
+    /// Creates a policy from explicit tool and provider allow-sets.
     pub fn new(allowed_tools: HashSet<String>, allowed_providers: HashSet<String>) -> Self {
         Self {
             allowed_tools,
@@ -97,6 +107,7 @@ impl AllowListPolicy {
         }
     }
 
+    /// Creates a policy that permits only the listed tools (no LLM providers).
     pub fn tools_only(tools: impl IntoIterator<Item = String>) -> Self {
         Self {
             allowed_tools: tools.into_iter().collect(),
@@ -104,6 +115,7 @@ impl AllowListPolicy {
         }
     }
 
+    /// Creates a policy that permits only the listed LLM providers (no tools).
     pub fn providers_only(providers: impl IntoIterator<Item = String>) -> Self {
         Self {
             allowed_tools: HashSet::new(),
@@ -145,7 +157,9 @@ impl Policy for AllowListPolicy {
 /// Policy that returns RetryAfterMs with exponential backoff (and optional jitter) for the first
 /// max_retries attempts, then Fail. For RateLimited errors with retry_after_ms, uses that value when set.
 pub struct RetryWithBackoffPolicy<P> {
+    /// Inner policy used for `authorize` and `budget` delegation.
     pub inner: P,
+    /// Maximum number of retry attempts before returning `Fail`.
     pub max_retries: u32,
     /// Base delay in ms; actual delay = min(cap, backoff_base_ms * 2^attempt) + jitter.
     pub backoff_base_ms: u64,
