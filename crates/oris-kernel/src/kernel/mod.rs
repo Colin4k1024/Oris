@@ -6,6 +6,7 @@
 
 pub mod action;
 pub mod determinism_guard;
+pub mod evidence_bundle;
 pub mod driver;
 pub mod event;
 pub mod event_store;
@@ -36,6 +37,7 @@ pub mod timeline;
 pub mod timeline_fork;
 
 pub use action::{Action, ActionError, ActionErrorKind, ActionExecutor, ActionResult};
+pub use evidence_bundle::{EvidenceBundle, EvidenceBundleBuilder, TestOutcome};
 pub use determinism_guard::{
     compute_event_stream_hash, event_stream_hash, verify_event_stream_hash, DeterminismGuard,
 };
