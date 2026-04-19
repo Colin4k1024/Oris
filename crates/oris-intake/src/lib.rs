@@ -22,6 +22,7 @@
 //! ```
 
 pub mod admission;
+pub mod ci_parser;
 mod continuous;
 pub mod evidence;
 mod mutation;
@@ -34,6 +35,9 @@ pub mod server;
 mod signal;
 mod source;
 
+pub use ci_parser::{
+    parse_cargo_test_output, CiFailure, CiFailureKind, CiIntakeSource, CiParser,
+};
 pub use admission::{
     AdmissionConfig, AdmissionDecision, AdmissionGate, AdmissionInput, RejectionFeedback,
 };
