@@ -405,6 +405,11 @@ jobs:
         with:
           name: coverage-report
           path: lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
       - name: Coverage summary
         run: cargo llvm-cov --all-features --workspace --text 2>&1 | tail -30
 

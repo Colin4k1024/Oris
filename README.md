@@ -4,6 +4,7 @@
 
 [![Latest Version](https://img.shields.io/crates/v/oris-runtime.svg)](https://crates.io/crates/oris-runtime)
 [![docs.rs](https://img.shields.io/docsrs/oris-runtime)](https://docs.rs/oris-runtime)
+[![codecov](https://codecov.io/gh/Colin4k1024/Oris/graph/badge.svg)](https://codecov.io/gh/Colin4k1024/Oris)
 
 ---
 

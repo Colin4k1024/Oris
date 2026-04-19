@@ -17,9 +17,6 @@
       "Bash(cargo check:*)",
       "Bash(cargo build:*)",
       "Bash(cargo test:*)",
-<<<<<<< codex/issue-418-public-docs
-      "Bash(git checkout:*)"
-=======
       "Bash(OPENCODE_MODEL=anthropic/claude-sonnet-4-20250514 opencode --list-models)",
       "Bash(opencode auth:*)",
       "Bash(git -C /Users/jiafan/Desktop/poc/Oris show HEAD:scripts/host_mode.sh)",
@@ -33,8 +30,13 @@
       "Bash(gh issue:*)",
       "Bash(done)",
       "Bash(echo \"Closed #$i\")",
-      "Bash(git push:*)"
->>>>>>> main
+      "Bash(git push:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(gh search:*)",
+      "Bash(gh api:*)",
+      "Bash(ls -la docs/*.md)",
+      "Bash(cargo fmt:*)",
+      "Bash(ls docs/*confidence*)"
     ]
   }
 }
