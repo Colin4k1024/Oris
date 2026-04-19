@@ -21,7 +21,7 @@ Oris is a **self-evolving execution runtime** — software that reasons, learns,
 
 ## Workspace Structure
 
-This is a Cargo workspace with 16 library crates and 6 example projects.
+This is a Cargo workspace with 17 library crates and 6 example projects.
 
 ### Library Crates (`crates/`)
 
@@ -31,11 +31,12 @@ This is a Cargo workspace with 16 library crates and 6 example projects.
 | **oris-kernel** | 0.2.13 | Deterministic execution kernel: event log, replay, snapshot, actions, policies |
 | **oris-execution-runtime** | 0.3.0 | Control plane: scheduler, lease manager, repositories, circuit breaker, crash recovery |
 | **oris-execution-server** | 0.2.12 | Graph-aware HTTP execution server facade |
+| **oris-experience-repo** | 0.3.0 | HTTP API for Experience Repository: gene/capsule sharing, Ed25519 OEN verification, PKI key service |
 | **oris-evokernel** | 0.14.1 | Self-evolving kernel orchestration (highest fan-in crate, depends on 11 others) |
 | **oris-evolution** | 0.4.1 | Core: Gene, Capsule, EvolutionEvent, Selector, Pipeline, Confidence, Task Classes |
 | **oris-sandbox** | 0.3.0 | Sandboxed mutation execution with OS-level resource isolation |
 | **oris-governor** | 0.3.2 | Promotion, cooldown, and revocation policies |
-| **oris-intake** | 0.4.0 | Automatic issue intake, deduplication, prioritization, webhook support |
+| **oris-intake** | 0.4.0 | Automatic issue intake, deduplication, prioritization, webhook support, CI failure parsing |
 | **oris-evolution-network** | 0.5.0 | OEN envelope, gossip sync, Ed25519 signing, rate limiting |
 | **oris-economics** | 0.2.0 | Local EVU ledger and reputation accounting |
 | **oris-spec** | 0.2.2 | OUSL YAML spec contracts and compilers |

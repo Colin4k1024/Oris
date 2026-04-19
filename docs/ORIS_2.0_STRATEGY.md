@@ -337,7 +337,7 @@ This section adds the execution strategy for the Evolution track itself so roadm
 | Stream | Date window | Target | Must-have deliverables |
 | --- | --- | --- | --- |
 | Stream A: Example-first enablement | March 5, 2026 to April 30, 2026 | Make Evolution behavior inspectable end-to-end for contributors | scenario suite in `examples/evo_oris_repo`, scenario docs in `docs/evokernel/examples.md`, CI compile gate for the suite |
-| Stream B: Supervised semi-autonomous loop | April 1, 2026 to June 30, 2026 | Move from single-flow demo to bounded orchestrated workflow | supervised devloop expansion beyond single docs file, orchestrator/runtime integration tests, immutable evidence bundle schema |
+| Stream B: Supervised semi-autonomous loop | April 1, 2026 to June 30, 2026 | Move from single-flow demo to bounded orchestrated workflow | supervised devloop expansion beyond single docs file, orchestrator/runtime integration tests ✅, immutable evidence bundle schema ✅, CI failure intake parser ✅ |
 | Stream C: Federated + economics hardening | July 1, 2026 to September 30, 2026 | Make remote exchange and incentive control production-safe | remote publish/import/revoke reliability tests, reputation-aware selector behavior checks, revocation propagation SLO |
 | Stream D: Release-gated autonomy | October 1, 2026 to December 31, 2026 | Operate issue-to-merge automation with one explicit human release gate | issue-to-merge orchestrator path for scoped issue classes, release gate approval ledger, rollback-ready release runbooks |
 

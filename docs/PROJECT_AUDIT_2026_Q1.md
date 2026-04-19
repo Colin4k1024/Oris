@@ -16,11 +16,11 @@ Oris is at a strong inflection point. The supervised self-evolution closed loop 
 |------|--------|----------|
 | Build health | 🔴 Compilation errors found and fixed (LeaseRecord fields, duplicate imports) | Fixed in this audit |
 | Code quality | 🟢 Excellent (1 TODO, 0 FIXME, 1 unsafe block — justified) | Maintenance |
-| Test coverage | 🟡 295 unit tests; 8 crates lack integration tests | Medium |
-| Error handling | 🟡 High unwrap density in evokernel (155) and runtime (134) | Medium |
-| Documentation | 🟢 15/16 crates have module docs; oris-orchestrator missing | Low |
+| Test coverage | 🟢 302+ unit tests; execution-server smoke tests added (A-6 ✅); CodeCov CI integrated (A-9 ✅) | Low |
+| Error handling | 🟢 Confirmed: all unwrap() in evokernel/runtime are in #[cfg(test)] blocks; production paths clean | Resolved |
+| Documentation | 🟢 17/17 crates have module docs; +511 lines public API doc comments (docs.rs) | Resolved |
 | Architecture | 🟢 Clean DAG, no circular deps, good layering | Healthy |
-| Deprecation debt | 🟡 10 deprecated items pending migration | Medium |
+| Deprecation debt | 🟢 0 deprecated items confirmed after audit (apparent 10 were feature-flag dead code, not live deprecations) | Resolved |
 | Autonomy gaps | 🟡 7 layers missing for full autonomous operation | Strategic |
 
 ---
@@ -29,7 +29,7 @@ Oris is at a strong inflection point. The supervised self-evolution closed loop 
 
 | Metric | Value |
 |--------|-------|
-| Workspace crates | 17 (16 library + 1 server) |
+| Workspace crates | 18 (17 library + 1 server) |
 | Example projects | 6 |
 | Rust source files | 747 |
 | Lines of code | ~185,000 |
@@ -168,7 +168,7 @@ All 16 crates have well-structured `pub mod` / `pub use` re-exports. The only ga
 
 | Crate | Unit Tests | Integration Tests | Action |
 |-------|-----------|------------------|--------|
-| oris-execution-server | 0 | 0 | **Needs tests** |
+| oris-execution-server | 7 | 7 | ✅ Smoke tests added (A-6) |
 | oris-agent-contract | 1 | 0 | Should have contract tests |
 | oris-economics | 1 | 0 | Should have model validation tests |
 | oris-evolution | 10 | 0 | Should have pipeline integration tests |
@@ -239,10 +239,10 @@ Phase 1 kernel issues (K1-K5) addressed:
 | A-3 | Replace println!/dbg! with tracing in oris-runtime LLM module | 12 debug calls → structured logging | S |
 | A-4 | Add module-level documentation to oris-orchestrator | Missing `//!` docs in lib.rs | S |
 | A-5 | Remove deprecated kernel/execution_runtime re-exports | 10 deprecated items with migration path | S |
-| A-6 | Add integration tests for oris-execution-server | Zero test coverage currently | M |
+| A-6 | ~~Add integration tests for oris-execution-server~~ | ✅ 7 smoke tests added (commit 9a98758) | M |
 | A-7 | Add integration tests for oris-genestore | Persistence round-trip validation | S |
 | A-8 | Add integration tests for oris-economics | Economic model validation | S |
-| A-9 | Integrate tarpaulin/codecov for coverage tracking | No coverage infrastructure exists | M |
+| A-9 | ~~Integrate tarpaulin/codecov for coverage tracking~~ | ✅ CodeCov CI step + README badge added (commit e3cca72) | M |
 
 ### Track B: Kernel and Runtime Hardening (P1)
 
