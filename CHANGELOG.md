@@ -11,6 +11,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## oris-experience-repo [0.3.0] — 2026-04-19
+
+### Added
+- Ed25519 signature verification fully enabled end-to-end (`OenVerifier::verify_envelope`)
+- PKI public key registry with SQLite persistence, versioning, rotation, and soft-delete
+- `KeyStore::register_public_key`, `get_public_key`, `revoke_public_key` APIs
+- Rate limiting now covers all endpoints (GET /experience, GET/POST/DELETE /keys, POST /keys/{id}/rotate)
+- 13 Ed25519 integration tests: valid signature passes, invalid/tampered/replayed/revoked all rejected
+
+### Security
+- Signature verification no longer deferred — all OEN envelopes are validated against registered keys
+- Replay attack protection with 5-minute window enforced in `OenVerifier`
+- Revoked keys immediately rejected; rotation generates new key version atomically
+
+### Changed
+- `OenVerifier` now requires a `KeyStore` reference for public key lookup
+- Upgraded from v0.2.0; all v0.2.0 API surfaces remain backward-compatible
+
+---
+
 ## oris-experience-repo [0.2.0] — 2026-04-14
 
 ### Added
