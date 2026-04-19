@@ -119,6 +119,7 @@ Maturity below reflects the current checked-in framework surface.
 | EvoKernel | `crates/oris-evokernel` | Implemented baseline with governor-aware capture | `evolution-experimental` |
 | Intake | `crates/oris-intake` | Implemented baseline for issue intake/prioritization | `intake-experimental` |
 | Evolution Network | `crates/oris-evolution-network` | Experimental protocol scaffold | `evolution-network-experimental` |
+| Experience Repository | `crates/oris-experience-repo` | MVP with PKI key service, OEN verification, and rate limiting | standalone crate |
 | Full Framework Facade | `crates/oris-runtime` re-exports | Aggregate framework surface | `full-evolution-experimental` |
 
 ---
