@@ -1,9 +1,12 @@
 //! Protocol contracts for the Oris Evolution Network (OEN).
 
 pub mod gossip;
+pub mod publisher;
 pub mod rate_limiter;
 pub mod signing;
 pub mod sync;
+
+pub use publisher::{NetworkPublishError, NetworkPublisher};
 
 pub use gossip::{
     GossipConfig, GossipDigest, GossipDigestEntry, GossipSyncEngine as PushPullGossipSyncEngine,

@@ -275,6 +275,7 @@ mod gep_interop_golden_tests {
                 ],
                 vec!["a2a.tasks.report".into()],
             )
+            .await
             .expect("seed golden delta gene a");
 
         let hello = hello_gep(
@@ -356,6 +357,7 @@ mod gep_interop_golden_tests {
                 ],
                 vec!["a2a.tasks.report".into()],
             )
+            .await
             .expect("seed golden delta gene b");
 
         let second_fetch_payload = json!({
@@ -560,6 +562,7 @@ mod gep_interop_golden_tests {
                 ],
                 vec!["a2a.tasks.report".into()],
             )
+            .await
             .expect("seed golden manifest gene");
 
         let envelope = source_node

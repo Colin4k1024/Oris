@@ -6,10 +6,10 @@
 
 pub mod action;
 pub mod determinism_guard;
-pub mod evidence_bundle;
 pub mod driver;
 pub mod event;
 pub mod event_store;
+pub mod evidence_bundle;
 pub mod execution_log;
 pub mod execution_step;
 pub mod execution_suspension;
@@ -37,13 +37,13 @@ pub mod timeline;
 pub mod timeline_fork;
 
 pub use action::{Action, ActionError, ActionErrorKind, ActionExecutor, ActionResult};
-pub use evidence_bundle::{EvidenceBundle, EvidenceBundleBuilder, TestOutcome};
 pub use determinism_guard::{
     compute_event_stream_hash, event_stream_hash, verify_event_stream_hash, DeterminismGuard,
 };
 pub use driver::{BlockedInfo, Kernel, RunStatus, Signal};
 pub use event::{Event, EventStore, KernelError, SequencedEvent};
 pub use event_store::{InMemoryEventStore, SharedEventStore};
+pub use evidence_bundle::{EvidenceBundle, EvidenceBundleBuilder, TestOutcome};
 pub use execution_log::{scan_execution_log, scan_execution_trace, ExecutionLog, KernelTraceEvent};
 pub use execution_step::{ExecutionStep, ExecutionStepInput, StepResult};
 pub use execution_suspension::{ExecutionSuspension, ExecutionSuspensionState, SuspensionError};

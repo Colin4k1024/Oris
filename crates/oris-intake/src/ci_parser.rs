@@ -107,10 +107,7 @@ impl CiParser {
                 failures.push(CiFailure {
                     kind: CiFailureKind::TestFailure,
                     name: name.clone(),
-                    message: format!(
-                        "test {} failed",
-                        name.as_deref().unwrap_or("unknown")
-                    ),
+                    message: format!("test {} failed", name.as_deref().unwrap_or("unknown")),
                     location: None,
                     context,
                 });
@@ -172,10 +169,7 @@ impl CiParser {
 
     /// Convert parsed failures into [`IntakeEvent`]s.
     pub fn to_intake_events(&self, failures: &[CiFailure]) -> Vec<IntakeEvent> {
-        failures
-            .iter()
-            .map(|f| self.failure_to_event(f))
-            .collect()
+        failures.iter().map(|f| self.failure_to_event(f)).collect()
     }
 
     /// Parse raw output directly to [`IntakeEvent`]s.
@@ -206,11 +200,7 @@ impl CiParser {
 
         let signals = vec![
             failure.kind.to_string(),
-            failure
-                .name
-                .as_deref()
-                .unwrap_or("unknown")
-                .to_string(),
+            failure.name.as_deref().unwrap_or("unknown").to_string(),
         ];
 
         IntakeEvent {
@@ -232,9 +222,11 @@ impl CiParser {
             .iter()
             .skip(start)
             .take(max_lines)
-            .take_while(|l| !self.test_failed_re.is_match(l) && !l.trim().is_empty() || {
-                // include one blank line as separator but stop at second
-                l.trim().is_empty()
+            .take_while(|l| {
+                !self.test_failed_re.is_match(l) && !l.trim().is_empty() || {
+                    // include one blank line as separator but stop at second
+                    l.trim().is_empty()
+                }
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -280,8 +272,8 @@ impl crate::source::IntakeSource for CiIntakeSource {
     }
 
     fn process(&self, payload: &[u8]) -> IntakeResult<Vec<IntakeEvent>> {
-        let text = std::str::from_utf8(payload)
-            .map_err(|e| IntakeError::ParseError(e.to_string()))?;
+        let text =
+            std::str::from_utf8(payload).map_err(|e| IntakeError::ParseError(e.to_string()))?;
         Ok(self.parser.parse_to_events(text))
     }
 
@@ -407,7 +399,10 @@ error[E0425]: cannot find value `missing_var` in this scope
     fn test_empty_output_produces_no_events() {
         let parser = CiParser::new();
         let events = parser.parse_to_events("running 5 tests\ntest result: ok. 5 passed; 0 failed");
-        assert!(events.is_empty(), "clean output should produce no intake events");
+        assert!(
+            events.is_empty(),
+            "clean output should produce no intake events"
+        );
     }
 
     #[test]
@@ -423,7 +418,9 @@ error[E0425]: cannot find value `missing_var` in this scope
         let source = CiIntakeSource::new();
         let payload = SAMPLE_COMPILER_OUTPUT.as_bytes();
 
-        source.validate(payload).expect("valid UTF-8 should pass validation");
+        source
+            .validate(payload)
+            .expect("valid UTF-8 should pass validation");
         let events = source.process(payload).expect("processing should succeed");
         assert!(!events.is_empty());
     }

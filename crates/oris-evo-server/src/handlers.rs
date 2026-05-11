@@ -90,10 +90,9 @@ impl RequestHandler {
         let pipeline = self.pipeline.read().await;
         let success = pipeline.solidify(gene_id).await?;
 
-        Ok(ResponseResult::Solidify(oris_evo_ipc_protocol::response::SolidifyResponse {
-            success,
-            gene_id,
-        }))
+        Ok(ResponseResult::Solidify(
+            oris_evo_ipc_protocol::response::SolidifyResponse { success, gene_id },
+        ))
     }
 
     /// Handle revert request
@@ -108,11 +107,13 @@ impl RequestHandler {
         let pipeline = self.pipeline.read().await;
         let success = pipeline.revert(reason.gene_id, &reason.reason).await?;
 
-        Ok(ResponseResult::Revert(oris_evo_ipc_protocol::response::RevertResponse {
-            success,
-            gene_id: reason.gene_id,
-            message: format!("Reverted: {}", reason.reason),
-        }))
+        Ok(ResponseResult::Revert(
+            oris_evo_ipc_protocol::response::RevertResponse {
+                success,
+                gene_id: reason.gene_id,
+                message: format!("Reverted: {}", reason.reason),
+            },
+        ))
     }
 
     /// Handle query request
@@ -125,7 +126,9 @@ impl RequestHandler {
         };
 
         let pipeline = self.pipeline.read().await;
-        let genes = pipeline.query_genes(&query.pattern, query.limit.unwrap_or(10)).await?;
+        let genes = pipeline
+            .query_genes(&query.pattern, query.limit.unwrap_or(10))
+            .await?;
 
         Ok(ResponseResult::Query(genes))
     }
@@ -133,7 +136,9 @@ impl RequestHandler {
     /// Handle list request
     async fn handle_list(&self, request: JsonRpcRequest) -> Result<ResponseResult> {
         let (limit, offset) = match &request.params {
-            oris_evo_ipc_protocol::request::RequestParams::List(p) => (p.limit.unwrap_or(100), p.offset.unwrap_or(0)),
+            oris_evo_ipc_protocol::request::RequestParams::List(p) => {
+                (p.limit.unwrap_or(100), p.offset.unwrap_or(0))
+            }
             _ => {
                 return Err(Error::Validation("Invalid params for list".to_string()));
             }
@@ -142,19 +147,20 @@ impl RequestHandler {
         let pipeline = self.pipeline.read().await;
         let (genes, total) = pipeline.list_genes(limit, offset).await?;
 
-        Ok(ResponseResult::List(oris_evo_ipc_protocol::response::ListResponse {
-            total,
-            genes,
-        }))
+        Ok(ResponseResult::List(
+            oris_evo_ipc_protocol::response::ListResponse { total, genes },
+        ))
     }
 
     /// Handle ping request
     async fn handle_ping(&self, _request: JsonRpcRequest) -> Result<ResponseResult> {
-        Ok(ResponseResult::Ping(oris_evo_ipc_protocol::response::PingResponse {
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            message: None,
-            version: oris_evo_ipc_protocol::PROTOCOL_VERSION.to_string(),
-        }))
+        Ok(ResponseResult::Ping(
+            oris_evo_ipc_protocol::response::PingResponse {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                message: None,
+                version: oris_evo_ipc_protocol::PROTOCOL_VERSION.to_string(),
+            },
+        ))
     }
 }
 

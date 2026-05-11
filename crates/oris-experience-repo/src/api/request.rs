@@ -1,6 +1,6 @@
 //! API request types.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::oen::OenEnvelope;
 
@@ -48,7 +48,7 @@ impl FetchQuery {
 }
 
 /// Request body for sharing experiences.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareRequest {
     /// OEN Envelope containing the experience to share.
     pub envelope: OenEnvelope,

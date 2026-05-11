@@ -1344,7 +1344,9 @@ async fn main() -> ExampleResult<()> {
         &paths.worker_store_root,
     )?;
 
-    let ensure = official_node.ensure_builtin_experience_assets("runtime-bootstrap")?;
+    let ensure = official_node
+        .ensure_builtin_experience_assets("runtime-bootstrap")
+        .await?;
     let official_projection = official_store.rebuild_projection()?;
     let official_gene = official_projection
         .genes

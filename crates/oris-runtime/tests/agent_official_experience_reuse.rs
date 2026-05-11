@@ -948,6 +948,7 @@ async fn official_experience_reuse_with_real_qwen() {
 
     let ensure = official_node
         .ensure_builtin_experience_assets("runtime-bootstrap")
+        .await
         .unwrap();
     assert!(ensure.accepted);
     realtime_logger.log_event(

@@ -21,7 +21,11 @@ use serde::{Deserialize, Serialize};
 #[command(about = "CLI for managing Experience Repository API keys")]
 struct Cli {
     /// Base URL for the Experience Repository API.
-    #[arg(long, default_value = "http://localhost:8080", env = "ORIS_EXP_REPO_URL")]
+    #[arg(
+        long,
+        default_value = "http://localhost:8080",
+        env = "ORIS_EXP_REPO_URL"
+    )]
     url: String,
 
     /// API key for authentication (uses X-Api-Key header).
@@ -198,7 +202,9 @@ async fn main() -> Result<()> {
                 ttl_days,
                 description,
             } => {
-                let api_key = cli.api_key.ok_or_else(|| anyhow!("--api-key is required"))?;
+                let api_key = cli
+                    .api_key
+                    .ok_or_else(|| anyhow!("--api-key is required"))?;
                 let request = CreateKeyRequest {
                     agent_id,
                     ttl_days,
@@ -212,8 +218,8 @@ async fn main() -> Result<()> {
                     .await?;
                 let status = resp.status();
                 let body = resp.text().await?;
-                let parsed: serde_json::Value =
-                    serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "raw": body }));
+                let parsed: serde_json::Value = serde_json::from_str(&body)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw": body }));
 
                 if !status.is_success() {
                     return Err(anyhow!("request failed: status={} body={}", status, parsed));
@@ -230,7 +236,9 @@ async fn main() -> Result<()> {
                 println!("\nIMPORTANT: Save the API key now - it will not be shown again!");
             }
             KeyCommands::List => {
-                let api_key = cli.api_key.ok_or_else(|| anyhow!("--api-key is required"))?;
+                let api_key = cli
+                    .api_key
+                    .ok_or_else(|| anyhow!("--api-key is required"))?;
                 let resp = client
                     .get(format!("{}/keys", base))
                     .header("X-Api-Key", api_key)
@@ -238,8 +246,8 @@ async fn main() -> Result<()> {
                     .await?;
                 let status = resp.status();
                 let body = resp.text().await?;
-                let parsed: serde_json::Value =
-                    serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "raw": body }));
+                let parsed: serde_json::Value = serde_json::from_str(&body)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw": body }));
 
                 if !status.is_success() {
                     return Err(anyhow!("request failed: status={} body={}", status, parsed));
@@ -269,7 +277,9 @@ async fn main() -> Result<()> {
                 }
             }
             KeyCommands::Revoke { key_id } => {
-                let api_key = cli.api_key.ok_or_else(|| anyhow!("--api-key is required"))?;
+                let api_key = cli
+                    .api_key
+                    .ok_or_else(|| anyhow!("--api-key is required"))?;
                 let resp = client
                     .delete(format!("{}/keys/{}", base, key_id))
                     .header("X-Api-Key", api_key)
@@ -279,15 +289,17 @@ async fn main() -> Result<()> {
                 let body = resp.text().await?;
 
                 if !status.is_success() {
-                    let parsed: serde_json::Value =
-                        serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "raw": body }));
+                    let parsed: serde_json::Value = serde_json::from_str(&body)
+                        .unwrap_or_else(|_| serde_json::json!({ "raw": body }));
                     return Err(anyhow!("request failed: status={} body={}", status, parsed));
                 }
 
                 println!("Key {} revoked successfully.", key_id);
             }
             KeyCommands::Rotate { key_id, ttl_days } => {
-                let api_key = cli.api_key.ok_or_else(|| anyhow!("--api-key is required"))?;
+                let api_key = cli
+                    .api_key
+                    .ok_or_else(|| anyhow!("--api-key is required"))?;
                 let request = RotateKeyRequest { ttl_days };
                 let resp = client
                     .post(format!("{}/keys/{}/rotate", base, key_id))
@@ -297,8 +309,8 @@ async fn main() -> Result<()> {
                     .await?;
                 let status = resp.status();
                 let body = resp.text().await?;
-                let parsed: serde_json::Value =
-                    serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({ "raw": body }));
+                let parsed: serde_json::Value = serde_json::from_str(&body)
+                    .unwrap_or_else(|_| serde_json::json!({ "raw": body }));
 
                 if !status.is_success() {
                     return Err(anyhow!("request failed: status={} body={}", status, parsed));

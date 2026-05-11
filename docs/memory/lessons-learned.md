@@ -91,3 +91,62 @@
 #### 2. 后台任务需要主动追踪
 **现象**：部分 agent 任务 ID 记录有误，需要多次查询状态
 **教训**：启动后台任务时立即记录完整 task ID，便于追踪
+
+## 2026-05-11: Cargo workspace path dep vs registry dep
+
+### 场景
+在 workspace 内新增 trait 和字段后，使用 registry 版本锁定的 sibling crate 无法看到新符号。
+
+### 问题
+`oris-experience-repo` 的 `oris-genestore`、`oris-evolution`、`oris-evolution-network` 依赖原先通过 crates.io registry 锁定，Cargo 不会自动升级到 workspace 本地版本，导致 `NetworkPublisher` trait 和 `contributor_id` 字段编译不可见。
+
+### 建议
+workspace 内 sibling crate 一律用 `{ path = "../..." }` 引用；发版前检查 `Cargo.lock` 无 registry 来源的 workspace member。
+
+## 2026-05-11: SQLite ALTER TABLE ADD COLUMN IF NOT EXISTS 版本门槛
+
+### 场景
+SQLite schema 幂等迁移。
+
+### 问题
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 需要 SQLite ≥ 3.37.0；libsqlite3-sys 0.30.1 bundled 版本较低，所有调用 `open()` 的测试 panic。
+
+### 建议
+幂等 ALTER TABLE 统一用 `let _ = conn.execute("ALTER TABLE t ADD COLUMN col TEXT", []);` 忽略"duplicate column name"错误，兼容全部 SQLite 3.x。
+
+## 2026-05-11: exp-repo-evokernel-wire
+
+### 场景
+
+将 `EvolutionNetworkNode` 的两个方法（`ensure_builtin_experience_assets`、`record_reported_experience`）从同步升级为异步，以支持网络推送路径。
+
+### 问题
+
+#### 1. async 传播遗漏导致批量编译错误
+
+**现象**：将 trait 方法改为 `async fn` 后，约 15 个调用点分布在 tests、handlers、helpers、examples 多个文件中，全部出现 `no method found` 或 `await inside non-async function` 编译错误。
+
+**根因**：Rust 中将方法签名从 `fn` → `async fn` 属于破坏性变更，所有调用点必须：
+1. 在已有 async 上下文中加 `.await`
+2. 或将调用方自身升格为 `async fn`（并递归处理其调用方）
+
+**教训**：
+- 在动 widely-used struct 方法签名之前，先用 `grep -rn "\.ensure_builtin\|\.record_reported"` 枚举所有调用点
+- 区分"调用方是 async 的"和"调用方是 sync 的"两类，后者需要递归升格（例如 sync helper → async helper → test 需改为 `#[tokio::test]`）
+- 批量 async 改造建议在单独 commit 中完成，便于 blame 追溯
+
+#### 2. HTTP 测试的 auth bootstrap 问题
+
+**现象**：`test_create_and_list_key` 等测试在引入 API Key 鉴权后开始失败，返回 `ApiKeyMissing`。
+
+**根因**：`create_key` handler 要求请求方已有合法 API Key（admin 鉴权），但测试使用的是空 `HeaderMap`。测试需要一个 bootstrap 机制绕过 HTTP 层、直接在 DB 中插入种子 key。
+
+**教训**：
+- HTTP 鉴权 handler 测试应提供两类 helper：`create_test_state_with_key()` 和 `create_authed_headers()`
+- Bootstrap key 应通过直接调用底层 `KeyStore::create_key()` 插入，不走 HTTP 层（避免循环依赖）
+- 每次新增鉴权 endpoint 时，同步更新相关测试的 auth setup
+
+### 建议
+
+- 改动 async 方法签名前，先做全局 grep 统计影响面
+- 鉴权 handler 测试文件顶部维护 `test_state_with_auth()` 标准 fixture

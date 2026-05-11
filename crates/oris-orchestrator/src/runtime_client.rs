@@ -266,7 +266,10 @@ impl InMemoryRuntimeA2aClient {
             .map(|state| state.accepted_handshakes)
     }
 
-    pub fn completion(&self, session_id: &str) -> Result<Option<A2aTaskSessionCompletionResponse>, RuntimeClientError> {
+    pub fn completion(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<A2aTaskSessionCompletionResponse>, RuntimeClientError> {
         self.inner
             .lock()
             .map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))
@@ -286,7 +289,10 @@ impl RuntimeA2aClient for InMemoryRuntimeA2aClient {
             ));
         }
 
-        let mut state = self.inner.lock().map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
         state.accepted_handshakes += 1;
 
         Ok(A2aHandshakeResponse::accept(vec![
@@ -304,7 +310,10 @@ impl RuntimeA2aClient for InMemoryRuntimeA2aClient {
             .validate()
             .map_err(|e| RuntimeClientError::new(e.to_string()))?;
 
-        let mut state = self.inner.lock().map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
         state.next_session_id += 1;
 
         let session_id = format!("a2a-session-{}", state.next_session_id);
@@ -338,7 +347,10 @@ impl RuntimeA2aClient for InMemoryRuntimeA2aClient {
             ));
         }
 
-        let mut state = self.inner.lock().map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| RuntimeClientError::new("in-memory runtime lock poisoned"))?;
         let session =
             state.sessions.get(session_id).cloned().ok_or_else(|| {
                 RuntimeClientError::new(format!("session not found: {}", session_id))

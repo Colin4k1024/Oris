@@ -5131,7 +5131,7 @@ fn a2a_experience_gene_id(sender_id: &str, task_id: &str, feedback: &ReplayFeedb
     feature = "agent-contract-experimental",
     feature = "evolution-network-experimental"
 ))]
-fn persist_a2a_reported_experience(
+async fn persist_a2a_reported_experience(
     state: &ExecutionApiState,
     sender_id: &str,
     task_id: &str,
@@ -5189,6 +5189,7 @@ fn persist_a2a_reported_experience(
             strategy,
             vec!["a2a.tasks.report".into()],
         )
+        .await
         .map_err(|err| ApiError::internal(err.to_string()).with_request_id(rid.to_string()))?;
     Ok(())
 }
@@ -5771,6 +5772,7 @@ pub async fn evolution_a2a_handshake(
         state
             .evolution_node
             .ensure_builtin_experience_assets(req.agent_id.clone())
+            .await
             .map_err(|e| {
                 ApiError::internal(format!("ensure builtin experience assets: {}", e))
                     .with_request_id(rid.clone())
@@ -8051,7 +8053,8 @@ pub async fn evolution_a2a_session_complete(
                 &task_id,
                 &replay_feedback,
                 &rid,
-            )?;
+            )
+            .await?;
         }
         A2aTaskLifecycleState::Failed => {
             let details = req
@@ -12030,6 +12033,7 @@ mod tests {
                 ],
                 vec!["a2a.tasks.report".into()],
             )
+            .await
             .expect("seed delta gene a");
         let router = build_router(state.clone());
 
@@ -12097,6 +12101,7 @@ mod tests {
                 ],
                 vec!["a2a.tasks.report".into()],
             )
+            .await
             .expect("seed delta gene b");
 
         let second_fetch_req = Request::builder()
@@ -28531,6 +28536,7 @@ async fn evomap_assets_discovery(
     state
         .evolution_node
         .ensure_builtin_experience_assets(sender_id.clone())
+        .await
         .map_err(|e| {
             ApiError::internal(format!("ensure builtin experience assets: {e}"))
                 .with_request_id(rid.clone())
@@ -31664,6 +31670,7 @@ async fn evomap_fetch_assets_for_sender(
     state
         .evolution_node
         .ensure_builtin_experience_assets(sender_id.to_string())
+        .await
         .map_err(|e| {
             ApiError::internal(format!("ensure builtin experience assets: {e}"))
                 .with_request_id(rid.to_string())

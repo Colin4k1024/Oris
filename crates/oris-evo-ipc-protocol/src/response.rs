@@ -141,7 +141,12 @@ impl JsonRpcResponse {
     }
 
     /// Create an error response with data
-    pub fn error_with_data(id: Uuid, code: ErrorCode, message: &str, data: serde_json::Value) -> Self {
+    pub fn error_with_data(
+        id: Uuid,
+        code: ErrorCode,
+        message: &str,
+        data: serde_json::Value,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,

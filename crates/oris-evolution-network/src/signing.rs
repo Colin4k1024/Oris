@@ -54,6 +54,15 @@ pub struct NodeKeypair {
     path: PathBuf,
 }
 
+impl Clone for NodeKeypair {
+    fn clone(&self) -> Self {
+        Self {
+            signing_key: SigningKey::from_bytes(&self.signing_key.to_bytes()),
+            path: self.path.clone(),
+        }
+    }
+}
+
 impl NodeKeypair {
     pub fn generate() -> SigningResult<Self> {
         let home = std::env::var_os("HOME").ok_or(SigningError::HomeDirectoryUnavailable)?;

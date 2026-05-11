@@ -23,6 +23,8 @@ pub struct Gene {
     pub created_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub last_boosted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub contributor_id: Option<String>,
 }
 
 impl Gene {

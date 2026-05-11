@@ -263,6 +263,7 @@ impl GeneStorePersistPort for SqliteGeneStorePersistAdapter {
             created_at: Utc::now(),
             last_used_at: None,
             last_boosted_at: None,
+            contributor_id: None,
         };
 
         let store = &self.store;

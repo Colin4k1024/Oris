@@ -45,16 +45,14 @@ hex = "0.4"
 base64 = "0.22"
 ed25519-dalek = "2"
 
-# Gene store (SQLite-based)
-# Note: oris-genestore must be published to crates.io first (currently v0.2.0)
-oris-genestore = "0.2"
+# Gene store (SQLite-based) — local workspace path so local changes take effect
+oris-genestore = { path = "../oris-genestore" }
 
-# Evolution types
-# Note: oris-evolution must be published to crates.io first (currently v0.4.1)
-oris-evolution = "0.4"
+# Evolution types — local workspace path
+oris-evolution = { path = "../oris-evolution" }
 
-# Evolution Network (for signing)
-oris-evolution-network = "0.5"
+# Evolution Network (for signing + NetworkPublisher) — local workspace path
+oris-evolution-network = { path = "../oris-evolution-network" }
 
 # SQLite
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -67,3 +65,4 @@ futures-util = "0.3"
 tokio-test = "0.4"
 tempfile = "3"
 getrandom = "0.2"
+mockito = "1"

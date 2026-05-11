@@ -6,7 +6,7 @@ use crate::types::{Capsule, Gene, GeneMatch, GeneQuery};
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, ErrorCode};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -86,7 +86,6 @@ impl SqliteGeneStore {
                 last_used_at     TEXT,
                 last_boosted_at  TEXT
             );
-
             CREATE TABLE IF NOT EXISTS gene_tags (
                 gene_id TEXT NOT NULL REFERENCES genes(id) ON DELETE CASCADE,
                 tag     TEXT NOT NULL,
@@ -113,6 +112,21 @@ impl SqliteGeneStore {
             CREATE INDEX IF NOT EXISTS idx_capsules_confidence ON capsules(confidence);
         "#,
         )?;
+        // Idempotent: add contributor_id to databases created before this field existed.
+        // Only ignore "duplicate column name" (SQLITE_ERROR / extended_code 1); propagate
+        // any other error (READONLY, CORRUPT, LOCKED, etc.) to the caller.
+        if let Err(e) = conn.execute("ALTER TABLE genes ADD COLUMN contributor_id TEXT", []) {
+            let is_dup = matches!(
+                &e,
+                rusqlite::Error::SqliteFailure(f, Some(msg))
+                    if f.code == ErrorCode::Unknown
+                        && f.extended_code == 1
+                        && msg.contains("duplicate column name")
+            );
+            if !is_dup {
+                return Err(e.into());
+            }
+        }
         Ok(())
     }
 }
@@ -126,8 +140,8 @@ impl GeneStore for SqliteGeneStore {
                (id, name, description, tags_json, template,
                 preconditions_json, validation_steps_json,
                 confidence, use_count, success_count, quality_score,
-                created_at, last_used_at, last_boosted_at)
-               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                created_at, last_used_at, last_boosted_at, contributor_id)
+               VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                ON CONFLICT(id) DO UPDATE SET
                  name=excluded.name, description=excluded.description,
                  tags_json=excluded.tags_json, template=excluded.template,
@@ -137,7 +151,8 @@ impl GeneStore for SqliteGeneStore {
                  success_count=excluded.success_count,
                  quality_score=excluded.quality_score,
                  last_used_at=excluded.last_used_at,
-                 last_boosted_at=excluded.last_boosted_at"#,
+                 last_boosted_at=excluded.last_boosted_at,
+                 contributor_id=excluded.contributor_id"#,
             params![
                 gene.id.to_string(),
                 gene.name,
@@ -153,6 +168,7 @@ impl GeneStore for SqliteGeneStore {
                 gene.created_at.to_rfc3339(),
                 gene.last_used_at.map(|d| d.to_rfc3339()),
                 gene.last_boosted_at.map(|d| d.to_rfc3339()),
+                gene.contributor_id.as_deref(),
             ],
         )?;
 
@@ -176,7 +192,7 @@ impl GeneStore for SqliteGeneStore {
             "SELECT id,name,description,tags_json,template,
                     preconditions_json,validation_steps_json,
                     confidence,use_count,success_count,quality_score,
-                    created_at,last_used_at,last_boosted_at
+                    created_at,last_used_at,last_boosted_at,contributor_id
              FROM genes WHERE id=?1",
         )?;
         let mut rows = stmt.query(params![id.to_string()])?;
@@ -243,7 +259,7 @@ impl GeneStore for SqliteGeneStore {
                 "SELECT id,name,description,tags_json,template,
                         preconditions_json,validation_steps_json,
                         confidence,use_count,success_count,quality_score,
-                        created_at,last_used_at,last_boosted_at
+                        created_at,last_used_at,last_boosted_at,contributor_id
                  FROM genes WHERE id=?1 AND confidence >= ?2",
             )?;
             let mut rows = stmt.query(params![gene_id, query.min_confidence])?;
@@ -321,7 +337,7 @@ impl GeneStore for SqliteGeneStore {
             "SELECT id,name,description,tags_json,template,
                     preconditions_json,validation_steps_json,
                     confidence,use_count,success_count,quality_score,
-                    created_at,last_used_at,last_boosted_at
+                    created_at,last_used_at,last_boosted_at,contributor_id
              FROM genes WHERE confidence <= ?1",
         )?;
         let genes = stmt
@@ -443,6 +459,7 @@ fn row_to_gene(row: &rusqlite::Row) -> rusqlite::Result<Gene> {
     let created_at_str: String = row.get(11)?;
     let last_used_str: Option<String> = row.get(12)?;
     let last_boost_str: Option<String> = row.get(13)?;
+    let contributor_id: Option<String> = row.get(14)?;
 
     Ok(Gene {
         id: Uuid::parse_str(&row.get::<_, String>(0)?)
@@ -460,6 +477,7 @@ fn row_to_gene(row: &rusqlite::Row) -> rusqlite::Result<Gene> {
         created_at: created_at_str.parse().unwrap_or_else(|_| Utc::now()),
         last_used_at: last_used_str.and_then(|s| s.parse().ok()),
         last_boosted_at: last_boost_str.and_then(|s| s.parse().ok()),
+        contributor_id,
     })
 }
 
@@ -532,6 +550,7 @@ mod tests {
             created_at: Utc::now(),
             last_used_at: None,
             last_boosted_at: None,
+            contributor_id: None,
         }
     }
 

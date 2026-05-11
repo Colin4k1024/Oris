@@ -8,9 +8,29 @@ use crate::tools::Tool;
 
 /// Allowlist of permitted commands for sandboxed execution
 const ALLOWED_COMMANDS: &[&str] = &[
-    "ls", "cat", "echo", "pwd", "cd", "mkdir", "rmdir", "touch", "rm",
-    "cp", "mv", "head", "tail", "wc", "grep", "find", "sort", "uniq",
-    "git", "cargo", "rustc", "md5sum", "sha256sum",
+    "ls",
+    "cat",
+    "echo",
+    "pwd",
+    "cd",
+    "mkdir",
+    "rmdir",
+    "touch",
+    "rm",
+    "cp",
+    "mv",
+    "head",
+    "tail",
+    "wc",
+    "grep",
+    "find",
+    "sort",
+    "uniq",
+    "git",
+    "cargo",
+    "rustc",
+    "md5sum",
+    "sha256sum",
 ];
 
 pub struct CommandExecutor {
@@ -54,8 +74,8 @@ impl CommandExecutor {
 
     /// Execute commands with allowlist validation (sandboxed execution)
     async fn execute_sandboxed(&self, input: Value) -> Result<String, ToolError> {
-        let commands: Vec<CommandInput> = serde_json::from_value(input)
-            .map_err(|e| ToolError::ParsingError(e.to_string()))?;
+        let commands: Vec<CommandInput> =
+            serde_json::from_value(input).map_err(|e| ToolError::ParsingError(e.to_string()))?;
         let mut result = String::new();
 
         for command in commands {

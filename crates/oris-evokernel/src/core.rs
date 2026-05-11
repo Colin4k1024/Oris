@@ -49,7 +49,9 @@ use oris_evolution::{
     PreparedMutation, ReplayRoiEvidence, ReplayRoiReasonCode, Selector, SelectorInput,
     StoreBackedSelector, StoredEvolutionEvent, ValidationSnapshot, MIN_REPLAY_CONFIDENCE,
 };
-use oris_evolution_network::{EvolutionEnvelope, NetworkAsset, SyncAudit};
+use oris_evolution_network::{
+    sign_envelope, EvolutionEnvelope, NetworkAsset, NetworkPublisher, NodeKeypair, SyncAudit,
+};
 use oris_governor::{DefaultGovernor, Governor, GovernorDecision, GovernorInput};
 use oris_kernel::{Kernel, KernelState, RunId};
 use oris_sandbox::{
@@ -1026,6 +1028,9 @@ pub struct StoreReplayExecutor {
     pub economics: Option<Arc<Mutex<EvuLedger>>>,
     pub remote_publishers: Option<Arc<Mutex<BTreeMap<String, String>>>>,
     pub stake_policy: StakePolicy,
+    pub network_publisher: Option<Arc<dyn NetworkPublisher>>,
+    pub node_id: Option<String>,
+    pub signing_keypair: Option<Arc<NodeKeypair>>,
 }
 
 struct ReplayCandidates {
@@ -1057,6 +1062,33 @@ impl ReplayExecutor for StoreReplayExecutor {
 }
 
 impl StoreReplayExecutor {
+    async fn maybe_push_to_network(&self, gene: &Gene) {
+        let Some(publisher) = &self.network_publisher else {
+            return;
+        };
+        let Some(node_id) = self.node_id.as_deref() else {
+            tracing::warn!(
+                gene_id = %gene.id,
+                "network push skipped: node_id not configured"
+            );
+            return;
+        };
+        let assets = vec![NetworkAsset::Gene { gene: gene.clone() }];
+        let unsigned = EvolutionEnvelope::publish(node_id.to_string(), assets);
+        let envelope = if let Some(kp) = &self.signing_keypair {
+            sign_envelope(kp, &unsigned)
+        } else {
+            unsigned
+        };
+        if let Err(e) = publisher.publish_envelope(&envelope).await {
+            tracing::warn!(
+                gene_id = %gene.id,
+                error = %e,
+                "network push failed after replay promotion (non-fatal)"
+            );
+        }
+    }
+
     fn collect_replay_candidates(&self, input: &SelectorInput) -> ReplayCandidates {
         self.apply_confidence_revalidation();
         let mut selector_input = input.clone();
@@ -1601,6 +1633,7 @@ impl StoreReplayExecutor {
                         gene_id: best.gene.id.clone(),
                     })
                     .map_err(|err| ReplayError::Store(err.to_string()))?;
+                self.maybe_push_to_network(&best.gene).await;
             }
             self.store
                 .append_event(EvolutionEvent::CapsuleReleased {
@@ -2183,16 +2216,65 @@ pub struct EvolutionHealthSnapshot {
 #[derive(Clone)]
 pub struct EvolutionNetworkNode {
     pub store: Arc<dyn EvolutionStore>,
+    pub network_publisher: Option<Arc<dyn NetworkPublisher>>,
+    pub node_id: Option<String>,
+    pub signing_keypair: Option<Arc<NodeKeypair>>,
 }
 
 impl EvolutionNetworkNode {
     pub fn new(store: Arc<dyn EvolutionStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            network_publisher: None,
+            node_id: None,
+            signing_keypair: None,
+        }
     }
 
     pub fn with_default_store() -> Self {
         Self {
             store: Arc::new(JsonlEvolutionStore::new(default_store_root())),
+            network_publisher: None,
+            node_id: None,
+            signing_keypair: None,
+        }
+    }
+
+    pub fn with_network_publisher(mut self, publisher: Arc<dyn NetworkPublisher>) -> Self {
+        self.network_publisher = Some(publisher);
+        self
+    }
+
+    pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = Some(node_id.into());
+        self
+    }
+
+    pub fn with_signing_keypair(mut self, keypair: NodeKeypair) -> Self {
+        self.signing_keypair = Some(Arc::new(keypair));
+        self
+    }
+
+    async fn maybe_push_to_network(&self, gene: &Gene) {
+        let Some(publisher) = &self.network_publisher else {
+            return;
+        };
+        let Some(node_id) = self.node_id.as_deref() else {
+            tracing::warn!(
+                gene_id = %gene.id,
+                "network push skipped: node_id not configured"
+            );
+            return;
+        };
+        let assets = vec![NetworkAsset::Gene { gene: gene.clone() }];
+        let unsigned = EvolutionEnvelope::publish(node_id.to_string(), assets);
+        let envelope = if let Some(kp) = &self.signing_keypair {
+            sign_envelope(kp, &unsigned)
+        } else {
+            unsigned
+        };
+        if let Err(e) = publisher.publish_envelope(&envelope).await {
+            tracing::warn!(gene_id = %gene.id, error = %e, "network push failed after bootstrap promotion (non-fatal)");
         }
     }
 
@@ -2213,14 +2295,24 @@ impl EvolutionNetworkNode {
         )
     }
 
-    pub fn ensure_builtin_experience_assets(
+    pub async fn ensure_builtin_experience_assets(
         &self,
         sender_id: impl Into<String>,
     ) -> Result<ImportOutcome, EvoKernelError> {
-        ensure_builtin_experience_assets_in_store(self.store.as_ref(), sender_id.into())
+        let outcome =
+            ensure_builtin_experience_assets_in_store(self.store.as_ref(), sender_id.into())?;
+        if self.network_publisher.is_some() {
+            let projection = self.store.rebuild_projection().map_err(store_err)?;
+            for gene_id in &outcome.imported_asset_ids {
+                if let Some(gene) = projection.genes.iter().find(|g| &g.id == gene_id) {
+                    self.maybe_push_to_network(gene).await;
+                }
+            }
+        }
+        Ok(outcome)
     }
 
-    pub fn record_reported_experience(
+    pub async fn record_reported_experience(
         &self,
         sender_id: impl Into<String>,
         gene_id: impl Into<String>,
@@ -2228,14 +2320,23 @@ impl EvolutionNetworkNode {
         strategy: Vec<String>,
         validation: Vec<String>,
     ) -> Result<ImportOutcome, EvoKernelError> {
-        record_reported_experience_in_store(
+        let outcome = record_reported_experience_in_store(
             self.store.as_ref(),
             sender_id.into(),
             gene_id.into(),
             signals,
             strategy,
             validation,
-        )
+        )?;
+        if self.network_publisher.is_some() {
+            let projection = self.store.rebuild_projection().map_err(store_err)?;
+            for gene_id in &outcome.imported_asset_ids {
+                if let Some(gene) = projection.genes.iter().find(|g| &g.id == gene_id) {
+                    self.maybe_push_to_network(gene).await;
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     pub fn publish_local_assets(
@@ -2321,6 +2422,12 @@ pub struct EvoKernel<S: KernelState> {
     pub stake_policy: StakePolicy,
     pub sandbox_policy: SandboxPolicy,
     pub validation_plan: ValidationPlan,
+    /// Optional publisher injected at build time; called after every GenePromoted event.
+    pub network_publisher: Option<Arc<dyn NetworkPublisher>>,
+    /// Identity of this node, used as `sender_id` in OEN envelopes.
+    pub node_id: Option<String>,
+    /// Ed25519 signing keypair for OEN envelope signatures.
+    pub signing_keypair: Option<Arc<NodeKeypair>>,
 }
 
 impl<S: KernelState> EvoKernel<S> {
@@ -2377,6 +2484,9 @@ impl<S: KernelState> EvoKernel<S> {
             stake_policy: StakePolicy::default(),
             sandbox_policy: SandboxPolicy::oris_default(),
             validation_plan: ValidationPlan::oris_default(),
+            network_publisher: None,
+            node_id: None,
+            signing_keypair: None,
         }
     }
 
@@ -2410,6 +2520,53 @@ impl<S: KernelState> EvoKernel<S> {
         self
     }
 
+    /// Inject a [`NetworkPublisher`] that will be called after every successful gene promotion.
+    pub fn with_network_publisher(mut self, publisher: Arc<dyn NetworkPublisher>) -> Self {
+        self.network_publisher = Some(publisher);
+        self
+    }
+
+    /// Set the node identity used as `sender_id` in outgoing OEN envelopes.
+    pub fn with_node_id(mut self, node_id: impl Into<String>) -> Self {
+        self.node_id = Some(node_id.into());
+        self
+    }
+
+    /// Set the Ed25519 signing keypair for OEN envelope signatures.
+    pub fn with_signing_keypair(mut self, keypair: NodeKeypair) -> Self {
+        self.signing_keypair = Some(Arc::new(keypair));
+        self
+    }
+
+    /// Push the promoted gene to the network if a publisher is configured.
+    /// Failures are logged as warnings and never abort the promotion path.
+    async fn maybe_push_to_network(&self, gene: &Gene) {
+        let Some(publisher) = &self.network_publisher else {
+            return;
+        };
+        let Some(node_id) = self.node_id.as_deref() else {
+            tracing::warn!(
+                gene_id = %gene.id,
+                "network push skipped: node_id not configured"
+            );
+            return;
+        };
+        let assets = vec![NetworkAsset::Gene { gene: gene.clone() }];
+        let unsigned = EvolutionEnvelope::publish(node_id.to_string(), assets);
+        let envelope = if let Some(kp) = &self.signing_keypair {
+            sign_envelope(kp, &unsigned)
+        } else {
+            unsigned
+        };
+        if let Err(e) = publisher.publish_envelope(&envelope).await {
+            tracing::warn!(
+                gene_id = %gene.id,
+                error = %e,
+                "network push failed after promotion (non-fatal)"
+            );
+        }
+    }
+
     pub fn select_candidates(&self, input: &SelectorInput) -> Vec<GeneCandidate> {
         let executor = StoreReplayExecutor {
             sandbox: self.sandbox.clone(),
@@ -2420,6 +2577,9 @@ impl<S: KernelState> EvoKernel<S> {
             economics: Some(self.economics.clone()),
             remote_publishers: Some(self.remote_publishers.clone()),
             stake_policy: self.stake_policy.clone(),
+            network_publisher: self.network_publisher.clone(),
+            node_id: self.node_id.clone(),
+            signing_keypair: self.signing_keypair.clone(),
         };
         executor.collect_replay_candidates(input).candidates
     }
@@ -2678,6 +2838,7 @@ impl<S: KernelState> EvoKernel<S> {
                     gene_id: gene.id.clone(),
                 })
                 .map_err(store_err)?;
+            self.maybe_push_to_network(&gene).await;
         }
         if matches!(governor_decision.target_state, AssetState::Revoked) {
             self.store
@@ -4109,6 +4270,9 @@ impl<S: KernelState> EvoKernel<S> {
             economics: Some(self.economics.clone()),
             remote_publishers: Some(self.remote_publishers.clone()),
             stake_policy: self.stake_policy.clone(),
+            network_publisher: self.network_publisher.clone(),
+            node_id: self.node_id.clone(),
+            signing_keypair: self.signing_keypair.clone(),
         };
         executor
             .try_replay_for_run(run_id, &input, &self.sandbox_policy, &self.validation_plan)
@@ -9659,6 +9823,9 @@ index 0000000..1111111
             economics: Some(evo.economics.clone()),
             remote_publishers: Some(evo.remote_publishers.clone()),
             stake_policy: evo.stake_policy.clone(),
+            network_publisher: None,
+            node_id: None,
+            signing_keypair: None,
         };
 
         let decision = executor
@@ -10794,8 +10961,8 @@ index 0000000..1111111
             .any(|asset| matches!(asset, NetworkAsset::Capsule { .. })));
     }
 
-    #[test]
-    fn fetch_assets_delta_sync_supports_since_cursor_and_resume_token() {
+    #[tokio::test]
+    async fn fetch_assets_delta_sync_supports_since_cursor_and_resume_token() {
         let store_root =
             std::env::temp_dir().join(format!("oris-evokernel-fetch-delta-store-{}", next_id("t")));
         if store_root.exists() {
@@ -10814,6 +10981,7 @@ index 0000000..1111111
             ],
             vec!["a2a.tasks.report".into()],
         )
+        .await
         .unwrap();
 
         let first = node
@@ -10845,6 +11013,7 @@ index 0000000..1111111
                 ],
                 vec!["a2a.tasks.report".into()],
             )
+            .await
             .unwrap();
 
         let from_token = restarted
@@ -11544,8 +11713,8 @@ index 0000000..1111111
         assert!(signal.validator_accuracy < 0.5);
     }
 
-    #[test]
-    fn ensure_builtin_experience_assets_is_idempotent_and_fetchable() {
+    #[tokio::test]
+    async fn ensure_builtin_experience_assets_is_idempotent_and_fetchable() {
         let store_root = std::env::temp_dir().join(format!(
             "oris-evokernel-builtin-experience-store-{}",
             next_id("t")
@@ -11559,11 +11728,13 @@ index 0000000..1111111
 
         let first = node
             .ensure_builtin_experience_assets("runtime-bootstrap")
+            .await
             .unwrap();
         assert!(!first.imported_asset_ids.is_empty());
 
         let second = node
             .ensure_builtin_experience_assets("runtime-bootstrap")
+            .await
             .unwrap();
         assert!(second.imported_asset_ids.is_empty());
 
@@ -11594,8 +11765,8 @@ index 0000000..1111111
         assert!(has_builtin_evomap);
     }
 
-    #[test]
-    fn reported_experience_retention_keeps_latest_three_and_preserves_builtin_assets() {
+    #[tokio::test]
+    async fn reported_experience_retention_keeps_latest_three_and_preserves_builtin_assets() {
         let store_root = std::env::temp_dir().join(format!(
             "oris-evokernel-reported-retention-store-{}",
             next_id("t")
@@ -11608,6 +11779,7 @@ index 0000000..1111111
         let node = EvolutionNetworkNode::new(store.clone());
 
         node.ensure_builtin_experience_assets("runtime-bootstrap")
+            .await
             .unwrap();
 
         for idx in 0..4 {
@@ -11622,6 +11794,7 @@ index 0000000..1111111
                 ],
                 vec!["a2a.tasks.report".into()],
             )
+            .await
             .unwrap();
         }
 

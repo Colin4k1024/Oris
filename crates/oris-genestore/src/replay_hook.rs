@@ -297,6 +297,7 @@ mod tests {
             confidence,
             use_count: 5,
             success_count: 4,
+            contributor_id: None,
             quality_score: 0.8,
             created_at: Utc::now(),
             last_used_at: None,

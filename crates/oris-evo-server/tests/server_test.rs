@@ -49,7 +49,11 @@ fn test_error_codes() {
         let response = JsonRpcResponse::error(Uuid::new_v4(), code, "test error");
         let json = response.to_json().expect("should serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
-        assert_eq!(parsed["error"]["code"], expected, "code {:?} should have value {}", code, expected);
+        assert_eq!(
+            parsed["error"]["code"], expected,
+            "code {:?} should have value {}",
+            code, expected
+        );
     }
 }
 
@@ -69,7 +73,10 @@ fn test_solidify_response_format() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
     assert!(parsed["result"]["success"].as_bool().unwrap());
-    assert_eq!(parsed["result"]["gene_id"].as_str().unwrap(), gene_id.to_string());
+    assert_eq!(
+        parsed["result"]["gene_id"].as_str().unwrap(),
+        gene_id.to_string()
+    );
 }
 
 /// Test revert response structure
@@ -89,8 +96,14 @@ fn test_revert_response_format() {
 
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("should parse");
     assert!(parsed["result"]["success"].as_bool().unwrap());
-    assert_eq!(parsed["result"]["gene_id"].as_str().unwrap(), gene_id.to_string());
-    assert!(parsed["result"]["message"].as_str().unwrap().contains("confidence drop"));
+    assert_eq!(
+        parsed["result"]["gene_id"].as_str().unwrap(),
+        gene_id.to_string()
+    );
+    assert!(parsed["result"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("confidence drop"));
 }
 
 /// Test list response structure

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::Html,
     routing::{delete, get, post},
     Json, Router,
 };
@@ -88,6 +89,8 @@ pub fn create_routes(config: ServerConfig) -> Router {
     };
 
     Router::new()
+        // Homepage
+        .route("/", get(homepage))
         // Experience endpoints
         .route("/experience", get(fetch_experiences))
         .route("/experience", post(share_experience))
@@ -160,7 +163,7 @@ async fn fetch_experiences(
                 use_count: gene.use_count,
                 success_count: gene.success_count,
                 created_at: gene.created_at.to_rfc3339(),
-                contributor_id: None, // TODO: enrich from metadata
+                contributor_id: gene.contributor_id,
             }
         })
         .collect();
@@ -263,6 +266,12 @@ async fn list_keys(
         &client_id,
     )?;
 
+    let api_key = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ExperienceRepoError::ApiKeyMissing)?;
+    state.key_store.lock().await.verify_key(api_key)?;
+
     let keys = state.key_store.lock().await.list_keys()?;
     Ok(Json(ListKeysResponse { keys }))
 }
@@ -281,6 +290,12 @@ async fn create_key(
         "/keys",
         &client_id,
     )?;
+
+    let api_key = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ExperienceRepoError::ApiKeyMissing)?;
+    state.key_store.lock().await.verify_key(api_key)?;
 
     let (raw_key, key_info) = state.key_store.lock().await.create_key(
         &request.agent_id,
@@ -312,6 +327,12 @@ async fn revoke_key(
         &client_id,
     )?;
 
+    let api_key = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ExperienceRepoError::ApiKeyMissing)?;
+    state.key_store.lock().await.verify_key(api_key)?;
+
     let key_id = KeyId(key_id);
     state.key_store.lock().await.revoke_key(&key_id)?;
     Ok(StatusCode::NO_CONTENT)
@@ -332,6 +353,12 @@ async fn rotate_key(
         "/keys",
         &client_id,
     )?;
+
+    let api_key = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ExperienceRepoError::ApiKeyMissing)?;
+    state.key_store.lock().await.verify_key(api_key)?;
 
     let key_id = KeyId(key_id);
     let (raw_key, key_info) = state
@@ -452,6 +479,57 @@ async fn revoke_public_key(
 }
 
 // ============================================================================
+// Homepage
+// ============================================================================
+
+/// Handler for GET / - service homepage with status and API summary.
+async fn homepage() -> Html<String> {
+    let version = env!("CARGO_PKG_VERSION");
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oris Experience Repository</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }}
+  h1 {{ font-size: 1.6rem; margin-bottom: 4px; }}
+  .meta {{ color: #666; font-size: 0.9rem; margin-bottom: 24px; }}
+  .status {{ display: inline-block; background: #d4edda; color: #155724; padding: 2px 10px; border-radius: 12px; font-size: 0.85rem; font-weight: 600; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
+  th {{ text-align: left; padding: 8px 12px; background: #f5f5f5; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+  td {{ padding: 8px 12px; border-top: 1px solid #e5e5e5; font-size: 0.9rem; vertical-align: top; }}
+  code {{ background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 0.85rem; }}
+</style>
+</head>
+<body>
+<h1>Oris Experience Repository</h1>
+<p class="meta">Version <strong>{version}</strong> &nbsp;|&nbsp; Status <span class="status">OK</span></p>
+<p>Gene and capsule sharing hub for the Oris Evolution Network. Nodes publish promoted genes here; other nodes fetch and replay them to accelerate local evolution.</p>
+<h2>API Endpoints</h2>
+<table>
+<thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>GET</code></td><td><code>/experience</code></td><td>None</td><td>Fetch genes matching signals (<code>?q=&amp;min_confidence=&amp;limit=</code>)</td></tr>
+<tr><td><code>POST</code></td><td><code>/experience</code></td><td>X-Api-Key + Ed25519</td><td>Share a signed gene envelope</td></tr>
+<tr><td><code>GET</code></td><td><code>/keys</code></td><td>X-Api-Key</td><td>List API keys</td></tr>
+<tr><td><code>POST</code></td><td><code>/keys</code></td><td>X-Api-Key</td><td>Create a new API key</td></tr>
+<tr><td><code>DELETE</code></td><td><code>/keys/:id</code></td><td>X-Api-Key</td><td>Revoke an API key</td></tr>
+<tr><td><code>POST</code></td><td><code>/keys/:id/rotate</code></td><td>X-Api-Key</td><td>Rotate an API key</td></tr>
+<tr><td><code>GET</code></td><td><code>/public-keys</code></td><td>X-Api-Key</td><td>List registered Ed25519 public keys</td></tr>
+<tr><td><code>POST</code></td><td><code>/public-keys</code></td><td>X-Api-Key</td><td>Register an Ed25519 public key</td></tr>
+<tr><td><code>DELETE</code></td><td><code>/public-keys/:id</code></td><td>X-Api-Key</td><td>Revoke a public key</td></tr>
+<tr><td><code>GET</code></td><td><code>/health</code></td><td>None</td><td>Health check — returns <code>{{"status":"ok"}}</code></td></tr>
+</tbody>
+</table>
+</body>
+</html>"#
+    );
+    Html(html)
+}
+
+// ============================================================================
 // Health Check
 // ============================================================================
 
@@ -483,8 +561,26 @@ mod tests {
         }
     }
 
+    /// Returns a state with a pre-seeded API key and the raw key string.
+    fn create_test_state_with_key() -> (AppState, String) {
+        let state = create_test_state();
+        let (raw_key, _) = state
+            .key_store
+            .try_lock()
+            .expect("key_store lock")
+            .create_key("test-admin", None, None)
+            .expect("seed test key");
+        (state, raw_key)
+    }
+
     fn create_test_headers() -> HeaderMap {
         HeaderMap::new()
+    }
+
+    fn create_authed_headers(api_key: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Api-Key", api_key.parse().expect("valid api key header"));
+        headers
     }
 
     #[tokio::test]
@@ -511,9 +607,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_homepage_contains_version_and_status() {
+        let Html(body) = homepage().await;
+        assert!(body.contains("Oris Experience Repository"));
+        assert!(body.contains(env!("CARGO_PKG_VERSION")));
+        assert!(body.contains("OK"));
+        assert!(body.contains("/experience"));
+        assert!(body.contains("/health"));
+    }
+
+    #[tokio::test]
     async fn test_create_and_list_key() {
-        let state = create_test_state();
-        let headers = create_test_headers();
+        let (state, admin_key) = create_test_state_with_key();
+        let headers = create_authed_headers(&admin_key);
 
         // Create a key
         let create_request = CreateKeyRequest {
@@ -529,18 +635,18 @@ mod tests {
         assert_eq!(create_response.agent_id, "agent-123");
         assert!(create_response.api_key.starts_with("sk_live_"));
 
-        // List keys
+        // List keys — expect 2: the seeded admin key + the one we just created
         let list_response = list_keys(State(state), headers).await.unwrap();
-        assert_eq!(list_response.keys.len(), 1);
-        assert_eq!(list_response.keys[0].agent_id, "agent-123");
+        assert_eq!(list_response.keys.len(), 2);
+        assert!(list_response.keys.iter().any(|k| k.agent_id == "agent-123"));
     }
 
     #[tokio::test]
     async fn test_revoke_key() {
-        let state = create_test_state();
-        let headers = create_test_headers();
+        let (state, admin_key) = create_test_state_with_key();
+        let headers = create_authed_headers(&admin_key);
 
-        // Create a key
+        // Create a key to later revoke
         let create_request = CreateKeyRequest {
             agent_id: "agent-123".to_string(),
             ttl_days: None,

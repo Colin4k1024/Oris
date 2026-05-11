@@ -4,10 +4,12 @@
 
 use std::sync::Arc;
 
-use oris_evokernel::adapters::{LocalSandboxAdapter, RuntimeSignalExtractorAdapter, SqliteGeneStorePersistAdapter};
+use oris_evokernel::adapters::{
+    LocalSandboxAdapter, RuntimeSignalExtractorAdapter, SqliteGeneStorePersistAdapter,
+};
 use oris_evolution::{
-    EvolutionPipeline, EvolutionPipelineConfig, GeneCandidate, PipelineContext, Selector, SelectorInput,
-    SignalExtractorInput, StandardEvolutionPipeline,
+    EvolutionPipeline, EvolutionPipelineConfig, GeneCandidate, PipelineContext, Selector,
+    SelectorInput, SignalExtractorInput, StandardEvolutionPipeline,
 };
 use uuid::Uuid;
 
@@ -43,8 +45,9 @@ impl PipelineDriver {
     /// Create a new pipeline driver
     pub async fn new(store_path: &str) -> Result<Self, Error> {
         // Build the evolution pipeline
-        let extractor = Arc::new(RuntimeSignalExtractorAdapter::new()
-            .map_err(|e| Error::Pipeline(e.to_string()))?);
+        let extractor = Arc::new(
+            RuntimeSignalExtractorAdapter::new().map_err(|e| Error::Pipeline(e.to_string()))?,
+        );
 
         let sandbox = Arc::new(LocalSandboxAdapter::new(
             format!("evo-{}", Uuid::new_v4()),
@@ -54,7 +57,7 @@ impl PipelineDriver {
 
         let gene_store = Arc::new(
             SqliteGeneStorePersistAdapter::open(store_path)
-                .map_err(|e| Error::Database(e.to_string()))?
+                .map_err(|e| Error::Database(e.to_string()))?,
         );
 
         let config = EvolutionPipelineConfig::default();
@@ -73,7 +76,10 @@ impl PipelineDriver {
     }
 
     /// Process a signal and return evolution result
-    pub async fn evolve(&self, signal: oris_evo_ipc_protocol::RuntimeSignal) -> Result<EvolutionResult, Error> {
+    pub async fn evolve(
+        &self,
+        signal: oris_evo_ipc_protocol::RuntimeSignal,
+    ) -> Result<EvolutionResult, Error> {
         // Convert IPC signal to extractor input
         let extractor_input = SignalExtractorInput {
             compiler_output: Some(signal.content.clone()),
@@ -89,7 +95,9 @@ impl PipelineDriver {
         };
 
         // Execute the pipeline
-        let pipeline_result = self.pipeline.execute(ctx)
+        let pipeline_result = self
+            .pipeline
+            .execute(ctx)
             .map_err(|e| Error::Pipeline(e.to_string()))?;
 
         if !pipeline_result.success {
@@ -98,7 +106,9 @@ impl PipelineDriver {
                 confidence: 0.0,
                 action: EvolutionAction::Reject,
                 revert_triggered: false,
-                evaluation_summary: pipeline_result.error.unwrap_or_else(|| "Pipeline failed".to_string()),
+                evaluation_summary: pipeline_result
+                    .error
+                    .unwrap_or_else(|| "Pipeline failed".to_string()),
             });
         }
 
@@ -205,7 +215,11 @@ impl PipelineDriver {
     }
 
     /// List all genes
-    pub async fn list_genes(&self, limit: usize, offset: usize) -> Result<(Vec<Gene>, usize), Error> {
+    pub async fn list_genes(
+        &self,
+        limit: usize,
+        offset: usize,
+    ) -> Result<(Vec<Gene>, usize), Error> {
         let _ = limit;
         let _ = offset;
         Ok((vec![], 0))
@@ -222,7 +236,7 @@ impl PipelineDriver {
 
 /// Signature verification utilities
 pub mod signature {
-    use oris_evolution_network::{verify_envelope, NodeKeypair, EvolutionEnvelope};
+    use oris_evolution_network::{verify_envelope, EvolutionEnvelope, NodeKeypair};
 
     /// Verify a gene's Ed25519 signature
     pub fn verify_gene_signature(
@@ -241,8 +255,7 @@ pub mod signature {
 
     /// Get the default keypair path
     fn get_key_path() -> std::path::PathBuf {
-        let home = std::env::var_os("HOME")
-            .expect("HOME environment variable not set");
+        let home = std::env::var_os("HOME").expect("HOME environment variable not set");
         std::path::PathBuf::from(home)
             .join(".oris")
             .join("node.key")
@@ -258,7 +271,9 @@ pub mod signature {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 SignatureError::KeyLoadFailed(e) => write!(f, "Failed to load keypair: {}", e),
-                SignatureError::VerificationFailed(e) => write!(f, "Signature verification failed: {}", e),
+                SignatureError::VerificationFailed(e) => {
+                    write!(f, "Signature verification failed: {}", e)
+                }
             }
         }
     }

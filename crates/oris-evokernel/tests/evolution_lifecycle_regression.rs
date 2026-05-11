@@ -3345,8 +3345,8 @@ async fn failed_replay_stops_immediate_reuse_without_revocation() {
     )));
 }
 
-#[test]
-fn evomap_snapshot_can_be_loaded_and_mapped() {
+#[tokio::test]
+async fn evomap_snapshot_can_be_loaded_and_mapped() {
     let _audit = TestAuditGuard::new("evomap_snapshot_can_be_loaded_and_mapped");
     let store_root = unique_path("evomap-snapshot-mapped-store");
     let store = Arc::new(JsonlEvolutionStore::new(&store_root));
@@ -3354,6 +3354,7 @@ fn evomap_snapshot_can_be_loaded_and_mapped() {
 
     let import = node
         .ensure_builtin_experience_assets("runtime-bootstrap")
+        .await
         .unwrap();
     assert!(!import.imported_asset_ids.is_empty());
 
@@ -3377,14 +3378,15 @@ fn evomap_snapshot_can_be_loaded_and_mapped() {
     assert!(evomap_capsules > 0);
 }
 
-#[test]
-fn ensure_builtin_assets_imports_genes_and_capsules() {
+#[tokio::test]
+async fn ensure_builtin_assets_imports_genes_and_capsules() {
     let _audit = TestAuditGuard::new("ensure_builtin_assets_imports_genes_and_capsules");
     let store_root = unique_path("evomap-imports-store");
     let store = Arc::new(JsonlEvolutionStore::new(&store_root));
     let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
 
     node.ensure_builtin_experience_assets("runtime-bootstrap")
+        .await
         .unwrap();
     let (_, projection) = EvoEvolutionStore::scan_projection(store.as_ref()).unwrap();
 
@@ -3410,8 +3412,8 @@ fn ensure_builtin_assets_imports_genes_and_capsules() {
     assert!(promoted_capsules > 0);
 }
 
-#[test]
-fn ensure_builtin_assets_is_idempotent_with_snapshot() {
+#[tokio::test]
+async fn ensure_builtin_assets_is_idempotent_with_snapshot() {
     let _audit = TestAuditGuard::new("ensure_builtin_assets_is_idempotent_with_snapshot");
     let store_root = unique_path("evomap-idempotent-store");
     let store = Arc::new(JsonlEvolutionStore::new(&store_root));
@@ -3419,23 +3421,26 @@ fn ensure_builtin_assets_is_idempotent_with_snapshot() {
 
     let first = node
         .ensure_builtin_experience_assets("runtime-bootstrap")
+        .await
         .unwrap();
     assert!(!first.imported_asset_ids.is_empty());
 
     let second = node
         .ensure_builtin_experience_assets("runtime-bootstrap")
+        .await
         .unwrap();
     assert!(second.imported_asset_ids.is_empty());
 }
 
-#[test]
-fn builtin_evomap_assets_are_fetchable() {
+#[tokio::test]
+async fn builtin_evomap_assets_are_fetchable() {
     let _audit = TestAuditGuard::new("builtin_evomap_assets_are_fetchable");
     let store_root = unique_path("evomap-fetch-store");
     let store = Arc::new(JsonlEvolutionStore::new(&store_root));
     let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
 
     node.ensure_builtin_experience_assets("runtime-bootstrap")
+        .await
         .unwrap();
 
     let fetch = node
@@ -3469,14 +3474,15 @@ fn builtin_evomap_assets_are_fetchable() {
     assert!(has_capsule);
 }
 
-#[test]
-fn builtin_evomap_replay_path_has_declared_mutation() {
+#[tokio::test]
+async fn builtin_evomap_replay_path_has_declared_mutation() {
     let _audit = TestAuditGuard::new("builtin_evomap_replay_path_has_declared_mutation");
     let store_root = unique_path("evomap-mutation-store");
     let store = Arc::new(JsonlEvolutionStore::new(&store_root));
     let node = oris_evokernel::EvolutionNetworkNode::new(store.clone());
 
     node.ensure_builtin_experience_assets("runtime-bootstrap")
+        .await
         .unwrap();
 
     let events = store.scan(1).unwrap();

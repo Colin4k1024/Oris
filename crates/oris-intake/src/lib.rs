@@ -35,12 +35,10 @@ pub mod server;
 mod signal;
 mod source;
 
-pub use ci_parser::{
-    parse_cargo_test_output, CiFailure, CiFailureKind, CiIntakeSource, CiParser,
-};
 pub use admission::{
     AdmissionConfig, AdmissionDecision, AdmissionGate, AdmissionInput, RejectionFeedback,
 };
+pub use ci_parser::{parse_cargo_test_output, CiFailure, CiFailureKind, CiIntakeSource, CiParser};
 pub use continuous::*;
 pub use evidence::{
     is_bundle_deliverable, validate_bundle, BundleValidationResult, EvidenceBundle,

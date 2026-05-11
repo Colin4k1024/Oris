@@ -507,7 +507,7 @@ fn build_gate_matrix(
     producer_quality_passed && consumer_import_success && replay_hit && consumer_quality_passed
 }
 
-fn solidify_if_gate_passed(
+async fn solidify_if_gate_passed(
     latest_consumer_node: &EvolutionNetworkNode,
     gate_all_passed: bool,
     run_id: &str,
@@ -538,6 +538,7 @@ fn solidify_if_gate_passed(
             ],
             vec!["travel.demo.four-gate".to_string()],
         )
+        .await
         .unwrap();
     Some(reported_gene_id)
 }
@@ -1693,8 +1694,8 @@ async fn latest_store_upgrade_migrates_history_and_is_idempotent() {
     );
 }
 
-#[test]
-fn four_gate_solidification_only_runs_when_all_conditions_pass() {
+#[tokio::test]
+async fn four_gate_solidification_only_runs_when_all_conditions_pass() {
     let audit_log =
         create_audit_log_path("four_gate_solidification_only_runs_when_all_conditions_pass");
     let latest_consumer_store = Arc::new(JsonlEvolutionStore::new(unique_path("latest-consumer")));
@@ -1710,7 +1711,8 @@ fn four_gate_solidification_only_runs_when_all_conditions_pass() {
         "run-failed",
         "capsule-failed",
         "gene-failed",
-    );
+    )
+    .await;
     assert!(failed_gene.is_none());
     let after_failed = count_reported_promoted_genes(&latest_consumer_store);
     assert_eq!(before_failed, after_failed);
@@ -1731,7 +1733,8 @@ fn four_gate_solidification_only_runs_when_all_conditions_pass() {
         "run-passed",
         "capsule-passed",
         "gene-passed",
-    );
+    )
+    .await;
     assert!(passed_gene.is_some());
     let after_passed = count_reported_promoted_genes(&latest_consumer_store);
     assert_eq!(after_passed, before_passed + 1);

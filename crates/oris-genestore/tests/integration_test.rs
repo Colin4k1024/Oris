@@ -21,6 +21,7 @@ fn make_gene_with_all_fields(id: Uuid) -> Gene {
         created_at: Utc::now(),
         last_used_at: Some(Utc::now()),
         last_boosted_at: Some(Utc::now()),
+        contributor_id: None,
     }
 }
 
@@ -89,6 +90,7 @@ async fn capsule_full_field_roundtrip() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     store.upsert_gene(&gene).await.unwrap();
 
@@ -135,6 +137,7 @@ async fn capsule_upsert_idempotent() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     store.upsert_gene(&gene).await.unwrap();
 
@@ -200,6 +203,7 @@ async fn capsules_for_gene_ordered_by_confidence() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     store.upsert_gene(&gene).await.unwrap();
 
@@ -273,6 +277,7 @@ async fn delete_gene_cascades_capsules() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     store.upsert_gene(&gene).await.unwrap();
 
@@ -334,6 +339,7 @@ async fn search_genes_multi_tag_intersection() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     let gene_rust_async = Gene {
         id: Uuid::new_v4(),
@@ -350,6 +356,7 @@ async fn search_genes_multi_tag_intersection() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     let gene_python = Gene {
         id: Uuid::new_v4(),
@@ -366,6 +373,7 @@ async fn search_genes_multi_tag_intersection() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
 
     store.upsert_gene(&gene_rust_memory).await.unwrap();
@@ -412,6 +420,7 @@ async fn decay_all_affects_capsules() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     store.upsert_gene(&gene).await.unwrap();
 
@@ -462,6 +471,7 @@ async fn record_capsule_outcome_failure_decreases_confidence() {
         created_at: Utc::now(),
         last_used_at: None,
         last_boosted_at: None,
+        contributor_id: None,
     };
     store.upsert_gene(&gene).await.unwrap();
 
@@ -497,4 +507,91 @@ async fn record_capsule_outcome_failure_decreases_confidence() {
         fetched.confidence < capsule.confidence,
         "confidence should decrease after failed outcome"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// R5: contributor_id round-trip tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn contributor_id_some_roundtrip() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let id = Uuid::new_v4();
+    let gene = Gene {
+        id,
+        name: "contrib-gene".into(),
+        description: "gene with contributor".into(),
+        tags: vec!["rust".into()],
+        template: "fix: {desc}".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.80,
+        use_count: 0,
+        success_count: 0,
+        quality_score: 0.0,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: Some("agent-test-xyz".into()),
+    };
+
+    store.upsert_gene(&gene).await.unwrap();
+
+    let fetched = store.get_gene(id).await.unwrap().expect("gene must exist");
+    assert_eq!(fetched.contributor_id, Some("agent-test-xyz".into()));
+}
+
+#[tokio::test]
+async fn contributor_id_none_roundtrip() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let gene = make_gene_with_all_fields(Uuid::new_v4());
+    store.upsert_gene(&gene).await.unwrap();
+
+    let fetched = store
+        .get_gene(gene.id)
+        .await
+        .unwrap()
+        .expect("gene must exist");
+    assert_eq!(fetched.contributor_id, None);
+}
+
+#[tokio::test]
+async fn search_genes_includes_contributor_id() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let gene = Gene {
+        id: Uuid::new_v4(),
+        name: "tagged-contrib".into(),
+        description: "searchable".into(),
+        tags: vec!["memory".into(), "rust".into()],
+        template: "fix".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.90,
+        use_count: 0,
+        success_count: 0,
+        quality_score: 0.0,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: Some("agent-abc".into()),
+    };
+
+    store.upsert_gene(&gene).await.unwrap();
+
+    let query = GeneQuery {
+        required_tags: vec!["memory".into()],
+        problem_description: "memory issue".into(),
+        min_confidence: 0.5,
+        limit: 5,
+    };
+    let results = store.search_genes(&query).await.unwrap();
+    assert!(
+        !results.is_empty(),
+        "search should return at least one result"
+    );
+    let found = results
+        .iter()
+        .find(|m| m.gene.id == gene.id)
+        .expect("gene should appear in results");
+    assert_eq!(found.gene.contributor_id, Some("agent-abc".into()));
 }

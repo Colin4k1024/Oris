@@ -6,8 +6,8 @@
 #[cfg(feature = "execution-server")]
 mod smoke {
     use oris_execution_server::{
-        ApiMeta, ApiRole, RunJobRequest, WorkerPollRequest,
-        generate_runtime_api_contract, RUNTIME_API_CONTRACT_DOC_PATH,
+        generate_runtime_api_contract, ApiMeta, ApiRole, RunJobRequest, WorkerPollRequest,
+        RUNTIME_API_CONTRACT_DOC_PATH,
     };
 
     // -------------------------------------------------------------------------
@@ -59,8 +59,8 @@ mod smoke {
     #[test]
     fn run_job_request_deserializes_from_minimal_json() {
         let json = r#"{"thread_id": "t-123"}"#;
-        let req: RunJobRequest = serde_json::from_str(json)
-            .expect("RunJobRequest should deserialize from minimal JSON");
+        let req: RunJobRequest =
+            serde_json::from_str(json).expect("RunJobRequest should deserialize from minimal JSON");
         assert_eq!(req.thread_id, "t-123");
         assert!(req.input.is_none());
         assert!(req.idempotency_key.is_none());
@@ -72,8 +72,8 @@ mod smoke {
     #[test]
     fn worker_poll_request_deserializes_from_json() {
         let json = r#"{"worker_id": "w-abc", "limit": 5}"#;
-        let req: WorkerPollRequest = serde_json::from_str(json)
-            .expect("WorkerPollRequest should deserialize from JSON");
+        let req: WorkerPollRequest =
+            serde_json::from_str(json).expect("WorkerPollRequest should deserialize from JSON");
         assert_eq!(req.worker_id, "w-abc");
         assert_eq!(req.limit, Some(5));
     }
