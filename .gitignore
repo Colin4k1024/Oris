@@ -15,3 +15,4 @@ docs/evokernel/demo_runs/
 docs/evokernel/latest-store/
 docs/evokernel/official_reuse_runs/
 .host-mode-logs/
+_site/

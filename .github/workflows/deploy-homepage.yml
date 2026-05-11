@@ -1,13 +1,15 @@
-name: Deploy Homepage
+name: Deploy Docs Site
 
 on:
   push:
     branches:
       - main
     paths:
+      - 'docs/**'
+      - 'README.md'
       - 'crates/oris-experience-repo/Cargo.toml'
-      - 'crates/oris-experience-repo/src/server/handlers.rs'
       - '.github/workflows/deploy-homepage.yml'
+      - '.github/scripts/gen_docs_site.py'
   workflow_dispatch:
 
 permissions:
@@ -36,59 +38,20 @@ jobs:
           VERSION=$(grep '^version' crates/oris-experience-repo/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Generate homepage HTML
+      - name: Collect docs
         run: |
-          mkdir -p _site
-          VERSION="${{ steps.version.outputs.version }}"
-          cat > _site/index.html <<HTML
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>Oris Experience Repository</title>
-          <style>
-            body { font-family: system-ui, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #1a1a1a; }
-            h1 { font-size: 1.6rem; margin-bottom: 4px; }
-            .meta { color: #666; font-size: 0.9rem; margin-bottom: 24px; }
-            .status { display: inline-block; background: #d4edda; color: #155724; padding: 2px 10px; border-radius: 12px; font-size: 0.85rem; font-weight: 600; }
-            table { width: 100%; border-collapse: collapse; margin-top: 16px; }
-            th { text-align: left; padding: 8px 12px; background: #f5f5f5; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
-            td { padding: 8px 12px; border-top: 1px solid #e5e5e5; font-size: 0.9rem; vertical-align: top; }
-            code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 0.85rem; }
-            .links { margin-top: 32px; display: flex; gap: 16px; }
-            .links a { color: #0969da; text-decoration: none; font-size: 0.9rem; }
-            .links a:hover { text-decoration: underline; }
-          </style>
-          </head>
-          <body>
-          <h1>Oris Experience Repository</h1>
-          <p class="meta">Version <strong>${VERSION}</strong> &nbsp;|&nbsp; Status <span class="status">OK</span></p>
-          <p>Gene and capsule sharing hub for the Oris Evolution Network. Nodes publish promoted genes here; other nodes fetch and replay them to accelerate local evolution.</p>
-          <h2>API Endpoints</h2>
-          <table>
-          <thead><tr><th>Method</th><th>Path</th><th>Auth</th><th>Description</th></tr></thead>
-          <tbody>
-          <tr><td><code>GET</code></td><td><code>/experience</code></td><td>None</td><td>Fetch genes matching signals (<code>?q=&amp;min_confidence=&amp;limit=</code>)</td></tr>
-          <tr><td><code>POST</code></td><td><code>/experience</code></td><td>X-Api-Key + Ed25519</td><td>Share a signed gene envelope</td></tr>
-          <tr><td><code>GET</code></td><td><code>/keys</code></td><td>X-Api-Key</td><td>List API keys</td></tr>
-          <tr><td><code>POST</code></td><td><code>/keys</code></td><td>X-Api-Key</td><td>Create a new API key</td></tr>
-          <tr><td><code>DELETE</code></td><td><code>/keys/:id</code></td><td>X-Api-Key</td><td>Revoke an API key</td></tr>
-          <tr><td><code>POST</code></td><td><code>/keys/:id/rotate</code></td><td>X-Api-Key</td><td>Rotate an API key</td></tr>
-          <tr><td><code>GET</code></td><td><code>/public-keys</code></td><td>X-Api-Key</td><td>List registered Ed25519 public keys</td></tr>
-          <tr><td><code>POST</code></td><td><code>/public-keys</code></td><td>X-Api-Key</td><td>Register an Ed25519 public key</td></tr>
-          <tr><td><code>DELETE</code></td><td><code>/public-keys/:id</code></td><td>X-Api-Key</td><td>Revoke a public key</td></tr>
-          <tr><td><code>GET</code></td><td><code>/health</code></td><td>None</td><td>Health check — returns <code>{"status":"ok"}</code></td></tr>
-          </tbody>
-          </table>
-          <div class="links">
-            <a href="https://github.com/Colin4k1024/Oris">GitHub Repository</a>
-            <a href="https://crates.io/crates/oris-experience-repo">crates.io</a>
-            <a href="https://docs.rs/oris-experience-repo">docs.rs</a>
-          </div>
-          </body>
-          </html>
-          HTML
+          mkdir -p _site/docs
+          [ -f README.md ] && cp README.md _site/docs/_README.md
+          find docs -name "*.md" | while IFS= read -r f; do
+            rel="${f#docs/}"
+            mkdir -p "_site/docs/$(dirname "$rel")"
+            cp "$f" "_site/docs/$rel"
+          done
+
+      - name: Generate documentation site
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 .github/scripts/gen_docs_site.py
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
