@@ -38,16 +38,6 @@ jobs:
           VERSION=$(grep '^version' crates/oris-experience-repo/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Collect docs
-        run: |
-          mkdir -p _site/docs
-          [ -f README.md ] && cp README.md _site/docs/_README.md
-          find docs -name "*.md" | while IFS= read -r f; do
-            rel="${f#docs/}"
-            mkdir -p "_site/docs/$(dirname "$rel")"
-            cp "$f" "_site/docs/$rel"
-          done
-
       - name: Generate documentation site
         env:
           VERSION: ${{ steps.version.outputs.version }}

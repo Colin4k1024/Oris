@@ -1,342 +1,436 @@
 #!/usr/bin/env python3
-"""Generate _site/index.html — a single-page documentation portal for Oris."""
+"""Generate _site/index.html — user-facing project homepage for Oris."""
 import os
-import re
-import html as html_mod
 
-DOCS_DIR = "_site/docs"
 VERSION = os.environ.get("VERSION", "?")
 
-
-# ── helpers ────────────────────────────────────────────────────────────────
-
-
-def h1_from_file(path):
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if s.startswith("# "):
-                    return s[2:].strip()
-    except Exception:
-        pass
-    return None
-
-
-def name_from_path(rel_path):
-    basename = os.path.basename(rel_path)
-    name = basename.replace(".md", "")
-    # strip date prefix like 2026-03-05-
-    name = re.sub(r"^\d{4}-\d{2}-\d{2}-", "", name)
-    name = name.replace("-", " ").replace("_", " ")
-    LOWER = {"a", "an", "the", "and", "or", "in", "of", "to", "for", "with", "on", "at", "from", "by", "as"}
-    words = name.split()
-    return " ".join(w if (i > 0 and w.lower() in LOWER) else w.capitalize() for i, w in enumerate(words))
-
-
-def best_name(rel_path):
-    full = os.path.join(DOCS_DIR, rel_path)
-    return h1_from_file(full) or name_from_path(rel_path)
-
-
-# ── nav collectors ─────────────────────────────────────────────────────────
-
-
-def collect_dir(subdir):
-    base = os.path.join(DOCS_DIR, subdir)
-    if not os.path.isdir(base):
-        return []
-    files = [os.path.join(subdir, f) for f in os.listdir(base) if f.endswith(".md")]
-    files.sort(key=lambda p: os.path.basename(p).lower())
-    return files
-
-
-def collect_dir_recursive(subdir):
-    base = os.path.join(DOCS_DIR, subdir)
-    if not os.path.isdir(base):
-        return []
-    result = []
-    # loose files at top level
-    loose = [
-        os.path.join(subdir, f)
-        for f in sorted(os.listdir(base))
-        if f.endswith(".md") and os.path.isfile(os.path.join(base, f))
-    ]
-    result.extend(loose)
-    # subdirectories as sub-groups
-    for d in sorted(os.listdir(base)):
-        full_sub = os.path.join(base, d)
-        if os.path.isdir(full_sub):
-            sub_files = [
-                os.path.join(subdir, d, f)
-                for f in sorted(os.listdir(full_sub))
-                if f.endswith(".md")
-            ]
-            if sub_files:
-                label = re.sub(r"^\d{4}-\d{2}-\d{2}-?", "", d).replace("-", " ").capitalize() or d
-                result.append({"label": label, "items": sub_files})
-    return result
-
-
-ROOT_ORDER = [
-    "_README.md",
-    "ARCHITECTURE.md",
-    "ORIS_2.0_STRATEGY.md",
-    "PROJECT_AUDIT_2026_Q1.md",
-    "oris-v1-os-architecture.md",
-    "open-source-onboarding-zh.md",
-    "evolution.md",
-    "evolution-boundary.md",
-    "durable-execution.md",
-    "evokernel-v0.1.md",
-    "evolution-network-protocol.md",
-    "interrupt-resume-invariants.md",
-    "replay-lifecycle-invariants.md",
-    "kernel-api.md",
-    "plugin-authoring.md",
-    "mcp-bootstrap.md",
-    "rust-ecosystem-integration.md",
-    "production-operations-guide.md",
-    "incident-response-runbook.md",
-    "runtime-schema-migrations.md",
-    "postgres-backup-restore-runbook.md",
-    "runtime-benchmark-policy.md",
-    "scheduler-stress-baseline.md",
-    "supply-chain-policy.md",
-    "v100-operator-quickstart.md",
-    "v070-milestone-proof-artifacts.md",
-    "v100-release-proof-artifacts.md",
-    "v100-bounded-autonomous-intake-baseline.md",
-    "v100-confidence-lifecycle-baseline.md",
-    "v100-governed-evolution-baseline.md",
-    "v100-proposal-to-pr-baseline.md",
-    "v100-reliability-gate-baseline.md",
-    "v100-runtime-hardening-baseline.md",
-    "evomap-vs-oris-comparison.md",
-    "evomap-gap-unified-alignment.md",
-    "evomap-test-cases.md",
-    "evomap-semantic-alignment-issue-index-2026-03-09.md",
-]
-
-
-def collect_root():
-    existing = set(os.listdir(DOCS_DIR))
-    result = []
-    seen = set()
-    for f in ROOT_ORDER:
-        if f in existing and os.path.isfile(os.path.join(DOCS_DIR, f)):
-            result.append(f)
-            seen.add(f)
-    for f in sorted(existing):
-        if f.endswith(".md") and f not in seen and os.path.isfile(os.path.join(DOCS_DIR, f)):
-            result.append(f)
-    return result
-
-
-SECTIONS = [
-    ("📖", "Overview",         collect_root()),
-    ("🧬", "EvoKernel",        collect_dir("evokernel")),
-    ("🔬", "Evolution",        collect_dir("evolution")),
-    ("📋", "Plans",            collect_dir("plans")),
-    ("🚀", "Sprint Artifacts", collect_dir_recursive("artifacts")),
-    ("💾", "Memory",           collect_dir_recursive("memory")),
-    ("📊", "Observability",    collect_dir("observability")),
-]
-
-
-# ── render nav HTML ────────────────────────────────────────────────────────
-
-
-def render_items(items, depth=0):
-    out = []
-    for item in items:
-        if isinstance(item, dict):
-            label = html_mod.escape(item["label"])
-            out.append(f'<div class="nav-sub-label">{label}</div>')
-            out.extend(render_items(item["items"], depth + 1))
-        else:
-            name = html_mod.escape(best_name(item))
-            epath = html_mod.escape(item)
-            jpath = item.replace("'", "\\'")
-            cls = ' class="indent"' if depth > 0 else ""
-            out.append(
-                f'<a{cls} href="#" data-path="{epath}" '
-                f"onclick=\"loadDoc('{jpath}');return false;\">{name}</a>"
-            )
-    return out
-
-
-nav_parts = []
-for icon, label, items in SECTIONS:
-    if not items:
-        continue
-    nav_parts.append(f'<div class="nav-section">{icon} {html_mod.escape(label)}</div>')
-    nav_parts.extend(render_items(items))
-
-NAV_HTML = "\n".join(nav_parts)
-
-# first doc to pre-load
-FIRST_DOC = "_README.md" if os.path.isfile(os.path.join(DOCS_DIR, "_README.md")) else "ARCHITECTURE.md"
-
-# ── HTML template ──────────────────────────────────────────────────────────
-
-PAGE = (
-    """<!DOCTYPE html>
+PAGE = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Oris — Documentation</title>
+<title>Oris — AI Self-Evolution Framework</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
+<script>document.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
 <style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;font-family:system-ui,-apple-system,sans-serif;font-size:15px;color:#1a1a1a;background:#fff}
-#layout{display:flex;height:100vh;overflow:hidden}
-/* sidebar */
-#sidebar{width:270px;min-width:270px;border-right:1px solid #e5e7eb;display:flex;flex-direction:column;background:#fafafa}
-#sidebar-header{padding:16px 16px 12px;border-bottom:1px solid #e5e7eb}
-#sidebar-header h1{font-size:1rem;font-weight:700;letter-spacing:-.01em}
-#sidebar-header .meta{font-size:.75rem;color:#6b7280;margin-top:2px}
-#sidebar-search{padding:8px 12px;border-bottom:1px solid #e5e7eb}
-#sidebar-search input{width:100%;padding:5px 8px;font-size:.8rem;border:1px solid #d1d5db;border-radius:5px;outline:none;background:#fff}
-#sidebar-search input:focus{border-color:#6366f1}
-#nav{flex:1;overflow-y:auto;padding:8px 0 24px}
-.nav-section{padding:10px 16px 3px;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#9ca3af}
-#nav a{display:block;padding:4px 16px;font-size:.83rem;color:#374151;text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-left:2px solid transparent}
-#nav a:hover{background:#f0f0f0;color:#111}
-#nav a.active{background:#ede9fe;color:#4f46e5;border-left-color:#4f46e5;font-weight:600}
-#nav a.indent{padding-left:28px;font-size:.78rem;color:#6b7280}
-#nav a.indent:hover{color:#111}
-#nav a.indent.active{color:#4f46e5}
-.nav-sub-label{padding:6px 28px 2px;font-size:.72rem;font-weight:600;color:#9ca3af;text-transform:uppercase;letter-spacing:.05em}
-/* content */
-#content-wrap{flex:1;display:flex;flex-direction:column;overflow:hidden}
-#topbar{padding:10px 24px;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:12px;background:#fff;font-size:.8rem;color:#6b7280;flex-shrink:0}
-#breadcrumb{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.badge{background:#d1fae5;color:#065f46;padding:1px 8px;border-radius:10px;font-size:.72rem;font-weight:600;flex-shrink:0}
-#content{flex:1;overflow-y:auto;padding:32px 48px 64px;max-width:960px}
-#content h1{font-size:1.6rem;font-weight:700;margin-bottom:.5rem;padding-bottom:.4rem;border-bottom:1px solid #e5e7eb}
-#content h2{font-size:1.2rem;font-weight:600;margin:1.8rem 0 .5rem;padding-bottom:.3rem;border-bottom:1px solid #f3f4f6}
-#content h3{font-size:1rem;font-weight:600;margin:1.4rem 0 .4rem}
-#content h4{font-size:.9rem;font-weight:600;margin:1.2rem 0 .3rem}
-#content p{line-height:1.7;margin:.8rem 0;color:#374151}
-#content ul,#content ol{padding-left:1.5rem;margin:.6rem 0;line-height:1.7}
-#content li{margin:.2rem 0;color:#374151}
-#content a{color:#4f46e5;text-decoration:none}
-#content a:hover{text-decoration:underline}
-#content code{background:#f3f4f6;padding:1px 5px;border-radius:4px;font-size:.85em;font-family:'SF Mono',Menlo,Monaco,Consolas,monospace}
-#content pre{background:#f6f8fa;border:1px solid #e5e7eb;border-radius:8px;padding:16px;overflow-x:auto;margin:1rem 0}
-#content pre code{background:none;padding:0;font-size:.82rem;line-height:1.6}
-#content table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.88rem}
-#content th{text-align:left;padding:8px 12px;background:#f9fafb;border:1px solid #e5e7eb;font-weight:600}
-#content td{padding:8px 12px;border:1px solid #e5e7eb;vertical-align:top;line-height:1.5}
-#content tr:nth-child(even) td{background:#fafafa}
-#content blockquote{border-left:4px solid #6366f1;background:#f5f3ff;margin:1rem 0;padding:10px 16px;border-radius:0 6px 6px 0}
-#content blockquote p{color:#4338ca;margin:0}
-#content hr{border:none;border-top:1px solid #e5e7eb;margin:1.5rem 0}
-#content img{max-width:100%;border-radius:6px}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+:root{{
+  --bg:#ffffff;--fg:#111827;--muted:#6b7280;--border:#e5e7eb;
+  --accent:#4f46e5;--accent-light:#ede9fe;--accent-dark:#3730a3;
+  --green:#065f46;--green-bg:#d1fae5;
+  --code-bg:#f6f8fa;--radius:8px;
+  --max:960px;
+}}
+html{{scroll-behavior:smooth}}
+body{{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--fg);background:var(--bg);line-height:1.6;font-size:16px}}
+
+/* NAV */
+nav{{position:sticky;top:0;z-index:100;background:rgba(255,255,255,.95);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);padding:0 24px}}
+.nav-inner{{max-width:var(--max);margin:0 auto;display:flex;align-items:center;height:52px;gap:24px}}
+.nav-logo{{font-weight:700;font-size:1.1rem;color:var(--fg);text-decoration:none;letter-spacing:-.02em}}
+.nav-logo span{{color:var(--accent)}}
+.nav-links{{display:flex;gap:20px;margin-left:auto}}
+.nav-links a{{color:var(--muted);text-decoration:none;font-size:.88rem;font-weight:500;transition:color .15s}}
+.nav-links a:hover{{color:var(--fg)}}
+
+/* HERO */
+.hero{{background:linear-gradient(135deg,#f8f9ff 0%,#ffffff 100%);border-bottom:1px solid var(--border);padding:72px 24px 80px}}
+.hero-inner{{max-width:var(--max);margin:0 auto}}
+.hero-badge{{display:inline-flex;align-items:center;gap:6px;background:var(--accent-light);color:var(--accent);font-size:.75rem;font-weight:600;padding:3px 12px;border-radius:20px;margin-bottom:20px;letter-spacing:.03em}}
+.hero h1{{font-size:clamp(2rem,5vw,3rem);font-weight:800;letter-spacing:-.04em;line-height:1.1;margin-bottom:16px}}
+.hero h1 span{{color:var(--accent)}}
+.hero-sub{{font-size:1.1rem;color:var(--muted);max-width:600px;margin-bottom:28px;line-height:1.7}}
+.hero-cta{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:32px}}
+.btn{{display:inline-flex;align-items:center;gap:6px;padding:10px 20px;border-radius:6px;font-size:.9rem;font-weight:600;text-decoration:none;transition:all .15s}}
+.btn-primary{{background:var(--accent);color:#fff}}
+.btn-primary:hover{{background:var(--accent-dark)}}
+.btn-ghost{{border:1px solid var(--border);color:var(--fg);background:#fff}}
+.btn-ghost:hover{{background:var(--code-bg)}}
+.badges{{display:flex;gap:8px;flex-wrap:wrap}}
+.badges img{{height:20px}}
+
+/* SECTIONS */
+.section{{padding:64px 24px}}
+.section:nth-child(even){{background:#fafafa}}
+.section-inner{{max-width:var(--max);margin:0 auto}}
+.section-label{{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);margin-bottom:8px}}
+.section h2{{font-size:1.75rem;font-weight:700;letter-spacing:-.03em;margin-bottom:12px}}
+.section-desc{{color:var(--muted);max-width:600px;margin-bottom:40px;line-height:1.7}}
+
+/* FEATURES grid */
+.features{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px}}
+.feature{{background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:20px;transition:box-shadow .15s}}
+.feature:hover{{box-shadow:0 4px 16px rgba(0,0,0,.06)}}
+.feature-icon{{font-size:1.5rem;margin-bottom:10px}}
+.feature h3{{font-size:.95rem;font-weight:700;margin-bottom:6px}}
+.feature p{{font-size:.85rem;color:var(--muted);line-height:1.6}}
+
+/* EVOLUTION LOOP */
+.loop-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px}}
+.loop-step{{background:#fff;border:1px solid var(--border);border-radius:var(--radius);padding:16px 20px;position:relative}}
+.loop-num{{position:absolute;top:14px;right:16px;font-size:.75rem;font-weight:700;color:var(--border)}}
+.loop-step h3{{font-size:.9rem;font-weight:700;margin-bottom:4px;display:flex;align-items:center;gap:8px}}
+.loop-step p{{font-size:.82rem;color:var(--muted);line-height:1.5}}
+.loop-arrow{{display:none}}
+
+/* QUICKSTART */
+.qs-tabs{{display:flex;gap:0;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:0}}
+.qs-tab{{padding:8px 18px;font-size:.82rem;font-weight:600;border:none;background:#fff;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent}}
+.qs-tab.active{{background:var(--accent-light);color:var(--accent);border-bottom-color:var(--accent)}}
+.qs-panel{{display:none;background:var(--code-bg);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);overflow-x:auto}}
+.qs-panel.active{{display:block}}
+.qs-panel pre{{padding:20px;margin:0}}
+.qs-panel pre code{{background:none;font-size:.84rem;line-height:1.65}}
+
+/* ARCH */
+.arch-cols{{display:grid;grid-template-columns:1fr 1fr;gap:32px}}
+@media(max-width:640px){{.arch-cols{{grid-template-columns:1fr}}}}
+.arch-diagram{{background:var(--code-bg);border:1px solid var(--border);border-radius:var(--radius);padding:20px;font-family:'SF Mono',Menlo,Monaco,Consolas,monospace;font-size:.8rem;line-height:1.8;color:var(--fg);overflow-x:auto;white-space:pre}}
+
+/* CRATES TABLE */
+table{{width:100%;border-collapse:collapse;font-size:.88rem}}
+th{{text-align:left;padding:10px 14px;background:#f9fafb;border-bottom:2px solid var(--border);font-weight:600;color:var(--fg)}}
+td{{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:top;line-height:1.5}}
+tr:last-child td{{border-bottom:none}}
+.maturity{{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.75rem;font-weight:600}}
+.m-stable{{background:#d1fae5;color:#065f46}}
+.m-exp{{background:#fef3c7;color:#92400e}}
+.m-scaffold{{background:#f3f4f6;color:#6b7280}}
+code{{background:var(--code-bg);padding:1px 5px;border-radius:4px;font-size:.83em;font-family:'SF Mono',Menlo,Monaco,Consolas,monospace}}
+
+/* FOOTER */
+footer{{background:#111827;color:#9ca3af;padding:40px 24px;font-size:.85rem}}
+.footer-inner{{max-width:var(--max);margin:0 auto;display:flex;flex-wrap:wrap;gap:32px;justify-content:space-between}}
+.footer-col h4{{color:#fff;font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px}}
+.footer-col a{{display:block;color:#9ca3af;text-decoration:none;margin-bottom:6px;transition:color .15s}}
+.footer-col a:hover{{color:#fff}}
+.footer-bottom{{max-width:var(--max);margin:28px auto 0;padding-top:20px;border-top:1px solid #374151;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}}
 </style>
 </head>
 <body>
-<div id="layout">
-  <div id="sidebar">
-    <div id="sidebar-header">
-      <h1>&#x1F4DA; Oris Docs</h1>
-      <div class="meta">"""
-    + f"v{VERSION}"
-    + """ &nbsp;&middot;&nbsp; <a href="https://github.com/Colin4k1024/Oris" target="_blank" style="color:#6366f1;text-decoration:none">GitHub &#x2197;</a></div>
-    </div>
-    <div id="sidebar-search">
-      <input id="search-input" type="text" placeholder="Filter docs&hellip;" oninput="filterNav(this.value)">
-    </div>
-    <div id="nav">
-"""
-    + NAV_HTML
-    + """
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <a class="nav-logo" href="#"><span>Oris</span></a>
+    <div class="nav-links">
+      <a href="#why">Why Oris</a>
+      <a href="#loop">How It Works</a>
+      <a href="#quickstart">Quick Start</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#crates">Crates</a>
+      <a href="https://github.com/Colin4k1024/Oris" target="_blank">GitHub</a>
+      <a href="https://docs.rs/oris-runtime" target="_blank">docs.rs</a>
     </div>
   </div>
-  <div id="content-wrap">
-    <div id="topbar">
-      <span id="breadcrumb">Select a document from the sidebar</span>
-      <span class="badge">OK</span>
-      <a href="https://crates.io/crates/oris-experience-repo" target="_blank" style="color:#6366f1;text-decoration:none;font-size:.75rem">crates.io &#x2197;</a>
-      <a href="https://docs.rs/oris-experience-repo" target="_blank" style="color:#6366f1;text-decoration:none;font-size:.75rem">docs.rs &#x2197;</a>
+</nav>
+
+<!-- HERO -->
+<div class="hero">
+  <div class="hero-inner">
+    <div class="hero-badge">&#x1F9EC; AI Self-Evolution Framework</div>
+    <h1>Software that learns<br>from <span>every execution</span></h1>
+    <p class="hero-sub">
+      Oris is an AI self-evolution framework for supervised, bounded, closed-loop software improvement.
+      Capture signals. Generate mutations. Validate. Promote. Reuse.
+    </p>
+    <div class="hero-cta">
+      <a class="btn btn-primary" href="#quickstart">&#x25B6; Get Started</a>
+      <a class="btn btn-ghost" href="https://github.com/Colin4k1024/Oris" target="_blank">&#x2B50; GitHub</a>
+      <a class="btn btn-ghost" href="https://docs.rs/oris-runtime" target="_blank">&#x1F4D6; API Docs</a>
     </div>
-    <div id="content"></div>
+    <div class="badges">
+      <a href="https://crates.io/crates/oris-runtime" target="_blank"><img src="https://img.shields.io/crates/v/oris-runtime.svg" alt="crates.io"></a>
+      <a href="https://docs.rs/oris-runtime" target="_blank"><img src="https://img.shields.io/docsrs/oris-runtime" alt="docs.rs"></a>
+      <a href="https://codecov.io/gh/Colin4k1024/Oris" target="_blank"><img src="https://codecov.io/gh/Colin4k1024/Oris/graph/badge.svg" alt="coverage"></a>
+      <img src="https://img.shields.io/badge/version-{VERSION}-6366f1" alt="version">
+    </div>
   </div>
 </div>
+
+<!-- WHY ORIS -->
+<div class="section" id="why">
+  <div class="section-inner">
+    <div class="section-label">Why Oris</div>
+    <h2>Systems that improve themselves</h2>
+    <p class="section-desc">Most systems execute tasks but never learn from them. Oris closes the loop.</p>
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">&#x1F4E1;</div>
+        <h3>Capture Real Signals</h3>
+        <p>Collect actionable signals from compiler failures, test regressions, and runtime outcomes — not synthetic benchmarks.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F9EA;</div>
+        <h3>Safe Mutation Sandbox</h3>
+        <p>Generate candidate changes from successful patterns and execute them in OS-level isolated sandboxes before any promotion.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x2705;</div>
+        <h3>Validate Before Promoting</h3>
+        <p>Two-phase quality evaluation — static analysis gates block bad mutations before the LLM critic even runs.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x267B;&#xFE0F;</div>
+        <h3>Confidence-Aware Reuse</h3>
+        <p>Proven solutions are promoted into durable genes. Future runs replay them with tracked confidence, reducing reasoning over time.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F512;</div>
+        <h3>Supervised &amp; Bounded</h3>
+        <p>Fail-closed policy enforcement. No autonomous merge or release without explicit gate passage. Auditable at every step.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F310;</div>
+        <h3>Cross-Node Sharing</h3>
+        <p>Publish and fetch genes over the Oris Evolution Network. Ed25519-verified envelopes. Rate-limited PKI key registry.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- EVOLUTION LOOP -->
+<div class="section" id="loop">
+  <div class="section-inner">
+    <div class="section-label">How It Works</div>
+    <h2>The 8-Stage Self-Evolution Loop</h2>
+    <p class="section-desc">Every improvement follows a deterministic, auditable pipeline from signal to reusable asset.</p>
+    <div class="loop-grid">
+      <div class="loop-step"><span class="loop-num">01</span><h3>&#x1F50D; Detect</h3><p>Collect actionable signals from compiler diagnostics, test failures, and runtime panics.</p></div>
+      <div class="loop-step"><span class="loop-num">02</span><h3>&#x1F3AF; Select</h3><p>Choose the best candidate gene or strategy from the pool using confidence scores.</p></div>
+      <div class="loop-step"><span class="loop-num">03</span><h3>&#x1F9EC; Mutate</h3><p>Generate candidate changes derived from prior successful patterns and gene history.</p></div>
+      <div class="loop-step"><span class="loop-num">04</span><h3>&#x1F4E6; Execute</h3><p>Run mutations inside a controlled sandbox with OS-level resource isolation.</p></div>
+      <div class="loop-step"><span class="loop-num">05</span><h3>&#x2705; Validate</h3><p>Verify correctness through static analysis gates and configurable safety policies.</p></div>
+      <div class="loop-step"><span class="loop-num">06</span><h3>&#x1F4CA; Evaluate</h3><p>Compare improvement vs regression with two-phase quality scoring (static + LLM).</p></div>
+      <div class="loop-step"><span class="loop-num">07</span><h3>&#x1F4BE; Solidify</h3><p>Promote successful mutations into durable, reusable genes in the SQLite gene pool.</p></div>
+      <div class="loop-step"><span class="loop-num">08</span><h3>&#x267B;&#xFE0F; Reuse</h3><p>Replay proven genes with confidence tracking — fewer LLM calls on each cycle.</p></div>
+    </div>
+    <div style="margin-top:24px;padding:16px 20px;background:#f5f3ff;border-left:4px solid #6366f1;border-radius:0 8px 8px 0;font-size:.88rem;color:#4338ca;max-width:640px">
+      <strong>North Star:</strong> Task → Detect → Replay if trusted → Mutate only when needed → Validate → Capture → Reuse → <em>reduce reasoning over time</em>
+    </div>
+  </div>
+</div>
+
+<!-- QUICK START -->
+<div class="section" id="quickstart">
+  <div class="section-inner">
+    <div class="section-label">Quick Start</div>
+    <h2>Up and running in minutes</h2>
+    <p class="section-desc">Add the crate, set your API key, and run the canonical evolution scenario.</p>
+
+    <div style="max-width:720px">
+      <div class="qs-tabs">
+        <button class="qs-tab active" onclick="showTab('install')">1. Install</button>
+        <button class="qs-tab" onclick="showTab('server')">2. Run Server</button>
+        <button class="qs-tab" onclick="showTab('evolve')">3. First Evolution</button>
+        <button class="qs-tab" onclick="showTab('job')">4. Submit Job</button>
+      </div>
+
+      <div id="tab-install" class="qs-panel active">
+        <pre><code class="language-toml"># Cargo.toml
+[dependencies]
+oris-runtime = {{ version = "*", features = ["full-evolution-experimental"] }}</code></pre>
+        <pre style="margin-top:0;border-top:1px solid #e5e7eb"><code class="language-bash"># Set your LLM key
+export OPENAI_API_KEY="sk-..."
+
+# Or use Anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."</code></pre>
+      </div>
+
+      <div id="tab-server" class="qs-panel">
+        <pre><code class="language-bash"># Build and start the execution server (HTTP API)
+cargo run -p oris-runtime \\
+  --example execution_server \\
+  --features "sqlite-persistence,execution-server"
+
+# Server starts at http://127.0.0.1:8080
+# Override with: export ORIS_SERVER_ADDR=0.0.0.0:8080</code></pre>
+      </div>
+
+      <div id="tab-evolve" class="qs-panel">
+        <pre><code class="language-bash"># Run the canonical evolution scenario
+cargo run -p evo_oris_repo
+
+# Or run with observable artifacts
+bash scripts/evo_first_run.sh
+
+# Expected outputs:
+#   target/evo_first_run/summary.json
+#   target/evo_first_run/run.log</code></pre>
+        <pre style="margin-top:0;border-top:1px solid #e5e7eb"><code class="language-bash"># Other example binaries
+cargo run -p evo_oris_repo --bin intake_webhook_demo
+cargo run -p evo_oris_repo --bin confidence_lifecycle_demo
+cargo run -p evo_oris_repo --bin network_exchange</code></pre>
+      </div>
+
+      <div id="tab-job" class="qs-panel">
+        <pre><code class="language-bash"># Submit a job to the execution server
+curl -X POST http://127.0.0.1:8080/jobs \\
+  -H "Content-Type: application/json" \\
+  -d '{{"graph_name":"test_graph","input":{{"task":"example"}}}}'
+
+# Monitor job status
+curl http://127.0.0.1:8080/jobs/&lt;job_id&gt;
+
+# Stream events in real-time
+curl -N http://127.0.0.1:8080/jobs/&lt;job_id&gt;/stream</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ARCHITECTURE -->
+<div class="section" id="architecture">
+  <div class="section-inner">
+    <div class="section-label">Architecture</div>
+    <h2>Clean layered design</h2>
+    <p class="section-desc">Oris is organized as a Cargo workspace of 17 library crates with a strict dependency DAG — no circular dependencies.</p>
+    <div class="arch-cols">
+      <div>
+        <h3 style="font-size:.95rem;font-weight:700;margin-bottom:12px">Dependency Layers</h3>
+        <div class="arch-diagram">Leaf (no workspace deps)
+  oris-evolution · oris-genestore
+  oris-kernel · oris-sandbox
+
+Layer 1 — builds on evolution/kernel
+  oris-evokernel   (11 deps, highest fan-in)
+  oris-governor    oris-intake
+  oris-orchestrator
+
+Layer 2 — network &amp; network-aware
+  oris-evolution-network
+  oris-experience-repo
+
+Layer 3 — runtime facade
+  oris-runtime        (re-exports evokernel)
+  oris-execution-server</div>
+      </div>
+      <div>
+        <h3 style="font-size:.95rem;font-weight:700;margin-bottom:12px">Key Abstractions</h3>
+        <div style="display:flex;flex-direction:column;gap:10px;font-size:.85rem">
+          <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>EvolutionPipeline</strong><br><span style="color:var(--muted)">8-stage detect→reuse orchestration</span></div>
+          <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>Gene &amp; Capsule</strong><br><span style="color:var(--muted)">Durable evolution assets with confidence scores</span></div>
+          <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>Kernel</strong><br><span style="color:var(--muted)">Deterministic execution: event log, replay, snapshot</span></div>
+          <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>MutationEvaluator</strong><br><span style="color:var(--muted)">Two-phase quality gate (static + LLM critic)</span></div>
+          <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>PluginRegistry</strong><br><span style="color:var(--muted)">9 categories, determinism contracts, version negotiation</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- CRATES -->
+<div class="section" id="crates">
+  <div class="section-inner">
+    <div class="section-label">Crates</div>
+    <h2>Component overview</h2>
+    <p class="section-desc">Modular crates with feature flags — use only what you need.</p>
+    <table>
+      <thead>
+        <tr><th>Crate</th><th>Purpose</th><th>Maturity</th><th>Feature Flag</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>oris-runtime</code></td><td>Main facade: agents, graphs, tools, RAG, multi-step execution</td><td><span class="maturity m-stable">stable</span></td><td>—</td></tr>
+        <tr><td><code>oris-evolution</code></td><td>Core types: Gene, Capsule, EvolutionEvent, Pipeline, Confidence</td><td><span class="maturity m-stable">stable</span></td><td><code>evolution-experimental</code></td></tr>
+        <tr><td><code>oris-evokernel</code></td><td>Self-evolving kernel orchestration (highest fan-in, 11 deps)</td><td><span class="maturity m-stable">stable</span></td><td><code>full-evolution-experimental</code></td></tr>
+        <tr><td><code>oris-kernel</code></td><td>Deterministic execution: event log, replay, snapshot, K1–K5</td><td><span class="maturity m-stable">stable</span></td><td>—</td></tr>
+        <tr><td><code>oris-sandbox</code></td><td>OS-level isolated mutation execution</td><td><span class="maturity m-stable">stable</span></td><td><code>evolution-experimental</code></td></tr>
+        <tr><td><code>oris-mutation-evaluator</code></td><td>Two-phase quality evaluator (static analysis + LLM critic)</td><td><span class="maturity m-stable">stable</span></td><td><code>evolution-experimental</code></td></tr>
+        <tr><td><code>oris-genestore</code></td><td>SQLite-based Gene and Capsule storage</td><td><span class="maturity m-stable">stable</span></td><td>—</td></tr>
+        <tr><td><code>oris-governor</code></td><td>Promotion, cooldown, and revocation policies</td><td><span class="maturity m-stable">stable</span></td><td><code>governor-experimental</code></td></tr>
+        <tr><td><code>oris-intake</code></td><td>Issue intake, deduplication, prioritization, CI failure parsing</td><td><span class="maturity m-stable">stable</span></td><td><code>intake-experimental</code></td></tr>
+        <tr><td><code>oris-evolution-network</code></td><td>OEN envelope, gossip sync, Ed25519 signing</td><td><span class="maturity m-exp">experimental</span></td><td><code>evolution-network-experimental</code></td></tr>
+        <tr><td><code>oris-experience-repo</code></td><td>HTTP API: gene/capsule sharing, Ed25519 PKI, rate limiting</td><td><span class="maturity m-stable">v{VERSION}</span></td><td>standalone</td></tr>
+        <tr><td><code>oris-orchestrator</code></td><td>Autonomous loop, GitHub delivery, release automation</td><td><span class="maturity m-exp">experimental</span></td><td><code>release-automation-experimental</code></td></tr>
+        <tr><td><code>oris-spec</code></td><td>OUSL YAML spec contracts and compilers</td><td><span class="maturity m-exp">experimental</span></td><td><code>spec-experimental</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- WHAT YOU CAN BUILD -->
+<div class="section" id="use-cases">
+  <div class="section-inner">
+    <div class="section-label">Use Cases</div>
+    <h2>What you can build</h2>
+    <p class="section-desc">Oris is a framework, not a product. You bring the domain; Oris handles the evolution infrastructure.</p>
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">&#x1F916;</div>
+        <h3>Self-Improving AI Agents</h3>
+        <p>Agents that learn from failed runs and promote successful strategies into reusable genes — without human intervention per cycle.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F527;</div>
+        <h3>Supervised Dev Loops</h3>
+        <p>Bounded, auditable repair loops for recurring issues. The governor enforces cooldowns and prevents runaway mutation.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F504;</div>
+        <h3>Replay Pipelines</h3>
+        <p>Confidence-aware replay: use a proven gene instead of re-reasoning from scratch. Confidence degrades gracefully over time.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F4E1;</div>
+        <h3>Cross-Agent Knowledge Exchange</h3>
+        <p>Publish promoted genes to the Evolution Network. Other nodes fetch and replay them to accelerate their own local evolution.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-col">
+      <h4>Oris</h4>
+      <a href="https://github.com/Colin4k1024/Oris" target="_blank">GitHub Repository</a>
+      <a href="https://crates.io/crates/oris-runtime" target="_blank">crates.io</a>
+      <a href="https://docs.rs/oris-runtime" target="_blank">docs.rs (API)</a>
+      <a href="https://codecov.io/gh/Colin4k1024/Oris" target="_blank">Code Coverage</a>
+    </div>
+    <div class="footer-col">
+      <h4>Documentation</h4>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/docs/ARCHITECTURE.md" target="_blank">Architecture</a>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/docs/kernel-api.md" target="_blank">Kernel API</a>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/docs/plugin-authoring.md" target="_blank">Plugin Authoring</a>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/docs/production-operations-guide.md" target="_blank">Operations Guide</a>
+    </div>
+    <div class="footer-col">
+      <h4>Community</h4>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/CONTRIBUTING.md" target="_blank">Contributing</a>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/CODE_OF_CONDUCT.md" target="_blank">Code of Conduct</a>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/SECURITY.md" target="_blank">Security Policy</a>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/LICENSE" target="_blank">MIT License</a>
+    </div>
+    <div class="footer-col">
+      <h4>Examples</h4>
+      <a href="https://github.com/Colin4k1024/Oris/tree/main/examples/evo_oris_repo" target="_blank">Evolution Scenario</a>
+      <a href="https://github.com/Colin4k1024/Oris/tree/main/examples/oris_starter_axum" target="_blank">Axum Starter</a>
+      <a href="https://github.com/Colin4k1024/Oris/tree/main/examples/oris_operator_cli" target="_blank">Operator CLI</a>
+      <a href="https://github.com/Colin4k1024/Oris/blob/main/docs/evokernel/examples.md" target="_blank">More Examples</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>&#169; 2026 Oris Contributors &mdash; MIT License</span>
+    <span>oris-experience-repo v{VERSION}</span>
+  </div>
+</footer>
+
 <script>
-marked.setOptions({
-  gfm: true,
-  breaks: false
-});
-const renderer = new marked.Renderer();
-const origLink = renderer.link.bind(renderer);
-renderer.link = function(href, title, text) {
-  const out = origLink(href, title, text);
-  if (href && (href.startsWith('http') || href.startsWith('//'))) {
-    return out.replace('<a ', '<a target="_blank" ');
-  }
-  return out;
-};
-marked.use({ renderer });
-
-function loadDoc(path) {
-  document.querySelectorAll('#nav a').forEach(function(a) { a.classList.remove('active'); });
-  const link = document.querySelector('#nav a[data-path="' + path + '"]');
-  if (link) { link.classList.add('active'); link.scrollIntoView({block:'nearest'}); }
-  const crumb = path.replace('_README.md','README.md').replace(/^.*\\//, '').replace('.md','');
-  document.getElementById('breadcrumb').textContent = crumb;
-  const content = document.getElementById('content');
-  content.innerHTML = '<p style="color:#9ca3af;padding:32px 0">Loading…</p>';
-  fetch('docs/' + path)
-    .then(function(r) { if (!r.ok) throw new Error(r.status); return r.text(); })
-    .then(function(md) {
-      content.innerHTML = marked.parse(md);
-      content.querySelectorAll('pre code').forEach(function(el) { hljs.highlightElement(el); });
-      content.scrollTop = 0;
-    })
-    .catch(function(e) {
-      content.innerHTML = '<p style="color:#ef4444">Failed to load (' + e.message + ')</p>';
-    });
-}
-
-function filterNav(q) {
-  const term = q.toLowerCase();
-  let lastSection = null;
-  let lastSectionVisible = false;
-  document.querySelectorAll('#nav > *').forEach(function(el) {
-    if (el.classList.contains('nav-section')) {
-      if (lastSection) lastSection.style.display = lastSectionVisible ? '' : 'none';
-      lastSection = el;
-      lastSectionVisible = false;
-    } else if (el.tagName === 'A') {
-      const show = !term || el.textContent.toLowerCase().includes(term);
-      el.style.display = show ? '' : 'none';
-      if (show) lastSectionVisible = true;
-    } else {
-      el.style.display = '';
-      lastSectionVisible = true;
-    }
-  });
-  if (lastSection) lastSection.style.display = lastSectionVisible ? '' : 'none';
-}
-"""
-    + f"loadDoc('{FIRST_DOC}');\n"
-    + """</script>
+function showTab(id) {{
+  document.querySelectorAll('.qs-tab').forEach(function(t){{ t.classList.remove('active'); }});
+  document.querySelectorAll('.qs-panel').forEach(function(p){{ p.classList.remove('active'); }});
+  event.target.classList.add('active');
+  document.getElementById('tab-' + id).classList.add('active');
+}}
+</script>
 </body>
 </html>"""
-)
 
 os.makedirs("_site", exist_ok=True)
 with open("_site/index.html", "w", encoding="utf-8") as f:
     f.write(PAGE)
 
-total = sum(
-    sum(len(i["items"]) if isinstance(i, dict) else 1 for i in items)
-    for _, _, items in SECTIONS
-    if items
-)
-print(f"Generated _site/index.html  ({len(PAGE):,} bytes,  {total} nav entries)")
+print(f"Generated _site/index.html  ({len(PAGE):,} bytes)")
