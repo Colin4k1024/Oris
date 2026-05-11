@@ -6,6 +6,8 @@ rust-version = "1.80"
 publish = ["crates-io"]
 license = "MIT"
 description = "Protocol types for the Oris Evolution Network."
+homepage = "https://github.com/Colin4k1024/Oris"
+repository = "https://github.com/Colin4k1024/Oris"
 
 [dependencies]
 async-trait = "0.1"
