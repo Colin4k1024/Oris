@@ -1,0 +1,62 @@
+[package]
+name = "oris-hub"
+version = "0.1.0"
+edition = "2021"
+description = "Oris Experience Repository Hub — registration, discovery, federated query, subscriptions"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Colin4k1024/Oris"
+keywords = ["oris", "hub", "federation", "discovery", "experience"]
+
+[dependencies]
+# HTTP server
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Async
+async-trait = "0.1"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# HTTP client (for federation scatter)
+reqwest = { version = "0.12", features = ["json"], default-features = false, optional = true }
+
+# Cryptography (Ed25519 verification)
+ed25519-dalek = "2"
+base64 = "0.22"
+
+# SQLite metadata store
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Rate limiting
+governor = "0.7"
+
+# Workspace sibling
+oris-evolution = { path = "../oris-evolution" }
+
+[features]
+default = ["federation"]
+federation = ["dep:reqwest"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+base64 = "0.22"

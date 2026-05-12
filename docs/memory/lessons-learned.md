@@ -1,5 +1,29 @@
 # Lessons Learned
 
+## 2026-05-12: experience-repo-hub
+
+### 场景
+oris-hub crate 安全加固 (B1–B5 production blockers + 代码/安全 review)
+
+### 问题
+
+#### 1. Tower middleware 层序决定 CORS 行为
+**现象**：`server.rs` 中 `CorsLayer::permissive()` 作为外层 layer 静默覆盖了 `build_router()` 内的 env-var CORS 配置，使 B5 修复完全失效
+**根因**：Tower middleware 栈先处理最外层；permissive CORS 在最外层直接放行所有请求
+**建议**：CORS 必须只配置一次、在正确位置。安全 review 时必须检查 middleware 层序，不能只看 build_router 内部
+
+#### 2. 仅阻断 IPv4 的 SSRF 检查在接受 IPv6 时不充分
+**现象**：`is_private_ip` 对 IPv6 只阻断了 `::1`，`::ffff:10.0.0.1`（IPv4-mapped）、`fc00::1`（ULA）、`fe80::1`（link-local）全部绕过
+**根因**：增量实现先做 IPv4，IPv6 覆盖不完整
+**建议**：SSRF 校验必须从第一天起覆盖 IPv6 ULA (fc00::/7)、link-local (fe80::/10) 和 IPv4-mapped (::ffff:0:0/96)
+
+#### 3. `ON CONFLICT DO UPDATE` 启用密钥替换攻击
+**现象**：`INSERT ... ON CONFLICT(node_id) DO UPDATE SET public_key = excluded.public_key` 允许攻击者通过重新注册覆盖已有节点的公钥
+**根因**：为了便利性选择 upsert 模式，未考虑身份关键字段被更新的安全影响
+**建议**：身份字段（公钥、凭据）永远不应出现在 `DO UPDATE SET` 子句中。注册端点使用前置检查 + 条件拒绝模式
+
+---
+
 ## 2026-04-14: experience-repo-phase2
 
 ### 场景

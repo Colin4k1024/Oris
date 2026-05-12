@@ -6,9 +6,9 @@
 
 | 字段 | 值 |
 |------|----|
-| 最近更新 | 2026-05-11 |
+| 最近更新 | 2026-05-12 |
 | 更新角色 | tech-lead |
-| 来源任务 | exp-repo-v040-hardening |
+| 来源任务 | experience-repo-hub (closeout) |
 
 ---
 
@@ -39,7 +39,20 @@
 
 ---
 
+## oris-hub Closeout 回写 (2026-05-12)
+
+| 优先级 | 事项 | 来源 | 触发条件 | 建议阶段 |
+|--------|------|------|----------|----------|
+| P2 | Dashboard HTML 转义（XSS 防护） | experience-repo-hub closeout | 对外暴露 dashboard 前 | 下一迭代 |
+| P2 | 显式负向测试：并发密钥轮换、重复注册竞态 | experience-repo-hub closeout | 下一测试 sprint | v0.5.0 |
+| P2 | Store 层静默错误路径添加 tracing | experience-repo-hub closeout | 高流量部署前 | v0.5.0 |
+| P3 | Token 比较升级为常量时间 | experience-repo-hub closeout | 威胁模型变更时 | 按需 |
+| P3 | Dashboard 认证层 | experience-repo-hub closeout | 非可信网络暴露时 | 按需 |
+
+---
+
 ## 下一阶段候选
 
+- **oris-hub 生产部署**：部署 + 48h 观察窗口 + 监控配置
 - **oris-experience-repo v0.4.0**：E2E 集成测试 + 发版策略文档 + patch 版本发布
 - **EvoKernel 节点身份**：引入节点级别 ID，修复 `sender_id` 语义问题

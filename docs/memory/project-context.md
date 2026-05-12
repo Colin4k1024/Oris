@@ -18,11 +18,13 @@
 - **沙箱**: oris-sandbox (OS 级隔离)
 - **网络**: oris-evolution-network (Ed25519 签名)
 - **经验仓库**: oris-experience-repo (HTTP API, PKI key service, OEN envelope)
+- **Hub**: oris-hub (axum 0.8, ed25519-dalek, governor, rusqlite)
 
 ## 当前任务
 
 | 任务 | 状态 | 目录 |
 |------|------|------|
+| **experience-repo-hub** | **closed** | **docs/artifacts/2026-05-12-experience-repo-hub/** |
 | exp-repo-evokernel-wire | follow-up-required | docs/artifacts/2026-05-11-exp-repo-evokernel-wire/ |
 | experience-repo-pki | closed | docs/artifacts/2026-04-14-experience-repo-pki/ |
 | experience-repo-phase2 | released | docs/artifacts/2026-04-14-experience-repo-phase2/ |
@@ -31,6 +33,8 @@
 | experience-repository | completed | docs/artifacts/2026-04-09-experience-repository/ |
 
 ### 任务摘要
+
+**experience-repo-hub (CLOSED)**：Hub 全能力（注册发现 + 联邦聚合查询 + 订阅推送 + Web Dashboard）+ 安全加固（Ed25519 真实验证、SSRF 防护、CORS 限制、密钥替换防护）。57 tests pass，launch acceptance: GO。
 
 **exp-repo-evokernel-wire**：R1–R8 集成胶水全部交付，579 tests 通过。PKI 网络推送路径受 3 个 P0 问题阻塞（空签名、sender_id 语义、Key 管理端点鉴权），不得对外开放，计划 v0.4.0 修复。
 
@@ -51,6 +55,7 @@
 | oris-mutation-evaluator | 0.3.0 | 两阶段评估 |
 | oris-evolution-network | 0.5.0 | OEN 网络、gossip、Ed25519 |
 | oris-experience-repo | 0.3.0 | HTTP 经验仓库 |
+| oris-hub | 0.1.0 | Experience Repository Hub (注册/发现/联邦/订阅/Dashboard) |
 
 ## 活跃风险
 
@@ -63,10 +68,12 @@
 
 ## 下一步
 
+- **oris-hub 生产部署**：部署到生产环境，执行 48h 观察窗口
 - 打开独立 issue 修复 Key 管理端点鉴权（P0，立即）
 - 规划 v0.4.0 sprint（P0 签名问题 + sender_id + 3 处晋升路径补全）
+- Hub backlog：dashboard HTML 转义、负向测试补充、store tracing
 - E2E 集成测试（P2，下一迭代有 HTTP 测试环境时）
 
 ## 最后更新
 
-2026-05-11
+2026-05-12
