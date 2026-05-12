@@ -8,6 +8,7 @@ on:
       - 'docs/**'
       - 'README.md'
       - 'crates/oris-experience-repo/Cargo.toml'
+      - 'crates/oris-hub/Cargo.toml'
       - '.github/workflows/deploy-homepage.yml'
       - '.github/scripts/gen_docs_site.py'
   workflow_dispatch:

@@ -118,6 +118,7 @@ footer{{background:#111827;color:#9ca3af;padding:40px 24px;font-size:.85rem}}
       <a href="#why">Why Oris</a>
       <a href="#loop">How It Works</a>
       <a href="#quickstart">Quick Start</a>
+      <a href="#hub">Hub</a>
       <a href="#architecture">Architecture</a>
       <a href="#crates">Crates</a>
       <a href="https://github.com/Colin4k1024/Oris" target="_blank">GitHub</a>
@@ -280,6 +281,101 @@ curl -N http://127.0.0.1:8080/jobs/&lt;job_id&gt;/stream</code></pre>
   </div>
 </div>
 
+<!-- HUB -->
+<div class="section" id="hub">
+  <div class="section-inner">
+    <div class="section-label">Experience Hub</div>
+    <h2>Federated gene sharing at scale</h2>
+    <p class="section-desc">The Hub connects multiple Experience Repository nodes — register, discover, federate queries, and subscribe to cross-node evolution events.</p>
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon">&#x1F4CB;</div>
+        <h3>Node Registry</h3>
+        <p>Register nodes with Ed25519 public keys. Key substitution prevention, health checking, and automatic deregistration on key conflict.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F50E;</div>
+        <h3>Discovery</h3>
+        <p>Query registered nodes by capability, tag, or health status. Find the right experience repository for your evolution domain.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F30D;</div>
+        <h3>Federated Queries</h3>
+        <p>Fan out gene searches across all healthy nodes. Aggregate results with deduplication — one API call, all nodes searched.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon">&#x1F514;</div>
+        <h3>Event Subscriptions</h3>
+        <p>Subscribe to gene promotion events across the network. Get notified when a new proven gene appears on any connected node.</p>
+      </div>
+    </div>
+
+    <h3 style="font-size:.95rem;font-weight:700;margin-top:40px;margin-bottom:16px">Hub Quick Start</h3>
+    <div style="max-width:720px">
+      <div class="qs-tabs">
+        <button class="qs-tab active" onclick="showHubTab('hub-start')">Start Hub</button>
+        <button class="qs-tab" onclick="showHubTab('hub-register')">Register Node</button>
+        <button class="qs-tab" onclick="showHubTab('hub-query')">Federated Query</button>
+        <button class="qs-tab" onclick="showHubTab('hub-subscribe')">Subscribe</button>
+      </div>
+
+      <div id="tab-hub-start" class="qs-panel active">
+        <pre><code class="language-bash"># Start the Hub server
+cargo run -p oris-hub
+
+# Or with configuration
+export HUB_ADDR=0.0.0.0:3000
+export HUB_CORS_ORIGINS=https://your-app.example.com
+cargo run -p oris-hub
+
+# Dashboard available at http://localhost:3000/dashboard</code></pre>
+      </div>
+
+      <div id="tab-hub-register" class="qs-panel">
+        <pre><code class="language-bash"># Register a node (Ed25519 public key required)
+curl -X POST http://localhost:3000/api/v1/nodes \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer &lt;hub-token&gt;" \
+  -d '{{
+    "node_id": "node-alpha",
+    "endpoint": "https://alpha.example.com",
+    "public_key": "&lt;base64-ed25519-pubkey&gt;",
+    "capabilities": ["gene-store", "capsule-store"]
+  }}'
+
+# List registered nodes
+curl http://localhost:3000/api/v1/nodes</code></pre>
+      </div>
+
+      <div id="tab-hub-query" class="qs-panel">
+        <pre><code class="language-bash"># Federated gene search across all nodes
+curl "http://localhost:3000/api/v1/federation/genes?q=fix_timeout"
+
+# Response aggregates results from all healthy nodes:
+# {{ "results": [...], "nodes_queried": 3, "nodes_healthy": 3 }}
+
+# Search by task class
+curl "http://localhost:3000/api/v1/federation/genes?task_class=network_retry"</code></pre>
+      </div>
+
+      <div id="tab-hub-subscribe" class="qs-panel">
+        <pre><code class="language-bash"># Subscribe to gene promotion events
+curl -X POST http://localhost:3000/api/v1/subscriptions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer &lt;hub-token&gt;" \
+  -d '{{
+    "callback_url": "https://my-node.example.com/hooks/gene",
+    "events": ["gene_promoted", "gene_revoked"],
+    "filter": {{ "min_confidence": 0.8 }}
+  }}'
+
+# Hub pushes events to your callback URL when genes
+# are promoted or revoked on any registered node</code></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ARCHITECTURE -->
 <div class="section" id="architecture">
   <div class="section-inner">
@@ -302,7 +398,8 @@ Layer 2 — network &amp; network-aware
   oris-evolution-network
   oris-experience-repo
 
-Layer 3 — runtime facade
+Layer 3 — hub &amp; runtime facade
+  oris-hub            (federation layer)
   oris-runtime        (re-exports evokernel)
   oris-execution-server</div>
       </div>
@@ -314,6 +411,7 @@ Layer 3 — runtime facade
           <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>Kernel</strong><br><span style="color:var(--muted)">Deterministic execution: event log, replay, snapshot</span></div>
           <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>MutationEvaluator</strong><br><span style="color:var(--muted)">Two-phase quality gate (static + LLM critic)</span></div>
           <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>PluginRegistry</strong><br><span style="color:var(--muted)">9 categories, determinism contracts, version negotiation</span></div>
+          <div style="padding:12px;background:#fff;border:1px solid var(--border);border-radius:6px"><strong>Hub</strong><br><span style="color:var(--muted)">Node registry, federated queries, event subscriptions</span></div>
         </div>
       </div>
     </div>
@@ -342,6 +440,8 @@ Layer 3 — runtime facade
         <tr><td><code>oris-intake</code></td><td>Issue intake, deduplication, prioritization, CI failure parsing</td><td><span class="maturity m-stable">stable</span></td><td><code>intake-experimental</code></td></tr>
         <tr><td><code>oris-evolution-network</code></td><td>OEN envelope, gossip sync, Ed25519 signing</td><td><span class="maturity m-exp">experimental</span></td><td><code>evolution-network-experimental</code></td></tr>
         <tr><td><code>oris-experience-repo</code></td><td>HTTP API: gene/capsule sharing, Ed25519 PKI, rate limiting</td><td><span class="maturity m-stable">v{VERSION}</span></td><td>standalone</td></tr>
+        <tr><td><code>oris-hub</code></td><td>Experience Hub: node registry, discovery, federation, subscriptions, dashboard</td><td><span class="maturity m-stable">v0.1.0</span></td><td>standalone</td></tr>
+        <tr><td><code>oris-hub-client</code></td><td>Typed Rust client for the Hub API</td><td><span class="maturity m-stable">v0.1.0</span></td><td>standalone</td></tr>
         <tr><td><code>oris-orchestrator</code></td><td>Autonomous loop, GitHub delivery, release automation</td><td><span class="maturity m-exp">experimental</span></td><td><code>release-automation-experimental</code></td></tr>
         <tr><td><code>oris-spec</code></td><td>OUSL YAML spec contracts and compilers</td><td><span class="maturity m-exp">experimental</span></td><td><code>spec-experimental</code></td></tr>
       </tbody>
@@ -414,14 +514,24 @@ Layer 3 — runtime facade
   </div>
   <div class="footer-bottom">
     <span>&#169; 2026 Oris Contributors &mdash; MIT License</span>
-    <span>oris-experience-repo v{VERSION}</span>
+    <span>oris-runtime v0.61.0 &middot; oris-hub v0.1.0</span>
   </div>
 </footer>
 
 <script>
 function showTab(id) {{
-  document.querySelectorAll('.qs-tab').forEach(function(t){{ t.classList.remove('active'); }});
-  document.querySelectorAll('.qs-panel').forEach(function(p){{ p.classList.remove('active'); }});
+  var parent = event.target.parentElement;
+  parent.querySelectorAll('.qs-tab').forEach(function(t){{ t.classList.remove('active'); }});
+  var panels = parent.parentElement.querySelectorAll('.qs-panel');
+  panels.forEach(function(p){{ p.classList.remove('active'); }});
+  event.target.classList.add('active');
+  document.getElementById('tab-' + id).classList.add('active');
+}}
+function showHubTab(id) {{
+  var parent = event.target.parentElement;
+  parent.querySelectorAll('.qs-tab').forEach(function(t){{ t.classList.remove('active'); }});
+  var panels = parent.parentElement.querySelectorAll('.qs-panel');
+  panels.forEach(function(p){{ p.classList.remove('active'); }});
   event.target.classList.add('active');
   document.getElementById('tab-' + id).classList.add('active');
 }}
