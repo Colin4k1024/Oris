@@ -381,17 +381,19 @@ curl -X POST http://localhost:3000/api/v1/subscriptions \
   <div class="section-inner">
     <div class="section-label">Architecture</div>
     <h2>Clean layered design</h2>
-    <p class="section-desc">Oris is organized as a Cargo workspace of 17 library crates with a strict dependency DAG — no circular dependencies.</p>
+    <p class="section-desc">Oris is organized as a Cargo workspace of 23 library crates with a strict dependency DAG — no circular dependencies.</p>
     <div class="arch-cols">
       <div>
         <h3 style="font-size:.95rem;font-weight:700;margin-bottom:12px">Dependency Layers</h3>
         <div class="arch-diagram">Leaf (no workspace deps)
-  oris-evolution · oris-genestore
-  oris-kernel · oris-sandbox
+  oris-agent-contract · oris-economics
+  oris-genestore · oris-kernel
+  oris-mutation-evaluator
 
-Layer 1 — builds on evolution/kernel
-  oris-evokernel   (11 deps, highest fan-in)
-  oris-governor    oris-intake
+Layer 1 — builds on leaf crates
+  oris-evolution  (depends on oris-kernel)
+  oris-evokernel  (11 deps, highest fan-in)
+  oris-governor   oris-intake
   oris-orchestrator
 
 Layer 2 — network &amp; network-aware
@@ -437,7 +439,7 @@ Layer 3 — hub &amp; runtime facade
         <tr><td><code>oris-mutation-evaluator</code></td><td>Two-phase quality evaluator (static analysis + LLM critic)</td><td><span class="maturity m-stable">stable</span></td><td><code>evolution-experimental</code></td></tr>
         <tr><td><code>oris-genestore</code></td><td>SQLite-based Gene and Capsule storage</td><td><span class="maturity m-stable">stable</span></td><td>—</td></tr>
         <tr><td><code>oris-governor</code></td><td>Promotion, cooldown, and revocation policies</td><td><span class="maturity m-stable">stable</span></td><td><code>governor-experimental</code></td></tr>
-        <tr><td><code>oris-intake</code></td><td>Issue intake, deduplication, prioritization, CI failure parsing</td><td><span class="maturity m-stable">stable</span></td><td><code>intake-experimental</code></td></tr>
+        <tr><td><code>oris-intake</code></td><td>Issue intake, deduplication, prioritization, CI failure parsing</td><td><span class="maturity m-stable">stable</span></td><td>—</td></tr>
         <tr><td><code>oris-evolution-network</code></td><td>OEN envelope, gossip sync, Ed25519 signing</td><td><span class="maturity m-exp">experimental</span></td><td><code>evolution-network-experimental</code></td></tr>
         <tr><td><code>oris-experience-repo</code></td><td>HTTP API: gene/capsule sharing, Ed25519 PKI, rate limiting</td><td><span class="maturity m-stable">v{VERSION}</span></td><td>standalone</td></tr>
         <tr><td><code>oris-hub</code></td><td>Experience Hub: node registry, discovery, federation, subscriptions, dashboard</td><td><span class="maturity m-stable">v0.1.0</span></td><td>standalone</td></tr>
