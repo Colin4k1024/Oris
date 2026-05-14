@@ -1,0 +1,38 @@
+{
+  "description": "Golden fixture for Experience Repo share (POST /experience)",
+  "request": {
+    "method": "POST",
+    "path": "/experience",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-Api-Key": "test-api-key-001"
+    },
+    "body": {
+      "envelope": {
+        "sender_id": "agent-test-001",
+        "message_type": "publish",
+        "payload": {
+          "gene_id": "gene-abc-123",
+          "name": "fix-null-pointer",
+          "task_class": "bugfix",
+          "confidence": 0.85,
+          "strategy": {
+            "approach": "pattern-match",
+            "language": "rust"
+          }
+        },
+        "signature": "<base64-ed25519-signature-of-payload-json>",
+        "timestamp": "2026-01-15T10:30:00Z"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "gene_id": "gene-abc-123",
+      "status": "published",
+      "published_at": "2026-01-15T10:30:01Z"
+    }
+  },
+  "signing_note": "signature = base64(ed25519_sign(seed, json_bytes(envelope.payload)))"
+}

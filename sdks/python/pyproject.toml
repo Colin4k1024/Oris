@@ -1,0 +1,43 @@
+[project]
+name = "oris-rt-sdk"
+version = "0.1.7"
+description = "Python SDK for Oris Runtime — Hub, Execution, and Experience Repo clients"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Oris Runtime", email = "dev@oris-runtime.dev" }]
+keywords = ["oris", "runtime", "sdk", "ed25519", "agent", "evolution"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "httpx>=0.25.0",
+    "cryptography>=41.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.urls]
+Homepage = "https://github.com/oris-runtime/oris"
+Repository = "https://github.com/oris-runtime/oris/tree/main/sdks/python"
+Issues = "https://github.com/oris-runtime/oris/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/oris_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

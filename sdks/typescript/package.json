@@ -1,0 +1,50 @@
+{
+  "name": "@colin4k1024/oris-sdk",
+  "version": "0.1.1",
+  "description": "TypeScript SDK for Oris Runtime — Hub, Execution, and Experience Repo clients",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "oris",
+    "runtime",
+    "sdk",
+    "ed25519",
+    "agent",
+    "evolution"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oris-runtime/oris",
+    "directory": "sdks/typescript"
+  },
+  "homepage": "https://github.com/oris-runtime/oris/tree/main/sdks/typescript",
+  "dependencies": {
+    "@noble/ed25519": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.0.0"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}

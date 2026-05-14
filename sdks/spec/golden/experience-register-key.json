@@ -1,0 +1,19 @@
+{
+  "description": "Golden fixture for Experience Repo public key registration",
+  "request": {
+    "method": "POST",
+    "path": "/public-keys",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-Api-Key": "test-api-key-001"
+    },
+    "body": {
+      "sender_id": "agent-test-001",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7856a6b"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {}
+  }
+}

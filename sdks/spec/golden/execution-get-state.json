@@ -1,0 +1,30 @@
+{
+  "description": "Golden fixture for Execution Runtime get job state (GET /jobs/{thread_id}/state)",
+  "request": {
+    "method": "GET",
+    "path": "/jobs/thread-test-001/state",
+    "headers": {
+      "Authorization": "Bearer test-token-001"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "meta": {
+        "status": "ok",
+        "api_version": "v1"
+      },
+      "request_id": "req-uuid-002",
+      "data": {
+        "thread_id": "thread-test-001",
+        "checkpoint_id": "cp-001",
+        "created_at": "2026-01-15T10:30:00Z",
+        "values": {
+          "task": "analyze code",
+          "file": "src/main.rs",
+          "result": "analysis complete"
+        }
+      }
+    }
+  }
+}

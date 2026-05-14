@@ -1,0 +1,45 @@
+{
+  "description": "Golden fixture for OEN Ed25519 signing verification across languages",
+  "seed_hex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7856a6b",
+  "public_key_base64": "11qYAYKxCrfVS/7TyWQHOg7hcvPao/ShhEa36MeFams=",
+  "test_cases": [
+    {
+      "name": "hub_register_signing",
+      "description": "Sign entire body for Hub registration (Model A)",
+      "body": "{\"capabilities\":[\"evolution\",\"intake\"],\"endpoint\":\"https://node-1.example.com\",\"node_id\":\"node-test-001\",\"public_key\":\"11qYAYKxCrfVS/7TyWQHOg7hcvPao/ShhEa36MeFams=\",\"region\":\"us-west\",\"version\":\"0.61.0\"}",
+      "signature_base64": "placeholder_will_be_computed_by_reference_impl",
+      "note": "Signature covers entire body bytes. Keys sorted alphabetically in JSON."
+    },
+    {
+      "name": "hub_heartbeat_signing",
+      "description": "Sign entire body for Hub heartbeat (Model A)",
+      "body": "{\"node_id\":\"node-test-001\",\"status\":\"active\"}",
+      "signature_base64": "placeholder_will_be_computed_by_reference_impl"
+    },
+    {
+      "name": "experience_repo_envelope_signing",
+      "description": "Sign payload field only for Experience Repo (Model B)",
+      "payload": {"confidence":0.85,"gene_id":"gene-abc-123","name":"fix-null-pointer","strategy":{"approach":"pattern-match","language":"rust"},"task_class":"bugfix"},
+      "payload_json_bytes": "{\"confidence\":0.85,\"gene_id\":\"gene-abc-123\",\"name\":\"fix-null-pointer\",\"strategy\":{\"approach\":\"pattern-match\",\"language\":\"rust\"},\"task_class\":\"bugfix\"}",
+      "signature_base64": "placeholder_will_be_computed_by_reference_impl",
+      "note": "Signature covers serde_json::to_vec(&payload) — compact JSON with keys in insertion order"
+    }
+  ],
+  "verification_cases": [
+    {
+      "name": "valid_signature",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7856a6b",
+      "message": "",
+      "signature_base64": "placeholder",
+      "expected": true
+    },
+    {
+      "name": "tampered_message",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7856a6b",
+      "message": "tampered content",
+      "signature_base64": "placeholder",
+      "expected": false
+    }
+  ]
+}

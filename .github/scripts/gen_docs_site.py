@@ -200,6 +200,7 @@ footer{{background:var(--s1);border-top:1px solid var(--bd);padding:56px 24px 36
     <a href="#quickstart">Quick Start</a>
     <a href="#concepts">Core Concepts</a>
     <a href="#hub">Hub</a>
+    <a href="#sdks">SDKs</a>
     <a href="#architecture">Architecture</a>
     <a href="#crates">Crates</a>
     <a href="#flags">Feature Flags</a>
@@ -636,6 +637,82 @@ curl "http://localhost:3000/api/v1/federation/genes?task_class=network_retry&min
 
 # Hub delivers a signed POST to your callback_url
 # when any registered node promotes or revokes a matching gene.</code></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SDKs -->
+<section class="sect alt" id="sdks">
+  <div class="sect-w">
+    <div class="lbl">Multi-Language SDKs</div>
+    <h2 class="stitle">Install &amp; integrate in minutes</h2>
+    <p class="sdesc">Official client libraries for Go, Python, and TypeScript — covering Hub, Execution Runtime, and Experience Repo with built-in Ed25519 signing.</p>
+    <div class="feat-grid" style="margin-bottom:48px">
+      <div class="feat-card"><div class="f-icon">&#x1F439;</div><h3>Go</h3><p>Zero-dependency signing, strongly typed clients, context-aware HTTP with retries.</p><code style="display:block;margin-top:8px;font-size:.8rem">go get github.com/Colin4k1024/Oris/sdks/go</code></div>
+      <div class="feat-card"><div class="f-icon">&#x1F40D;</div><h3>Python</h3><p>Async-ready httpx client, cryptography-based Ed25519, full type hints.</p><code style="display:block;margin-top:8px;font-size:.8rem">pip install oris-rt-sdk</code></div>
+      <div class="feat-card"><div class="f-icon">&#x1F7E6;</div><h3>TypeScript</h3><p>ESM-first, tree-shakable, noble/ed25519 signing, full TypeScript types.</p><code style="display:block;margin-top:8px;font-size:.8rem">npm install @colin4k1024/oris-sdk</code></div>
+    </div>
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3);margin-bottom:14px">Usage Examples</p>
+    <div class="tabs-wrap">
+      <div class="tab-bar" id="sdk-bar">
+        <button class="tab-btn active" onclick="switchTab('sdk','go',this)">Go</button>
+        <button class="tab-btn" onclick="switchTab('sdk','py',this)">Python</button>
+        <button class="tab-btn" onclick="switchTab('sdk','ts',this)">TypeScript</button>
+      </div>
+      <div id="sdk-go" class="tab-panel active">
+        <pre><code class="language-go">import (
+    "github.com/Colin4k1024/Oris/sdks/go/hub"
+    "github.com/Colin4k1024/Oris/sdks/go/execution"
+    "github.com/Colin4k1024/Oris/sdks/go/experience"
+)
+
+// Hub — register a node
+seed := [32]byte{{...}} // Ed25519 seed
+h := hub.New(hub.Config{{BaseURL: "http://hub:8080", APIKey: "key", Seed: seed, NodeID: "n1"}})
+resp, _ := h.Register("http://my-node:9000", []string{{"evolve"}}, "0.1.0")
+
+// Execution — run a job
+e := execution.New(execution.Config{{BaseURL: "http://exec:8080", Token: "tok"}})
+job, _ := e.RunJob("thread-1", map[string]any{{"task": "hello"}})
+
+// Experience — share a gene
+exp := experience.New(experience.Config{{BaseURL: "http://exp:8080", APIKey: "ak", Seed: seed, SenderID: "agent-1"}})
+gene, _ := exp.Share(map[string]any{{"gene_id": "g1", "confidence": 0.9}})</code></pre>
+      </div>
+      <div id="sdk-py" class="tab-panel">
+        <pre><code class="language-python">from oris_sdk import HubClient, HubConfig, ExecutionClient, ExecutionConfig
+from oris_sdk import ExperienceClient, ExperienceConfig
+
+# Hub — register a node
+hub = HubClient(HubConfig(base_url="http://hub:8080", api_key="key",
+                           seed=b"32-byte-ed25519-seed-here.......", node_id="n1"))
+hub.register(endpoint="http://my-node:9000", capabilities=["evolve"], version="0.1.0")
+
+# Execution — run a job
+exe = ExecutionClient(ExecutionConfig(base_url="http://exec:8080", token="tok"))
+job = exe.run_job(thread_id="thread-1", input={{"task": "hello"}})
+
+# Experience — share a gene
+exp = ExperienceClient(ExperienceConfig(base_url="http://exp:8080", api_key="ak",
+                                         seed=b"32-byte-ed25519-seed-here.......", sender_id="agent-1"))
+gene = exp.share({{"gene_id": "g1", "confidence": 0.9}})</code></pre>
+      </div>
+      <div id="sdk-ts" class="tab-panel">
+        <pre><code class="language-typescript">import {{ HubClient, ExecutionClient, ExperienceClient }} from "@colin4k1024/oris-sdk";
+
+// Hub — register a node
+const seed = new Uint8Array(32); // Ed25519 seed
+const hub = new HubClient({{ baseUrl: "http://hub:8080", apiKey: "key", seed, nodeId: "n1" }});
+const reg = await hub.register("http://my-node:9000", ["evolve"], "0.1.0");
+
+// Execution — run a job
+const exe = new ExecutionClient({{ baseUrl: "http://exec:8080", token: "tok" }});
+const job = await exe.runJob("thread-1", {{ task: "hello" }});
+
+// Experience — share a gene
+const exp = new ExperienceClient({{ baseUrl: "http://exp:8080", apiKey: "ak", seed, senderId: "agent-1" }});
+const gene = await exp.share({{ gene_id: "g1", confidence: 0.9 }});</code></pre>
       </div>
     </div>
   </div>

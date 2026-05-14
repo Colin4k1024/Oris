@@ -1,0 +1,37 @@
+{
+  "description": "Golden fixture for Execution Runtime run job (POST /jobs)",
+  "request": {
+    "method": "POST",
+    "path": "/jobs",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer test-token-001"
+    },
+    "body": {
+      "thread_id": "thread-test-001",
+      "input": {
+        "task": "analyze code",
+        "file": "src/main.rs"
+      },
+      "idempotency_key": "idem-key-001",
+      "priority": 5
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "meta": {
+        "status": "ok",
+        "api_version": "v1"
+      },
+      "request_id": "req-uuid-001",
+      "data": {
+        "thread_id": "thread-test-001",
+        "status": "running",
+        "interrupts": [],
+        "idempotency_key": "idem-key-001",
+        "idempotent_replay": false
+      }
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "description": "Golden fixture for Hub heartbeat request/response",
+  "request": {
+    "method": "PUT",
+    "path": "/hub/nodes/node-test-001/heartbeat",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-OEN-Signature": "<base64-ed25519-signature-of-body>"
+    },
+    "body": {
+      "node_id": "node-test-001",
+      "status": "active"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "acknowledged": true,
+      "next_heartbeat_seconds": 30
+    }
+  }
+}

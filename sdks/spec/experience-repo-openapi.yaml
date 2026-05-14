@@ -1,0 +1,293 @@
+openapi: 3.1.0
+info:
+  title: Oris Experience Repository API
+  version: 0.3.0
+  description: |
+    Gene/Capsule sharing, retrieval, and PKI key management for the Oris Evolution Network.
+
+    Authentication:
+    - POST /experience requires X-Api-Key header + OEN envelope signature in body
+    - GET /experience requires no authentication (public reads)
+    - Key management endpoints require X-Api-Key header
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /experience:
+    post:
+      operationId: shareExperience
+      summary: Share a gene/capsule via OEN envelope
+      tags: [Experience]
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShareRequest'
+      responses:
+        '200':
+          description: Experience shared
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShareResponse'
+    get:
+      operationId: fetchExperience
+      summary: Fetch genes/capsules (public, no auth required)
+      tags: [Experience]
+      security: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: min_confidence
+          in: query
+          schema:
+            type: number
+            format: float
+            default: 0.0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Fetched experiences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FetchResponse'
+
+  /public-keys:
+    post:
+      operationId: registerPublicKey
+      summary: Register a public key for OEN signature verification
+      tags: [PKI]
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterPublicKeyRequest'
+      responses:
+        '200':
+          description: Key registered
+    get:
+      operationId: listPublicKeys
+      summary: List registered public keys
+      tags: [PKI]
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: Key list
+    delete:
+      operationId: deletePublicKey
+      summary: Delete a public key
+      tags: [PKI]
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: Key deleted
+
+  /keys:
+    post:
+      operationId: createKey
+      summary: Create a new API key
+      tags: [Keys]
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: Key created
+    get:
+      operationId: listKeys
+      summary: List API keys
+      tags: [Keys]
+      security:
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: Keys list
+
+  /keys/{id}:
+    delete:
+      operationId: deleteKey
+      summary: Delete an API key
+      tags: [Keys]
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Key deleted
+
+  /keys/{id}/rotate:
+    post:
+      operationId: rotateKey
+      summary: Rotate an API key
+      tags: [Keys]
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Key rotated
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check endpoint
+      tags: [Health]
+      security: []
+      responses:
+        '200':
+          description: Service healthy
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: API key for authenticated endpoints
+
+  schemas:
+    OenEnvelope:
+      type: object
+      required: [sender_id, message_type, payload, signature, timestamp]
+      properties:
+        sender_id:
+          type: string
+        message_type:
+          type: string
+          enum: [publish, fetch, feedback]
+        payload:
+          type: object
+          description: Arbitrary JSON payload (gene or capsule data)
+        signature:
+          type: string
+          description: Base64-encoded Ed25519 signature of JSON-serialized payload
+        timestamp:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp
+
+    ShareRequest:
+      type: object
+      required: [envelope]
+      properties:
+        envelope:
+          $ref: '#/components/schemas/OenEnvelope'
+
+    ShareResponse:
+      type: object
+      required: [gene_id, status, published_at]
+      properties:
+        gene_id:
+          type: string
+        status:
+          type: string
+        published_at:
+          type: string
+          format: date-time
+
+    FetchResponse:
+      type: object
+      required: [assets, sync_audit]
+      properties:
+        assets:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetworkAsset'
+        next_cursor:
+          type: string
+        sync_audit:
+          $ref: '#/components/schemas/SyncAudit'
+
+    NetworkAsset:
+      type: object
+      description: Tagged union — either Gene or Capsule
+      discriminator:
+        propertyName: type
+      oneOf:
+        - $ref: '#/components/schemas/GeneAsset'
+        - $ref: '#/components/schemas/CapsuleAsset'
+
+    GeneAsset:
+      type: object
+      required: [type, id, signals, strategy, validation, confidence, quality_score, use_count, success_count, created_at]
+      properties:
+        type:
+          type: string
+          enum: [gene]
+        id:
+          type: string
+        signals:
+          type: object
+        strategy:
+          type: object
+        validation:
+          type: object
+        confidence:
+          type: number
+          format: float
+        quality_score:
+          type: number
+          format: float
+        use_count:
+          type: integer
+        success_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        contributor_id:
+          type: string
+
+    CapsuleAsset:
+      type: object
+      required: [type, id]
+      properties:
+        type:
+          type: string
+          enum: [capsule]
+        id:
+          type: string
+
+    SyncAudit:
+      type: object
+      description: Sync metadata for the fetch operation
+
+    RegisterPublicKeyRequest:
+      type: object
+      required: [sender_id, public_key_hex]
+      properties:
+        sender_id:
+          type: string
+        public_key_hex:
+          type: string
+          description: Hex-encoded 32-byte Ed25519 public key

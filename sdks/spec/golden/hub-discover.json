@@ -1,0 +1,36 @@
+{
+  "description": "Golden fixture for Hub node discovery request/response",
+  "request": {
+    "method": "GET",
+    "path": "/hub/nodes",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer test-api-key-001"
+    },
+    "body": {
+      "capabilities": ["evolution"],
+      "region": "us-west",
+      "limit": 10
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "nodes": [
+        {
+          "node_id": "node-test-001",
+          "endpoint": "https://node-1.example.com",
+          "public_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPao/ShhEa36MeFams=",
+          "capabilities": ["evolution", "intake"],
+          "region": "us-west",
+          "version": "0.61.0",
+          "status": "active",
+          "registered_at": "2026-01-15T10:00:00Z",
+          "last_heartbeat": "2026-01-15T10:30:00Z",
+          "ttl_seconds": 90
+        }
+      ],
+      "total": 1
+    }
+  }
+}

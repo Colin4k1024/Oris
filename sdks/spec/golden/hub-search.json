@@ -1,0 +1,39 @@
+{
+  "description": "Golden fixture for Hub federated search request/response",
+  "request": {
+    "method": "POST",
+    "path": "/hub/search",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer test-api-key-001"
+    },
+    "body": {
+      "query": "null pointer fix",
+      "task_class": "bugfix",
+      "min_confidence": 0.7,
+      "limit": 5
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "results": [
+        {
+          "gene_id": "gene-abc-123",
+          "name": "fix-null-pointer",
+          "task_class": "bugfix",
+          "confidence": 0.92,
+          "source_node": "node-test-001",
+          "created_at": "2026-01-10T08:00:00Z"
+        }
+      ],
+      "meta": {
+        "nodes_queried": 3,
+        "nodes_responded": 3,
+        "coverage": 1.0,
+        "freshness": "2026-01-15T10:30:00Z",
+        "timeout_nodes": []
+      }
+    }
+  }
+}

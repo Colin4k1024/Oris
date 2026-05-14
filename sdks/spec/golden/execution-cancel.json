@@ -1,0 +1,29 @@
+{
+  "description": "Golden fixture for Execution Runtime cancel job (POST /jobs/{thread_id}/cancel)",
+  "request": {
+    "method": "POST",
+    "path": "/jobs/thread-test-001/cancel",
+    "headers": {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer test-token-001"
+    },
+    "body": {
+      "reason": "user requested cancellation"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "meta": {
+        "status": "ok",
+        "api_version": "v1"
+      },
+      "request_id": "req-uuid-003",
+      "data": {
+        "thread_id": "thread-test-001",
+        "status": "cancelled",
+        "reason": "user requested cancellation"
+      }
+    }
+  }
+}

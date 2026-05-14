@@ -1,0 +1,499 @@
+openapi: 3.1.0
+info:
+  title: Oris Execution Runtime API
+  version: 0.3.0
+  description: |
+    Job execution, state management, and lifecycle control for the Oris runtime.
+
+    All endpoints require Authorization: Bearer {token} header.
+    All responses are wrapped in ApiEnvelope: { meta: { status, api_version }, request_id, data }
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+paths:
+  /jobs:
+    post:
+      operationId: runJob
+      summary: Submit a new job for execution
+      tags: [Jobs]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunJobRequest'
+      responses:
+        '200':
+          description: Job submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_RunJobResponse'
+    get:
+      operationId: listJobs
+      summary: List jobs with optional filtering
+      tags: [Jobs]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Job list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_ListJobsResponse'
+
+  /jobs/{thread_id}:
+    get:
+      operationId: getJobDetail
+      summary: Get detailed job state
+      tags: [Jobs]
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_JobDetailResponse'
+
+  /jobs/{thread_id}/state:
+    get:
+      operationId: getJobState
+      summary: Get current job state/values
+      tags: [Jobs]
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_JobStateResponse'
+
+  /jobs/{thread_id}/history:
+    get:
+      operationId: getJobHistory
+      summary: Get job checkpoint history
+      tags: [Jobs]
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_JobHistoryResponse'
+
+  /jobs/{thread_id}/timeline:
+    get:
+      operationId: getJobTimeline
+      summary: Get job execution timeline
+      tags: [Jobs]
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Job timeline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_JobTimelineResponse'
+
+  /jobs/{thread_id}/cancel:
+    post:
+      operationId: cancelJob
+      summary: Cancel a running job
+      tags: [Jobs]
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelJobRequest'
+      responses:
+        '200':
+          description: Job cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_CancelJobResponse'
+
+  /jobs/{thread_id}/resume:
+    post:
+      operationId: resumeJob
+      summary: Resume a suspended/interrupted job
+      tags: [Jobs]
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumeJobRequest'
+      responses:
+        '200':
+          description: Job resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_RunJobResponse'
+
+  /jobs/{thread_id}/replay:
+    post:
+      operationId: replayJob
+      summary: Replay a job from a checkpoint
+      tags: [Jobs]
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplayJobRequest'
+      responses:
+        '200':
+          description: Job replayed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope_RunJobResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Bearer token for all endpoints
+
+  schemas:
+    ApiMeta:
+      type: object
+      required: [status, api_version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        api_version:
+          type: string
+          enum: [v1]
+
+    RunJobRequest:
+      type: object
+      required: [thread_id]
+      properties:
+        thread_id:
+          type: string
+        input:
+          type: object
+        idempotency_key:
+          type: string
+        timeout_policy:
+          $ref: '#/components/schemas/TimeoutPolicyRequest'
+        priority:
+          type: integer
+          format: int32
+        tenant_id:
+          type: string
+
+    TimeoutPolicyRequest:
+      type: object
+      required: [timeout_ms, on_timeout_status]
+      properties:
+        timeout_ms:
+          type: integer
+          format: int64
+        on_timeout_status:
+          type: string
+
+    RunJobResponse:
+      type: object
+      required: [thread_id, status, interrupts, idempotent_replay]
+      properties:
+        thread_id:
+          type: string
+        status:
+          type: string
+        interrupts:
+          type: array
+          items:
+            type: object
+        idempotency_key:
+          type: string
+        idempotent_replay:
+          type: boolean
+        trace:
+          type: object
+
+    JobStateResponse:
+      type: object
+      required: [thread_id, values]
+      properties:
+        thread_id:
+          type: string
+        checkpoint_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        values:
+          type: object
+
+    JobDetailResponse:
+      type: object
+      required: [thread_id, status, values, history, timeline]
+      properties:
+        thread_id:
+          type: string
+        status:
+          type: string
+        checkpoint_id:
+          type: string
+        values:
+          type: object
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobHistoryItem'
+        timeline:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobTimelineItem'
+        pending_interrupt:
+          type: object
+        trace:
+          type: object
+        observability:
+          type: object
+
+    JobHistoryResponse:
+      type: object
+      required: [thread_id, history]
+      properties:
+        thread_id:
+          type: string
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobHistoryItem'
+
+    JobHistoryItem:
+      type: object
+      properties:
+        checkpoint_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    JobTimelineResponse:
+      type: object
+      required: [thread_id, timeline]
+      properties:
+        thread_id:
+          type: string
+        timeline:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobTimelineItem'
+        observability:
+          type: object
+        trace:
+          type: object
+
+    JobTimelineItem:
+      type: object
+      required: [seq, event_type]
+      properties:
+        seq:
+          type: integer
+          format: uint64
+        event_type:
+          type: string
+        checkpoint_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    CancelJobRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+
+    CancelJobResponse:
+      type: object
+      required: [thread_id, status]
+      properties:
+        thread_id:
+          type: string
+        status:
+          type: string
+        reason:
+          type: string
+
+    ResumeJobRequest:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: object
+        checkpoint_id:
+          type: string
+
+    ReplayJobRequest:
+      type: object
+      properties:
+        checkpoint_id:
+          type: string
+
+    ListJobsResponse:
+      type: object
+      required: [jobs]
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobListItem'
+
+    JobListItem:
+      type: object
+      required: [thread_id, status, updated_at]
+      properties:
+        thread_id:
+          type: string
+        status:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    # Envelope wrappers
+    ApiEnvelope_RunJobResponse:
+      type: object
+      required: [meta, request_id, data]
+      properties:
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/RunJobResponse'
+
+    ApiEnvelope_ListJobsResponse:
+      type: object
+      required: [meta, request_id, data]
+      properties:
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/ListJobsResponse'
+
+    ApiEnvelope_JobDetailResponse:
+      type: object
+      required: [meta, request_id, data]
+      properties:
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/JobDetailResponse'
+
+    ApiEnvelope_JobStateResponse:
+      type: object
+      required: [meta, request_id, data]
+      properties:
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/JobStateResponse'
+
+    ApiEnvelope_JobHistoryResponse:
+      type: object
+      required: [meta, request_id, data]
+      properties:
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/JobHistoryResponse'
+
+    ApiEnvelope_JobTimelineResponse:
+      type: object
+      required: [meta, request_id, data]
+      properties:
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/JobTimelineResponse'
+
+    ApiEnvelope_CancelJobResponse:
+      type: object
+      required: [meta, request_id, data]
+      properties:
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+        request_id:
+          type: string
+        data:
+          $ref: '#/components/schemas/CancelJobResponse'

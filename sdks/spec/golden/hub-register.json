@@ -1,0 +1,27 @@
+{
+  "description": "Golden fixture for Hub node registration request/response",
+  "request": {
+    "method": "POST",
+    "path": "/hub/nodes",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-OEN-Signature": "<base64-ed25519-signature-of-body>"
+    },
+    "body": {
+      "node_id": "node-test-001",
+      "endpoint": "https://node-1.example.com",
+      "public_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPao/ShhEa36MeFams=",
+      "capabilities": ["evolution", "intake"],
+      "region": "us-west",
+      "version": "0.61.0"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "node_id": "node-test-001",
+      "heartbeat_interval_seconds": 30,
+      "ttl_seconds": 90
+    }
+  }
+}

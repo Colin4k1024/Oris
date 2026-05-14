@@ -1,0 +1,477 @@
+openapi: 3.1.0
+info:
+  title: Oris Hub API
+  version: 0.2.13
+  description: |
+    Node registry, discovery, federation, and subscription service for the Oris Evolution Network.
+
+    Authentication:
+    - Signed routes use X-OEN-Signature header (Ed25519 over entire body, base64-encoded)
+    - Authenticated routes use Authorization: Bearer {api_key}
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /hub/nodes:
+    post:
+      operationId: registerNode
+      summary: Register a new node
+      tags: [Registry]
+      security:
+        - oenSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          description: Node registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+    get:
+      operationId: discoverNodes
+      summary: Discover nodes by capabilities/region
+      tags: [Discovery]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DiscoveryQuery'
+      responses:
+        '200':
+          description: Discovery results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryResult'
+
+  /hub/nodes/{node_id}:
+    get:
+      operationId: getNode
+      summary: Get node details
+      tags: [Registry]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NodeInfo'
+    delete:
+      operationId: deregisterNode
+      summary: Deregister a node
+      tags: [Registry]
+      security:
+        - oenSignature: []
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Node deregistered
+
+  /hub/nodes/{node_id}/heartbeat:
+    put:
+      operationId: heartbeat
+      summary: Send heartbeat for a registered node
+      tags: [Registry]
+      security:
+        - oenSignature: []
+      parameters:
+        - name: node_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatResponse'
+
+  /hub/search:
+    post:
+      operationId: federatedSearch
+      summary: Federated gene search across nodes
+      tags: [Federation]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FederatedQuery'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FederatedResult'
+
+  /hub/stats:
+    get:
+      operationId: getStats
+      summary: Get hub statistics
+      tags: [Registry]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Hub statistics
+
+  /hub/events/gene_promoted:
+    post:
+      operationId: notifyGenePromoted
+      summary: Notify hub of a gene promotion event
+      tags: [Events]
+      security:
+        - oenSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenePromotedEvent'
+      responses:
+        '200':
+          description: Event received
+
+  /hub/subscriptions:
+    post:
+      operationId: createSubscription
+      summary: Subscribe to gene promotion events
+      tags: [Subscriptions]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSubscriptionRequest'
+      responses:
+        '200':
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subscription'
+    get:
+      operationId: listSubscriptions
+      summary: List active subscriptions
+      tags: [Subscriptions]
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Subscriptions list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Subscription'
+
+  /hub/subscriptions/{sub_id}:
+    delete:
+      operationId: deleteSubscription
+      summary: Cancel a subscription
+      tags: [Subscriptions]
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sub_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Subscription deleted
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API key passed as Bearer token
+    oenSignature:
+      type: apiKey
+      in: header
+      name: X-OEN-Signature
+      description: Base64-encoded Ed25519 signature of entire request body
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [node_id, endpoint, public_key, capabilities, version]
+      properties:
+        node_id:
+          type: string
+        endpoint:
+          type: string
+          format: uri
+        public_key:
+          type: string
+          description: Base64-encoded Ed25519 public key (32 bytes)
+        capabilities:
+          type: array
+          items:
+            type: string
+        region:
+          type: string
+        version:
+          type: string
+
+    RegisterResponse:
+      type: object
+      required: [node_id, heartbeat_interval_seconds, ttl_seconds]
+      properties:
+        node_id:
+          type: string
+        heartbeat_interval_seconds:
+          type: integer
+          format: uint64
+        ttl_seconds:
+          type: integer
+          format: uint64
+
+    HeartbeatRequest:
+      type: object
+      required: [node_id]
+      properties:
+        node_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/NodeStatus'
+
+    HeartbeatResponse:
+      type: object
+      required: [acknowledged, next_heartbeat_seconds]
+      properties:
+        acknowledged:
+          type: boolean
+        next_heartbeat_seconds:
+          type: integer
+          format: uint64
+
+    NodeInfo:
+      type: object
+      required: [node_id, endpoint, public_key, capabilities, version, status, registered_at, last_heartbeat, ttl_seconds]
+      properties:
+        node_id:
+          type: string
+        endpoint:
+          type: string
+        public_key:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        region:
+          type: string
+        version:
+          type: string
+        status:
+          $ref: '#/components/schemas/NodeStatus'
+        registered_at:
+          type: string
+          format: date-time
+        last_heartbeat:
+          type: string
+          format: date-time
+        ttl_seconds:
+          type: integer
+          format: uint64
+
+    NodeStatus:
+      type: string
+      enum: [active, degraded, offline]
+
+    DiscoveryQuery:
+      type: object
+      properties:
+        capabilities:
+          type: array
+          items:
+            type: string
+        region:
+          type: string
+        version:
+          type: string
+        limit:
+          type: integer
+
+    DiscoveryResult:
+      type: object
+      required: [nodes, total]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/NodeInfo'
+        total:
+          type: integer
+
+    FederatedQuery:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        task_class:
+          type: string
+        min_confidence:
+          type: number
+          format: float
+        timeout_ms:
+          type: integer
+          format: uint64
+        target_nodes:
+          type: array
+          items:
+            type: string
+        limit:
+          type: integer
+
+    FederatedResult:
+      type: object
+      required: [results, meta]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/GeneResult'
+        meta:
+          $ref: '#/components/schemas/FederationMeta'
+
+    GeneResult:
+      type: object
+      required: [gene_id, name, task_class, confidence, source_node, created_at]
+      properties:
+        gene_id:
+          type: string
+        name:
+          type: string
+        task_class:
+          type: string
+        confidence:
+          type: number
+          format: float
+        source_node:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    FederationMeta:
+      type: object
+      required: [nodes_queried, nodes_responded, coverage, freshness, timeout_nodes]
+      properties:
+        nodes_queried:
+          type: integer
+        nodes_responded:
+          type: integer
+        coverage:
+          type: number
+          format: float
+        freshness:
+          type: string
+          format: date-time
+        timeout_nodes:
+          type: array
+          items:
+            type: string
+
+    CreateSubscriptionRequest:
+      type: object
+      required: [subscriber_node_id, callback_url, filter]
+      properties:
+        subscriber_node_id:
+          type: string
+        callback_url:
+          type: string
+          format: uri
+        filter:
+          $ref: '#/components/schemas/SubscriptionFilter'
+
+    SubscriptionFilter:
+      type: object
+      properties:
+        task_class:
+          type: string
+        min_confidence:
+          type: number
+          format: float
+        source_nodes:
+          type: array
+          items:
+            type: string
+
+    Subscription:
+      type: object
+      required: [id, subscriber_node_id, callback_url, filter, created_at, active]
+      properties:
+        id:
+          type: string
+        subscriber_node_id:
+          type: string
+        callback_url:
+          type: string
+        filter:
+          $ref: '#/components/schemas/SubscriptionFilter'
+        created_at:
+          type: string
+          format: date-time
+        active:
+          type: boolean
+
+    GenePromotedEvent:
+      type: object
+      required: [gene_id, gene_name, task_class, confidence, source_node_id, promoted_at]
+      properties:
+        gene_id:
+          type: string
+        gene_name:
+          type: string
+        task_class:
+          type: string
+        confidence:
+          type: number
+          format: float
+        source_node_id:
+          type: string
+        promoted_at:
+          type: string
+          format: date-time
