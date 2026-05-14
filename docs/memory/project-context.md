@@ -24,7 +24,8 @@
 
 | 任务 | 状态 | 目录 |
 |------|------|------|
-| **experience-repo-hub** | **closed** | **docs/artifacts/2026-05-12-experience-repo-hub/** |
+| **oris-multi-lang-sdk** | **plan** | **docs/artifacts/2026-05-14-oris-multi-lang-sdk/** |
+| experience-repo-hub | closed | docs/artifacts/2026-05-12-experience-repo-hub/ |
 | exp-repo-evokernel-wire | follow-up-required | docs/artifacts/2026-05-11-exp-repo-evokernel-wire/ |
 | experience-repo-pki | closed | docs/artifacts/2026-04-14-experience-repo-pki/ |
 | experience-repo-phase2 | released | docs/artifacts/2026-04-14-experience-repo-phase2/ |
@@ -33,6 +34,8 @@
 | experience-repository | completed | docs/artifacts/2026-04-09-experience-repository/ |
 
 ### 任务摘要
+
+**oris-multi-lang-sdk (PLAN)**：为 Oris Hub / Execution Runtime / Experience Repo 三大 HTTP API 构建 Go、Python、TypeScript SDK，monorepo `sdks/` 子目录。Story 0（规范先行：OEN 信封 spec + signing spec + Hub OpenAPI + golden fixtures）为硬前置；Story 1-5 并行实现三语言；目标版本 v0.1.0。
 
 **experience-repo-hub (CLOSED)**：Hub 全能力（注册发现 + 联邦聚合查询 + 订阅推送 + Web Dashboard）+ 安全加固（Ed25519 真实验证、SSRF 防护、CORS 限制、密钥替换防护）。57 tests pass，launch acceptance: GO。
 
@@ -68,12 +71,18 @@
 
 ## 下一步
 
-- **oris-hub 生产部署**：部署到生产环境，执行 48h 观察窗口
-- 打开独立 issue 修复 Key 管理端点鉴权（P0，立即）
-- 规划 v0.4.0 sprint（P0 签名问题 + sender_id + 3 处晋升路径补全）
+- **oris-multi-lang-sdk**：执行 Story 0（spec 先行），完成后进入 Story 1-5 并行实现
+- **P0 修复**：打开独立 issue 修复 Key 管理端点鉴权（P0，立即）
+- v0.4.0 sprint：签名问题 + sender_id + 3 处晋升路径补全
 - Hub backlog：dashboard HTML 转义、负向测试补充、store tracing
-- E2E 集成测试（P2，下一迭代有 HTTP 测试环境时）
+
+## 活跃风险（新增）
+
+| 风险 | 影响 | 缓解措施 |
+|------|------|----------|
+| OEN 信封 canonical JSON 序列化跨语言不一致 | 高 | Story 0 golden vectors + 互操作测试 |
+| Hub spec 手写遗漏认证规则 | 高 | code review 比对 routes.rs 逐行核对 |
 
 ## 最后更新
 
-2026-05-12
+2026-05-14
