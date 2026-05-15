@@ -1,17 +1,17 @@
 import type { ExperienceClient } from "./experience.js";
 import type { HubClient } from "./hub.js";
 import type { Gene, PullOpts, PushError, PushOpts, PushResult, SyncLogEntry } from "./gene.js";
-import type { LocalStore } from "./store.js";
+import type { GeneStore } from "./store-interface.js";
 import type { NetworkAsset } from "./types.js";
 
 export interface SyncConfig {
-  store: LocalStore;
+  store: GeneStore;
   experience?: ExperienceClient;
   hub?: HubClient;
 }
 
 export class SyncManager {
-  private store: LocalStore;
+  private store: GeneStore;
   private experience?: ExperienceClient;
   private hub?: HubClient;
 
@@ -26,11 +26,12 @@ export class SyncManager {
 
     let genes: Gene[];
     if (opts?.geneIds && opts.geneIds.length > 0) {
-      genes = opts.geneIds
-        .map((id) => this.store.get(id))
-        .filter((g): g is Gene => g !== null);
+      const resolved = await Promise.all(
+        opts.geneIds.map((id) => this.store.get(id))
+      );
+      genes = resolved.filter((g): g is Gene => g !== null);
     } else {
-      genes = this.store.getUnsynced();
+      genes = await this.store.getUnsynced();
     }
 
     const result: PushResult = { pushed: 0, failed: 0, errors: [] };
@@ -50,7 +51,7 @@ export class SyncManager {
         await this.experience.share(payload);
         entry.status = "success";
         result.pushed++;
-        this.store.markSynced(gene.geneId, new Date());
+        await this.store.markSynced(gene.geneId, new Date());
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         entry.status = "failed";
@@ -59,7 +60,7 @@ export class SyncManager {
         result.errors.push({ geneId: gene.geneId, message: msg });
       }
 
-      this.store.logSync(entry);
+      await this.store.logSync(entry);
     }
     return result;
   }
@@ -76,13 +77,13 @@ export class SyncManager {
     let imported = 0;
     for (const asset of resp.assets) {
       let gene = assetToGene(asset);
-      const existing = this.store.get(gene.geneId);
+      const existing = await this.store.get(gene.geneId);
 
       if (existing) {
         if (coreFieldsMatch(existing, gene)) {
           gene = mergeStats(existing, gene);
         } else {
-          this.store.logSync({
+          await this.store.logSync({
             direction: "pull",
             geneId: gene.geneId,
             status: "conflict",
@@ -94,8 +95,8 @@ export class SyncManager {
         }
       }
 
-      this.store.save(gene);
-      this.store.logSync({
+      await this.store.save(gene);
+      await this.store.logSync({
         direction: "pull",
         geneId: gene.geneId,
         status: "success",
@@ -108,7 +109,7 @@ export class SyncManager {
     return imported;
   }
 
-  getSyncLog(limit = 50): SyncLogEntry[] {
+  async getSyncLog(limit = 50): Promise<SyncLogEntry[]> {
     return this.store.getSyncLog(limit);
   }
 }

@@ -34,6 +34,14 @@
     "@noble/ed25519": "^2.0.0",
     "better-sqlite3": "^11.0.0"
   },
+  "peerDependencies": {
+    "mysql2": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "mysql2": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^25.7.0",

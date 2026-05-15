@@ -6,13 +6,13 @@ from typing import Any
 from oris_sdk.experience import ExperienceClient
 from oris_sdk.gene import Gene, PullOpts, PushError, PushOpts, PushResult, SyncLogEntry
 from oris_sdk.hub import HubClient
-from oris_sdk.store import LocalStore
+from oris_sdk.store_protocol import StoreProtocol
 
 
 class SyncManager:
     def __init__(
         self,
-        store: LocalStore,
+        store: StoreProtocol,
         experience: ExperienceClient | None = None,
         hub: HubClient | None = None,
     ):

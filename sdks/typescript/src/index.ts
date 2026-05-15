@@ -3,8 +3,11 @@ export { ExecutionClient } from "./execution.js";
 export { ExperienceClient } from "./experience.js";
 export { signBody, signPayload, publicKeyBase64, publicKeyHex } from "./signing.js";
 export { LocalStore } from "./store.js";
+export { MySQLStore } from "./mysql-store.js";
 export { SyncManager } from "./sync.js";
 export { OrisClient } from "./client.js";
+export type { GeneStore } from "./store-interface.js";
+export type { MySQLConfig } from "./mysql-store.js";
 export type {
   HubConfig,
   ExecutionConfig,

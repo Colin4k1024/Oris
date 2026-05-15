@@ -5,13 +5,16 @@ from typing import Any
 
 from oris_sdk.experience import ExperienceClient, ExperienceConfig
 from oris_sdk.hub import HubClient, HubConfig
+from oris_sdk.mysql_store import MySQLConfig, MySQLStore
 from oris_sdk.store import LocalStore
+from oris_sdk.store_protocol import StoreProtocol
 from oris_sdk.sync_manager import SyncManager
 
 
 @dataclass
 class OrisConfig:
     store_path: str = "oris_genes.db"
+    mysql: MySQLConfig | None = None
     hub: HubConfig | None = None
     experience: ExperienceConfig | None = None
 
@@ -19,7 +22,13 @@ class OrisConfig:
 class OrisClient:
     def __init__(self, config: OrisConfig | None = None):
         config = config or OrisConfig()
-        self.store = LocalStore(config.store_path)
+
+        store: StoreProtocol
+        if config.mysql is not None:
+            store = MySQLStore(config.mysql)
+        else:
+            store = LocalStore(config.store_path)
+        self.store = store
 
         exp_client = None
         hub_client = None

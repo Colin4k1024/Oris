@@ -11,13 +11,13 @@ import (
 )
 
 type Config struct {
-	Store      *store.LocalStore
+	Store      store.Store
 	Experience *experience.Client
 	Hub        *hub.Client
 }
 
 type SyncManager struct {
-	store      *store.LocalStore
+	store      store.Store
 	experience *experience.Client
 	hub        *hub.Client
 }

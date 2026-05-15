@@ -1,7 +1,8 @@
 import Database from "better-sqlite3";
 import type { Gene, StoreQuery, SyncLogEntry } from "./gene.js";
+import type { GeneStore } from "./store-interface.js";
 
-export class LocalStore {
+export class LocalStore implements GeneStore {
   private db: Database.Database;
 
   constructor(path: string = "oris_genes.db") {
