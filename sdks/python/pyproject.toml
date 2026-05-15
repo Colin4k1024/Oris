@@ -1,6 +1,6 @@
 [project]
 name = "oris-rt-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python SDK for Oris Runtime — Hub, Execution, and Experience Repo clients"
 requires-python = ">=3.10"
 license = "MIT"

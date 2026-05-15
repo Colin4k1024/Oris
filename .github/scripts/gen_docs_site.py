@@ -645,18 +645,23 @@ curl "http://localhost:3000/api/v1/federation/genes?task_class=network_retry&min
 <!-- SDKs -->
 <section class="sect alt" id="sdks">
   <div class="sect-w">
-    <div class="lbl">Multi-Language SDKs — v0.2.0</div>
+    <div class="lbl">Multi-Language SDKs — v0.3.0</div>
     <h2 class="stitle">Local-First by Default</h2>
-    <p class="sdesc">SQLite-based local gene storage as ground truth. Network sync is optional. Your genes work offline, sync when connected. Official libraries for Go, Python, and TypeScript.</p>
+    <p class="sdesc">SQLite or MySQL gene storage as ground truth. Network sync is optional. Your genes work offline, sync when connected. Official libraries for Go, Python, and TypeScript.</p>
 
     <!-- Architecture Overview -->
     <div style="background:var(--s2);border:1px solid var(--bd);border-radius:var(--r2);padding:28px 32px;margin-bottom:48px">
       <h3 style="font-size:.95rem;font-weight:700;margin-bottom:14px">Architecture</h3>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px">
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px">
         <div style="background:var(--ac-bg);border:1px solid rgba(129,140,248,.2);border-radius:var(--r);padding:14px;text-align:center">
           <div style="font-size:1.2rem;margin-bottom:6px">&#x1F4BE;</div>
           <strong style="font-size:.82rem;display:block;margin-bottom:4px">LocalStore</strong>
           <span style="font-size:.74rem;color:var(--fg2)">SQLite gene CRUD, query, stats tracking</span>
+        </div>
+        <div style="background:var(--ac-bg);border:1px solid rgba(129,140,248,.2);border-radius:var(--r);padding:14px;text-align:center">
+          <div style="font-size:1.2rem;margin-bottom:6px">&#x1F5C4;</div>
+          <strong style="font-size:.82rem;display:block;margin-bottom:4px">MySQLStore</strong>
+          <span style="font-size:.74rem;color:var(--fg2)">MySQL shared storage for teams/servers</span>
         </div>
         <div style="background:var(--grn-bg);border:1px solid rgba(52,211,153,.2);border-radius:var(--r);padding:14px;text-align:center">
           <div style="font-size:1.2rem;margin-bottom:6px">&#x1F504;</div>
@@ -671,6 +676,7 @@ curl "http://localhost:3000/api/v1/federation/genes?task_class=network_retry&min
       </div>
       <p style="font-size:.82rem;color:var(--fg2);line-height:1.7;margin:0">
         <strong style="color:var(--fg)">Default mode:</strong> Pure local — no network required. Genes are stored in SQLite with WAL mode for performance.<br>
+        <strong style="color:var(--fg)">MySQL mode:</strong> Use MySQL as shared backend for multi-node deployments or team collaboration. Same API, just swap config.<br>
         <strong style="color:var(--fg)">Connected mode:</strong> Push local genes to Experience Repo for sharing. Pull community genes to enrich your local pool.<br>
         <strong style="color:var(--fg)">Conflict resolution:</strong> Same task class → merge stats (max values). Different task class → skip &amp; log conflict.
       </p>
@@ -681,20 +687,22 @@ curl "http://localhost:3000/api/v1/federation/genes?task_class=network_retry&min
       <div class="feat-card">
         <div class="f-icon">&#x1F439;</div>
         <h3>Go</h3>
-        <p>Pure Go SQLite (no CGo), <code>sync.RWMutex</code> thread safety, strongly typed.</p>
-        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">go get github.com/Colin4k1024/Oris/sdks/go@v0.2.0</code>
+        <p>Pure Go SQLite (no CGo) + optional MySQL, <code>sync.RWMutex</code> thread safety, strongly typed.</p>
+        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0</code>
       </div>
       <div class="feat-card">
         <div class="f-icon">&#x1F40D;</div>
         <h3>Python</h3>
-        <p>Zero extra deps (stdlib sqlite3), <code>threading.Lock</code> safety, full type hints.</p>
-        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">pip install oris-rt-sdk==0.2.0</code>
+        <p>Zero extra deps (stdlib sqlite3) + optional MySQL via pymysql. Full type hints.</p>
+        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">pip install oris-rt-sdk==0.3.0
+pip install oris-rt-sdk[mysql]==0.3.0  # with MySQL</code>
       </div>
       <div class="feat-card">
         <div class="f-icon">&#x1F7E6;</div>
         <h3>TypeScript</h3>
-        <p>Synchronous better-sqlite3, ESM-first, tree-shakable, full TypeScript types.</p>
-        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">npm install @colin4k1024/oris-sdk@0.2.0</code>
+        <p>Synchronous better-sqlite3 + optional async MySQL via mysql2. ESM-first, tree-shakable.</p>
+        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">npm install @colin4k1024/oris-sdk@0.3.0
+npm install mysql2  # optional, for MySQL</code>
       </div>
     </div>
 
@@ -821,6 +829,136 @@ console.log(`Found ${{results.length}} high-confidence genes`);
 client.store.updateStats("retry-backoff-1", true, true);
 
 // Clean up
+client.close();</code></pre>
+      </div>
+    </div>
+
+    <!-- MySQL Storage -->
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--amb);margin-bottom:14px">MySQL Storage (Alternative Backend)</p>
+    <div class="tabs-wrap" style="margin-bottom:48px">
+      <div class="tab-bar" id="mysql-bar">
+        <button class="tab-btn active" onclick="switchTab('mysql','go',this)">Go</button>
+        <button class="tab-btn" onclick="switchTab('mysql','py',this)">Python</button>
+        <button class="tab-btn" onclick="switchTab('mysql','ts',this)">TypeScript</button>
+      </div>
+      <div id="mysql-go" class="tab-panel active">
+        <pre><code class="language-go">package main
+
+import (
+    "fmt"
+    "time"
+
+    oris "github.com/Colin4k1024/Oris/sdks/go"
+    "github.com/Colin4k1024/Oris/sdks/go/store"
+)
+
+func main() {{{{
+    // Initialize with MySQL — shared storage for teams
+    client, _ := oris.NewClient(oris.Config{{{{
+        MySQL: &amp;oris.MySQLSync{{{{
+            Host:     "127.0.0.1",
+            Port:     3306,
+            User:     "oris",
+            Password: "secret",
+            Database: "oris",
+        }}}},
+    }}}})
+    defer client.Close()
+
+    // Same API as SQLite — save, query, update
+    gene := store.Gene{{{{
+        GeneID:       "retry-backoff-1",
+        Name:         "exponential-retry",
+        TaskClass:    "error-handling",
+        Confidence:   0.92,
+        Strategy:     map[string]any{{{{"approach": "exponential_backoff"}}}},
+        Source:       "local",
+        CreatedAt:    time.Now(),
+        UpdatedAt:    time.Now(),
+    }}}}
+    client.Store.Save(nil, gene)
+
+    results, _ := client.Store.Query(nil, store.StoreQuery{{{{
+        TaskClass:     "error-handling",
+        MinConfidence: 0.8,
+    }}}})
+    fmt.Printf("Found %d genes in MySQL\\n", len(results))
+}}}}</code></pre>
+      </div>
+      <div id="mysql-py" class="tab-panel">
+        <pre><code class="language-python">from oris_sdk import OrisClient, OrisConfig, Gene
+from oris_sdk.mysql_store import MySQLConfig
+from datetime import datetime, timezone
+
+# Initialize with MySQL — shared storage for teams
+client = OrisClient(OrisConfig(
+    mysql=MySQLConfig(
+        host="127.0.0.1",
+        port=3306,
+        user="oris",
+        password="secret",
+        database="oris",
+    )
+))
+
+# Same API as SQLite — save, query, update
+gene = Gene(
+    gene_id="retry-backoff-1",
+    name="exponential-retry",
+    task_class="error-handling",
+    confidence=0.92,
+    strategy={{{{"approach": "exponential_backoff"}}}},
+    source="local",
+    created_at=datetime.now(timezone.utc),
+    updated_at=datetime.now(timezone.utc),
+)
+client.store.save(gene)
+
+results = client.store.query(task_class="error-handling", min_confidence=0.8)
+print(f"Found {{{{len(results)}}}} genes in MySQL")
+
+# Or connect via DSN string
+from oris_sdk.mysql_store import MySQLStore
+store = MySQLStore.from_url("mysql://oris:secret@127.0.0.1:3306/oris")</code></pre>
+      </div>
+      <div id="mysql-ts" class="tab-panel">
+        <pre><code class="language-typescript">import {{{{ OrisClient }}}} from "@colin4k1024/oris-sdk";
+import type {{{{ Gene }}}} from "@colin4k1024/oris-sdk";
+
+// Initialize with MySQL — shared storage for teams
+// Note: requires `npm install mysql2`
+const client = await OrisClient.create({{{{
+  mysql: {{{{
+    host: "127.0.0.1",
+    port: 3306,
+    user: "oris",
+    password: "secret",
+    database: "oris",
+  }}}},
+}}}});
+
+// Same API as SQLite — save, query, update
+const gene: Gene = {{{{
+  geneId: "retry-backoff-1",
+  name: "exponential-retry",
+  taskClass: "error-handling",
+  confidence: 0.92,
+  strategy: {{{{ approach: "exponential_backoff" }}}},
+  source: "local",
+  useCount: 0,
+  successCount: 0,
+  contributorId: "agent-1",
+  createdAt: new Date(),
+  updatedAt: new Date(),
+}}}};
+await client.store.save(gene);
+
+const results = await client.store.query({{{{
+  taskClass: "error-handling",
+  minConfidence: 0.8,
+}}}});
+console.log(`Found ${{{{results.length}}}} genes in MySQL`);
+
 client.close();</code></pre>
       </div>
     </div>
@@ -956,7 +1094,7 @@ client.close();</code></pre>
     </div>
 
     <!-- Store API Reference -->
-    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3);margin-bottom:14px">LocalStore API Reference</p>
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3);margin-bottom:14px">Store API Reference (LocalStore &amp; MySQLStore)</p>
     <div class="tbl-wrap" style="margin-bottom:48px">
       <table>
         <thead><tr><th>Method</th><th>Description</th><th>Returns</th></tr></thead>

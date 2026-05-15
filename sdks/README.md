@@ -1,6 +1,6 @@
 # Oris SDKs
 
-Multi-language client SDKs for the Oris Runtime services.
+Multi-language client SDKs for the Oris Runtime services. **v0.3.0** — now with MySQL storage backend.
 
 ## Services
 
@@ -14,9 +14,16 @@ Multi-language client SDKs for the Oris Runtime services.
 
 | Language | Path | Package | Install |
 |----------|------|---------|---------|
-| Go | `sdks/go/` | `github.com/Colin4k1024/Oris/sdks/go` | `go get github.com/Colin4k1024/Oris/sdks/go` |
-| Python | `sdks/python/` | [`oris-rt-sdk`](https://pypi.org/project/oris-rt-sdk/) | `pip install oris-rt-sdk` |
-| TypeScript | `sdks/typescript/` | [`@colin4k1024/oris-sdk`](https://www.npmjs.com/package/@colin4k1024/oris-sdk) | `npm install @colin4k1024/oris-sdk` |
+| Go | `sdks/go/` | `github.com/Colin4k1024/Oris/sdks/go` | `go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0` |
+| Python | `sdks/python/` | [`oris-rt-sdk`](https://pypi.org/project/oris-rt-sdk/) | `pip install oris-rt-sdk==0.3.0` |
+| TypeScript | `sdks/typescript/` | [`@colin4k1024/oris-sdk`](https://www.npmjs.com/package/@colin4k1024/oris-sdk) | `npm install @colin4k1024/oris-sdk@0.3.0` |
+
+## Storage Backends
+
+| Backend | Use Case | Dependency |
+|---------|----------|------------|
+| **SQLite** (default) | Single-node, local-first, zero config | Built-in |
+| **MySQL** (v0.3.0+) | Multi-node teams, shared server | Go: `go-sql-driver/mysql`, Python: `pip install oris-rt-sdk[mysql]`, TS: `npm install mysql2` |
 
 ## Quick Start
 
@@ -78,6 +85,62 @@ const job = await exe.runJob("thread-1", { task: "hello" });
 // Experience
 const exp = new ExperienceClient({ baseUrl: "http://exp:8080", apiKey: "ak", seed, senderId: "agent-1" });
 const gene = await exp.share({ gene_id: "g1", confidence: 0.9 });
+```
+
+## MySQL Storage (v0.3.0+)
+
+Use MySQL as a shared gene store for team/server deployments. The API is identical to SQLite — just change the config.
+
+### Go (MySQL)
+
+```go
+import oris "github.com/Colin4k1024/Oris/sdks/go"
+
+client, _ := oris.NewClient(oris.Config{
+    MySQL: &oris.MySQLSync{
+        Host:     "127.0.0.1",
+        Port:     3306,
+        User:     "oris",
+        Password: "secret",
+        Database: "oris",
+    },
+})
+defer client.Close()
+
+// Same Store API as SQLite
+client.Store.Save(ctx, gene)
+results, _ := client.Store.Query(ctx, store.StoreQuery{TaskClass: "error-handling"})
+```
+
+### Python (MySQL)
+
+```python
+from oris_sdk import OrisClient, OrisConfig
+from oris_sdk.mysql_store import MySQLConfig
+
+client = OrisClient(OrisConfig(
+    mysql=MySQLConfig(host="127.0.0.1", port=3306, user="oris", password="secret", database="oris")
+))
+
+# Same store API as SQLite
+client.store.save(gene)
+results = client.store.query(task_class="error-handling")
+```
+
+### TypeScript (MySQL)
+
+```typescript
+import { OrisClient } from "@colin4k1024/oris-sdk";
+
+// Use async factory for MySQL
+const client = await OrisClient.create({
+  mysql: { host: "127.0.0.1", port: 3306, user: "oris", password: "secret", database: "oris" },
+});
+
+// Same store API as SQLite
+await client.store.save(gene);
+const results = await client.store.query({ taskClass: "error-handling" });
+client.close();
 ```
 
 ## Signing

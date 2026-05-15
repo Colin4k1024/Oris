@@ -1,10 +1,12 @@
 # Oris SDK — Local-First Integration Architecture
 
-> Version: 0.1.0 | Status: Draft | Updated: 2026-05-15
+> Version: 0.3.0 | Status: Stable | Updated: 2026-05-15
 
 ## Overview
 
-Oris SDK 采用 **Local-First** 架构设计：集成方拥有本地经验存储（LocalStore），所有经验/基因数据默认落盘到本地。Hub 和 Experience Repo 作为可选的网络层，集成方可以选择性地将本地经验分享到网络，或从网络获取经验到本地。
+Oris SDK 采用 **Local-First** 架构设计：集成方拥有本地经验存储（LocalStore 或 MySQLStore），所有经验/基因数据默认落盘到本地或共享数据库。Hub 和 Experience Repo 作为可选的网络层，集成方可以选择性地将本地经验分享到网络，或从网络获取经验到本地。
+
+**v0.3.0 新增 MySQL 后端**：除默认 SQLite 外，现在可以使用 MySQL 作为共享存储后端，适用于多节点部署和团队协作场景。两种后端共享同一套 Store 接口，切换只需更改初始化配置。
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -14,8 +16,8 @@ Oris SDK 采用 **Local-First** 架构设计：集成方拥有本地经验存储
 │  │  Oris SDK                                             │  │
 │  │                                                       │  │
 │  │  ┌─────────────┐   ┌──────────────┐                  │  │
-│  │  │ LocalStore  │◄──│ SyncManager  │──► Hub / Repo    │  │
-│  │  │ (SQLite)    │   │ (optional)   │                  │  │
+│  │  │   Store     │◄──│ SyncManager  │──► Hub / Repo    │  │
+│  │  │(SQLite/MySQL)│   │ (optional)   │                  │  │
 │  │  └─────────────┘   └──────────────┘                  │  │
 │  │        ▲                                              │  │
 │  │        │                                              │  │
@@ -41,10 +43,11 @@ Oris SDK 采用 **Local-First** 架构设计：集成方拥有本地经验存储
 
 | 原则 | 说明 |
 |------|------|
-| **本地优先** | 所有经验数据首先写入本地 SQLite，无需网络即可使用 |
+| **本地优先** | 所有经验数据首先写入本地存储（SQLite 或 MySQL），无需网络即可使用 |
+| **存储可选** | 默认 SQLite（零配置），可选 MySQL（多节点共享） |
 | **Hub 可选** | Hub 连接是"增强"不是"前提"；离线模式下 SDK 完整可用 |
 | **显式同步** | 数据从不自动上传；share/pull 必须由集成方代码显式触发 |
-| **单一数据源** | 本地 SQLite 是集成方的 ground truth；Hub 是网络层缓存 |
+| **单一数据源** | 本地存储是集成方的 ground truth；Hub 是网络层缓存 |
 | **冲突回避** | 基因是不可变的（immutable by ID）；confidence/use_count 按最新值合并 |
 
 ---

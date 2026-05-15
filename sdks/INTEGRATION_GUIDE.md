@@ -56,13 +56,15 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 ```bash
 # Go
-go get github.com/Colin4k1024/Oris/sdks/go
+go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0
 
 # Python
-pip install oris-rt-sdk
+pip install oris-rt-sdk==0.3.0
+pip install oris-rt-sdk[mysql]==0.3.0  # 带 MySQL 支持
 
 # TypeScript
-npm install @colin4k1024/oris-sdk
+npm install @colin4k1024/oris-sdk@0.3.0
+npm install mysql2  # 可选：MySQL 支持
 
 # Java (Maven)
 # 在 pom.xml 中添加:
@@ -72,6 +74,15 @@ npm install @colin4k1024/oris-sdk
 #   <version>0.1.0</version>
 # </dependency>
 ```
+
+### 存储后端选择
+
+| 后端 | 适用场景 | 安装方式 |
+|------|----------|----------|
+| **SQLite** (默认) | 单机、本地开发、离线优先 | 无需额外安装 |
+| **MySQL** (v0.3.0+) | 多节点共享、团队协作、服务端部署 | 见上方可选依赖 |
+
+MySQL 与 SQLite 使用完全相同的 Store API，只需在初始化时切换配置即可。
 
 ---
 

@@ -1,6 +1,6 @@
 {
   "name": "@colin4k1024/oris-sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TypeScript SDK for Oris Runtime — Hub, Execution, and Experience Repo clients",
   "type": "module",
   "main": "dist/index.js",
