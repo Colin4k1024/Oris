@@ -645,15 +645,362 @@ curl "http://localhost:3000/api/v1/federation/genes?task_class=network_retry&min
 <!-- SDKs -->
 <section class="sect alt" id="sdks">
   <div class="sect-w">
-    <div class="lbl">Multi-Language SDKs</div>
-    <h2 class="stitle">Install &amp; integrate in minutes</h2>
-    <p class="sdesc">Official client libraries for Go, Python, and TypeScript — covering Hub, Execution Runtime, and Experience Repo with built-in Ed25519 signing.</p>
-    <div class="feat-grid" style="margin-bottom:48px">
-      <div class="feat-card"><div class="f-icon">&#x1F439;</div><h3>Go</h3><p>Zero-dependency signing, strongly typed clients, context-aware HTTP with retries.</p><code style="display:block;margin-top:8px;font-size:.8rem">go get github.com/Colin4k1024/Oris/sdks/go</code></div>
-      <div class="feat-card"><div class="f-icon">&#x1F40D;</div><h3>Python</h3><p>Async-ready httpx client, cryptography-based Ed25519, full type hints.</p><code style="display:block;margin-top:8px;font-size:.8rem">pip install oris-rt-sdk</code></div>
-      <div class="feat-card"><div class="f-icon">&#x1F7E6;</div><h3>TypeScript</h3><p>ESM-first, tree-shakable, noble/ed25519 signing, full TypeScript types.</p><code style="display:block;margin-top:8px;font-size:.8rem">npm install @colin4k1024/oris-sdk</code></div>
+    <div class="lbl">Multi-Language SDKs — v0.2.0</div>
+    <h2 class="stitle">Local-First by Default</h2>
+    <p class="sdesc">SQLite-based local gene storage as ground truth. Network sync is optional. Your genes work offline, sync when connected. Official libraries for Go, Python, and TypeScript.</p>
+
+    <!-- Architecture Overview -->
+    <div style="background:var(--s2);border:1px solid var(--bd);border-radius:var(--r2);padding:28px 32px;margin-bottom:48px">
+      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:14px">Architecture</h3>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:20px">
+        <div style="background:var(--ac-bg);border:1px solid rgba(129,140,248,.2);border-radius:var(--r);padding:14px;text-align:center">
+          <div style="font-size:1.2rem;margin-bottom:6px">&#x1F4BE;</div>
+          <strong style="font-size:.82rem;display:block;margin-bottom:4px">LocalStore</strong>
+          <span style="font-size:.74rem;color:var(--fg2)">SQLite gene CRUD, query, stats tracking</span>
+        </div>
+        <div style="background:var(--grn-bg);border:1px solid rgba(52,211,153,.2);border-radius:var(--r);padding:14px;text-align:center">
+          <div style="font-size:1.2rem;margin-bottom:6px">&#x1F504;</div>
+          <strong style="font-size:.82rem;display:block;margin-bottom:4px">SyncManager</strong>
+          <span style="font-size:.74rem;color:var(--fg2)">Optional push/pull to Experience Repo</span>
+        </div>
+        <div style="background:var(--amb-bg);border:1px solid rgba(251,191,36,.2);border-radius:var(--r);padding:14px;text-align:center">
+          <div style="font-size:1.2rem;margin-bottom:6px">&#x1F3AF;</div>
+          <strong style="font-size:.82rem;display:block;margin-bottom:4px">OrisClient</strong>
+          <span style="font-size:.74rem;color:var(--fg2)">Unified entry point (Store + Sync)</span>
+        </div>
+      </div>
+      <p style="font-size:.82rem;color:var(--fg2);line-height:1.7;margin:0">
+        <strong style="color:var(--fg)">Default mode:</strong> Pure local — no network required. Genes are stored in SQLite with WAL mode for performance.<br>
+        <strong style="color:var(--fg)">Connected mode:</strong> Push local genes to Experience Repo for sharing. Pull community genes to enrich your local pool.<br>
+        <strong style="color:var(--fg)">Conflict resolution:</strong> Same task class → merge stats (max values). Different task class → skip &amp; log conflict.
+      </p>
     </div>
-    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3);margin-bottom:14px">Usage Examples</p>
+
+    <!-- Install Cards -->
+    <div class="feat-grid" style="margin-bottom:48px">
+      <div class="feat-card">
+        <div class="f-icon">&#x1F439;</div>
+        <h3>Go</h3>
+        <p>Pure Go SQLite (no CGo), <code>sync.RWMutex</code> thread safety, strongly typed.</p>
+        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">go get github.com/Colin4k1024/Oris/sdks/go@v0.2.0</code>
+      </div>
+      <div class="feat-card">
+        <div class="f-icon">&#x1F40D;</div>
+        <h3>Python</h3>
+        <p>Zero extra deps (stdlib sqlite3), <code>threading.Lock</code> safety, full type hints.</p>
+        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">pip install oris-rt-sdk==0.2.0</code>
+      </div>
+      <div class="feat-card">
+        <div class="f-icon">&#x1F7E6;</div>
+        <h3>TypeScript</h3>
+        <p>Synchronous better-sqlite3, ESM-first, tree-shakable, full TypeScript types.</p>
+        <code style="display:block;margin-top:10px;font-size:.78rem;background:var(--s2);padding:8px 12px;border-radius:6px">npm install @colin4k1024/oris-sdk@0.2.0</code>
+      </div>
+    </div>
+
+    <!-- Local-First Usage -->
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--ac);margin-bottom:14px">Local-First Usage (Recommended)</p>
+    <div class="tabs-wrap" style="margin-bottom:48px">
+      <div class="tab-bar" id="lf-bar">
+        <button class="tab-btn active" onclick="switchTab('lf','go',this)">Go</button>
+        <button class="tab-btn" onclick="switchTab('lf','py',this)">Python</button>
+        <button class="tab-btn" onclick="switchTab('lf','ts',this)">TypeScript</button>
+      </div>
+      <div id="lf-go" class="tab-panel active">
+        <pre><code class="language-go">package main
+
+import (
+    "fmt"
+    "time"
+
+    oris "github.com/Colin4k1024/Oris/sdks/go"
+    "github.com/Colin4k1024/Oris/sdks/go/store"
+)
+
+func main() {{
+    // Initialize — local SQLite storage, no network needed
+    client, _ := oris.NewClient(oris.Config{{
+        StorePath: "my_genes.db",
+    }})
+    defer client.Close()
+
+    // Save a gene locally
+    gene := store.Gene{{
+        GeneID:       "retry-backoff-1",
+        Name:         "exponential-retry",
+        TaskClass:    "error-handling",
+        Confidence:   0.92,
+        Strategy:     map[string]any{{"approach": "exponential_backoff", "max_retries": 5}},
+        Signals:      map[string]any{{"error_rate": 0.15}},
+        UseCount:     12,
+        SuccessCount: 11,
+        Source:       "local",
+        CreatedAt:    time.Now(),
+        UpdatedAt:    time.Now(),
+    }}
+    client.Store.Save(gene)
+
+    // Query genes by task class
+    results := client.Store.Query(store.StoreQuery{{
+        TaskClass:     "error-handling",
+        MinConfidence: 0.8,
+    }})
+    fmt.Printf("Found %d high-confidence genes\\n", len(results))
+
+    // Update stats after using a gene
+    client.Store.UpdateStats("retry-backoff-1", true, true)
+}}</code></pre>
+      </div>
+      <div id="lf-py" class="tab-panel">
+        <pre><code class="language-python">from oris_sdk import OrisClient, OrisConfig, Gene
+from datetime import datetime
+
+# Initialize — local SQLite storage, no network needed
+client = OrisClient(OrisConfig(store_path="my_genes.db"))
+
+# Save a gene locally
+gene = Gene(
+    gene_id="retry-backoff-1",
+    name="exponential-retry",
+    task_class="error-handling",
+    confidence=0.92,
+    strategy={{"approach": "exponential_backoff", "max_retries": 5}},
+    signals={{"error_rate": 0.15}},
+    use_count=12,
+    success_count=11,
+    source="local",
+    created_at=datetime.now(),
+    updated_at=datetime.now(),
+)
+client.store.save(gene)
+
+# Query genes by task class
+results = client.store.query(task_class="error-handling", min_confidence=0.8)
+print(f"Found {{len(results)}} high-confidence genes")
+
+# Update stats after using a gene
+client.store.update_stats("retry-backoff-1", used=True, success=True)
+
+# Context manager support
+with OrisClient(OrisConfig(store_path=":memory:")) as c:
+    c.store.save(gene)
+    print(c.store.get("retry-backoff-1").name)</code></pre>
+      </div>
+      <div id="lf-ts" class="tab-panel">
+        <pre><code class="language-typescript">import {{ OrisClient }} from "@colin4k1024/oris-sdk";
+import type {{ Gene }} from "@colin4k1024/oris-sdk";
+
+// Initialize — local SQLite storage, no network needed
+const client = new OrisClient({{ storePath: "my_genes.db" }});
+
+// Save a gene locally
+const gene: Gene = {{
+  geneId: "retry-backoff-1",
+  name: "exponential-retry",
+  taskClass: "error-handling",
+  confidence: 0.92,
+  strategy: {{ approach: "exponential_backoff", max_retries: 5 }},
+  signals: {{ error_rate: 0.15 }},
+  useCount: 12,
+  successCount: 11,
+  contributorId: "agent-1",
+  source: "local",
+  createdAt: new Date(),
+  updatedAt: new Date(),
+}};
+client.store.save(gene);
+
+// Query genes by task class
+const results = client.store.query({{
+  taskClass: "error-handling",
+  minConfidence: 0.8,
+}});
+console.log(`Found ${{results.length}} high-confidence genes`);
+
+// Update stats after using a gene
+client.store.updateStats("retry-backoff-1", true, true);
+
+// Clean up
+client.close();</code></pre>
+      </div>
+    </div>
+
+    <!-- Sync Usage -->
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--grn);margin-bottom:14px">Network Sync (Optional)</p>
+    <div class="tabs-wrap" style="margin-bottom:48px">
+      <div class="tab-bar" id="sync-bar">
+        <button class="tab-btn active" onclick="switchTab('sync','go',this)">Go</button>
+        <button class="tab-btn" onclick="switchTab('sync','py',this)">Python</button>
+        <button class="tab-btn" onclick="switchTab('sync','ts',this)">TypeScript</button>
+      </div>
+      <div id="sync-go" class="tab-panel active">
+        <pre><code class="language-go">package main
+
+import (
+    "fmt"
+
+    oris "github.com/Colin4k1024/Oris/sdks/go"
+    "github.com/Colin4k1024/Oris/sdks/go/store"
+)
+
+func main() {{
+    seed := [32]byte{{/* your Ed25519 seed */}}
+
+    // Initialize with Experience Repo connection
+    client, _ := oris.NewClient(oris.Config{{
+        StorePath: "my_genes.db",
+        Experience: &oris.ExperienceSync{{
+            BaseURL:  "https://experience.oris.dev",
+            APIKey:   "your-api-key",
+            Seed:     seed,
+            SenderID: "agent-1",
+        }},
+    }})
+    defer client.Close()
+
+    // Push unsynced local genes to Experience Repo
+    result, _ := client.Sync.PushToHub(nil)
+    fmt.Printf("Pushed %d genes, %d failed\\n", result.Pushed, result.Failed)
+
+    // Pull community genes from Experience Repo
+    imported, _ := client.Sync.PullFromHub(nil)
+    fmt.Printf("Imported %d new genes\\n", imported)
+
+    // Push specific genes only
+    result, _ = client.Sync.PushToHub(&store.PushOpts{{
+        GeneIDs: []string{{"retry-backoff-1", "cache-warm-2"}},
+    }})
+
+    // Pull with filters
+    imported, _ = client.Sync.PullFromHub(&store.PullOpts{{
+        Q:             "error-handling",
+        MinConfidence: 0.85,
+        Limit:         50,
+    }})
+}}</code></pre>
+      </div>
+      <div id="sync-py" class="tab-panel">
+        <pre><code class="language-python">from oris_sdk import OrisClient, OrisConfig
+
+# Initialize with Experience Repo connection
+client = OrisClient(OrisConfig(
+    store_path="my_genes.db",
+    experience_base_url="https://experience.oris.dev",
+    experience_api_key="your-api-key",
+    experience_seed=b"your-32-byte-ed25519-seed-here..",
+    experience_sender_id="agent-1",
+))
+
+# Push unsynced local genes to Experience Repo
+result = client.sync.push_to_hub()
+print(f"Pushed {{result.pushed}} genes, {{result.failed}} failed")
+
+# Pull community genes from Experience Repo
+imported = client.sync.pull_from_hub()
+print(f"Imported {{imported}} new genes")
+
+# Push specific genes only
+result = client.sync.push_to_hub(gene_ids=["retry-backoff-1", "cache-warm-2"])
+
+# Pull with filters
+imported = client.sync.pull_from_hub(
+    q="error-handling",
+    min_confidence=0.85,
+    limit=50,
+)
+
+# Check sync history
+logs = client.sync.get_sync_log(limit=20)
+for log in logs:
+    print(f"  {{log.direction}} {{log.gene_id}}: {{log.status}}")</code></pre>
+      </div>
+      <div id="sync-ts" class="tab-panel">
+        <pre><code class="language-typescript">import {{ OrisClient }} from "@colin4k1024/oris-sdk";
+
+// Initialize with Experience Repo connection
+const seed = new Uint8Array(32); // Your Ed25519 seed
+const client = new OrisClient({{
+  storePath: "my_genes.db",
+  experience: {{
+    baseUrl: "https://experience.oris.dev",
+    apiKey: "your-api-key",
+    seed,
+    senderId: "agent-1",
+  }},
+}});
+
+// Push unsynced local genes to Experience Repo
+const result = await client.sync.pushToHub();
+console.log(`Pushed ${{result.pushed}} genes, ${{result.failed}} failed`);
+
+// Pull community genes from Experience Repo
+const imported = await client.sync.pullFromHub();
+console.log(`Imported ${{imported}} new genes`);
+
+// Push specific genes only
+await client.sync.pushToHub({{ geneIds: ["retry-backoff-1", "cache-warm-2"] }});
+
+// Pull with filters
+await client.sync.pullFromHub({{
+  q: "error-handling",
+  minConfidence: 0.85,
+  limit: 50,
+}});
+
+// Check sync history
+const logs = client.sync.getSyncLog(20);
+logs.forEach((l) => console.log(`  ${{l.direction}} ${{l.geneId}}: ${{l.status}}`));
+
+client.close();</code></pre>
+      </div>
+    </div>
+
+    <!-- Store API Reference -->
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3);margin-bottom:14px">LocalStore API Reference</p>
+    <div class="tbl-wrap" style="margin-bottom:48px">
+      <table>
+        <thead><tr><th>Method</th><th>Description</th><th>Returns</th></tr></thead>
+        <tbody>
+          <tr><td><code>save(gene)</code></td><td>Insert or upsert a gene (by gene_id)</td><td>void</td></tr>
+          <tr><td><code>get(id)</code></td><td>Retrieve a gene by ID</td><td>Gene | null</td></tr>
+          <tr><td><code>query(opts)</code></td><td>Filter by task_class, min_confidence, search text, with pagination</td><td>Gene[]</td></tr>
+          <tr><td><code>delete(id)</code></td><td>Remove a gene permanently</td><td>void</td></tr>
+          <tr><td><code>updateStats(id, used, success)</code></td><td>Increment use_count (and success_count if success)</td><td>void</td></tr>
+          <tr><td><code>getUnsynced()</code></td><td>Get all local genes not yet pushed to Hub</td><td>Gene[]</td></tr>
+          <tr><td><code>markSynced(id, time)</code></td><td>Mark a gene as synced with timestamp</td><td>void</td></tr>
+          <tr><td><code>getSyncLog(limit)</code></td><td>Get recent sync operation history</td><td>SyncLogEntry[]</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Gene Data Model -->
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3);margin-bottom:14px">Gene Data Model</p>
+    <div class="tbl-wrap" style="margin-bottom:48px">
+      <table>
+        <thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>geneId</code></td><td>string</td><td>Unique identifier</td></tr>
+          <tr><td><code>name</code></td><td>string</td><td>Human-readable name</td></tr>
+          <tr><td><code>taskClass</code></td><td>string</td><td>Category (e.g. "error-handling", "caching", "testing")</td></tr>
+          <tr><td><code>confidence</code></td><td>float [0,1]</td><td>How reliable this gene is (higher = more trusted)</td></tr>
+          <tr><td><code>strategy</code></td><td>JSON</td><td>The actual approach/algorithm (optional)</td></tr>
+          <tr><td><code>signals</code></td><td>JSON</td><td>Input signals that trigger this gene (optional)</td></tr>
+          <tr><td><code>validation</code></td><td>JSON</td><td>Validation results/evidence (optional)</td></tr>
+          <tr><td><code>qualityScore</code></td><td>float [0,1]</td><td>Quality metric from evaluators</td></tr>
+          <tr><td><code>useCount</code></td><td>int</td><td>Total times this gene was applied</td></tr>
+          <tr><td><code>successCount</code></td><td>int</td><td>Times it led to a successful outcome</td></tr>
+          <tr><td><code>contributorId</code></td><td>string</td><td>Node/agent that created this gene</td></tr>
+          <tr><td><code>source</code></td><td>"local" | "hub"</td><td>Where this gene came from</td></tr>
+          <tr><td><code>syncedAt</code></td><td>datetime?</td><td>Last sync timestamp (null if never synced)</td></tr>
+          <tr><td><code>createdAt</code></td><td>datetime</td><td>Creation time</td></tr>
+          <tr><td><code>updatedAt</code></td><td>datetime</td><td>Last modification time</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Remote-Only Clients (Advanced) -->
+    <p style="font-size:.8rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--fg3);margin-bottom:14px">Direct Remote Clients (Advanced)</p>
+    <p style="font-size:.83rem;color:var(--fg2);margin-bottom:16px;line-height:1.7">For advanced use cases where you need direct access to Hub, Execution Runtime, or Experience Repo without local storage:</p>
     <div class="tabs-wrap">
       <div class="tab-bar" id="sdk-bar">
         <button class="tab-btn active" onclick="switchTab('sdk','go',this)">Go</button>
