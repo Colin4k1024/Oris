@@ -2,6 +2,10 @@ from oris_sdk.hub import HubClient, HubConfig
 from oris_sdk.execution import ExecutionClient, ExecutionConfig
 from oris_sdk.experience import ExperienceClient, ExperienceConfig
 from oris_sdk.signing import sign_body, sign_payload, public_key_base64, public_key_hex
+from oris_sdk.gene import Gene, StoreQuery, PushOpts, PullOpts, PushResult, SyncLogEntry
+from oris_sdk.store import LocalStore
+from oris_sdk.sync_manager import SyncManager
+from oris_sdk.client import OrisClient, OrisConfig
 
 __all__ = [
     "HubClient",
@@ -14,4 +18,14 @@ __all__ = [
     "sign_payload",
     "public_key_base64",
     "public_key_hex",
+    "Gene",
+    "StoreQuery",
+    "PushOpts",
+    "PullOpts",
+    "PushResult",
+    "SyncLogEntry",
+    "LocalStore",
+    "SyncManager",
+    "OrisClient",
+    "OrisConfig",
 ]
