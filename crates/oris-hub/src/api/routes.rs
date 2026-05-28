@@ -53,7 +53,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/dashboard/subscriptions",
             get(dashboard_handlers::subscriptions),
         )
-        .route("/dashboard/search", get(dashboard_handlers::search));
+        .route("/dashboard/search", get(dashboard_handlers::search))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            verify_api_key,
+        ));
 
     // Build CORS layer
     let cors = {
@@ -64,6 +68,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 header::CONTENT_TYPE,
                 header::AUTHORIZATION,
                 HeaderName::from_static("x-oen-signature"),
+                HeaderName::from_static("x-oen-timestamp"),
             ])
             .max_age(Duration::from_secs(3600));
 

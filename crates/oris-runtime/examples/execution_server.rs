@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::execution_runtime::{RuntimeStorageBackend, RuntimeStorageConfig};
+#[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::execution_server::{build_router, ExecutionApiState};
 #[cfg(all(feature = "sqlite-persistence", feature = "execution-server"))]
 use oris_runtime::graph::{function_node, MessagesState, SqliteSaver, StateGraph, END, START};

@@ -1,12 +1,14 @@
-#![cfg(feature = "execution-server")]
-
+#[cfg(feature = "execution-server")]
 use std::env;
+#[cfg(feature = "execution-server")]
 use std::path::PathBuf;
 
+#[cfg(feature = "execution-server")]
 use oris_runtime::execution_runtime::{
     canonical_runtime_api_contract_path, write_runtime_api_contract, RUNTIME_API_CONTRACT_DOC_PATH,
 };
 
+#[cfg(feature = "execution-server")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_path = env::args_os()
         .nth(1)
@@ -19,4 +21,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         RUNTIME_API_CONTRACT_DOC_PATH,
     );
     Ok(())
+}
+
+#[cfg(not(feature = "execution-server"))]
+fn main() {
+    eprintln!("generate_runtime_api_contract example requires feature: execution-server");
 }

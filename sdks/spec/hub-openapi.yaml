@@ -6,11 +6,12 @@ info:
     Node registry, discovery, federation, and subscription service for the Oris Evolution Network.
 
     Authentication:
-    - Signed routes use X-OEN-Signature header (Ed25519 over entire body, base64-encoded)
+    - Signed routes require X-OEN-Signature. Legacy clients sign the raw body only.
+    - Preferred signed requests also send X-OEN-Timestamp and sign "{unix_timestamp}\n{http_method}\n{request_path}\n{raw_body}" (base64-encoded)
     - Authenticated routes use Authorization: Bearer {api_key}
 
 servers:
-  - url: http://localhost:8080
+  - url: http://localhost:3000
     description: Local development
 
 paths:
@@ -21,6 +22,8 @@ paths:
       tags: [Registry]
       security:
         - oenSignature: []
+      parameters:
+        - $ref: '#/components/parameters/OenTimestampHeader'
       requestBody:
         required: true
         content:
@@ -81,6 +84,7 @@ paths:
       security:
         - oenSignature: []
       parameters:
+        - $ref: '#/components/parameters/OenTimestampHeader'
         - name: node_id
           in: path
           required: true
@@ -98,6 +102,7 @@ paths:
       security:
         - oenSignature: []
       parameters:
+        - $ref: '#/components/parameters/OenTimestampHeader'
         - name: node_id
           in: path
           required: true
@@ -156,6 +161,8 @@ paths:
       tags: [Events]
       security:
         - oenSignature: []
+      parameters:
+        - $ref: '#/components/parameters/OenTimestampHeader'
       requestBody:
         required: true
         content:
@@ -220,6 +227,15 @@ paths:
           description: Subscription deleted
 
 components:
+  parameters:
+    OenTimestampHeader:
+      name: X-OEN-Timestamp
+      in: header
+      required: false
+      description: Optional unix timestamp used by the preferred signature mode for replay protection.
+      schema:
+        type: integer
+        format: int64
   securitySchemes:
     bearerAuth:
       type: http
@@ -229,7 +245,7 @@ components:
       type: apiKey
       in: header
       name: X-OEN-Signature
-      description: Base64-encoded Ed25519 signature of entire request body
+      description: Base64-encoded Ed25519 signature. Legacy clients sign the raw request body; preferred clients sign "{unix_timestamp}\n{http_method}\n{request_path}\n{raw_request_body}" and send X-OEN-Timestamp.
 
   schemas:
     RegisterRequest:

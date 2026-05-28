@@ -4,26 +4,26 @@ Multi-language client SDKs for the Oris Runtime services. **v0.3.0** — now wit
 
 ## Services
 
-| Service | Auth Model |
-|---------|-----------|
-| **Hub** | Writes: `X-OEN-Signature` (Ed25519 of body). Reads: `Authorization: Bearer` |
-| **Execution Runtime** | All endpoints: `Authorization: Bearer`. Responses wrapped in `ApiEnvelope<T>` |
-| **Experience Repo** | Writes: `X-Api-Key` + OEN signature inside body envelope. Reads: no auth |
+|Service|Auth Model|
+|---|---|
+|**Hub**|Writes: `X-OEN-Signature` required, `X-OEN-Timestamp` recommended. Legacy mode signs raw body only. Preferred mode signs `timestamp + "\n" + method + "\n" + path + "\n" + body`. Reads: `Authorization: Bearer`|
+|**Execution Runtime**|All endpoints: `Authorization: Bearer`. Responses wrapped in `ApiEnvelope<T>`|
+|**Experience Repo**|Writes: `X-Api-Key` + OEN signature inside body envelope. Reads: no auth|
 
 ## Languages
 
-| Language | Path | Package | Install |
-|----------|------|---------|---------|
-| Go | `sdks/go/` | `github.com/Colin4k1024/Oris/sdks/go` | `go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0` |
-| Python | `sdks/python/` | [`oris-rt-sdk`](https://pypi.org/project/oris-rt-sdk/) | `pip install oris-rt-sdk==0.3.0` |
-| TypeScript | `sdks/typescript/` | [`@colin4k1024/oris-sdk`](https://www.npmjs.com/package/@colin4k1024/oris-sdk) | `npm install @colin4k1024/oris-sdk@0.3.0` |
+|Language|Path|Package|Install|
+|---|---|---|---|
+|Go|`sdks/go/`|`github.com/Colin4k1024/Oris/sdks/go`|`go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0`|
+|Python|`sdks/python/`|[`oris-rt-sdk`](https://pypi.org/project/oris-rt-sdk/)|`pip install oris-rt-sdk==0.3.0`|
+|TypeScript|`sdks/typescript/`|[`@colin4k1024/oris-sdk`](https://www.npmjs.com/package/@colin4k1024/oris-sdk)|`npm install @colin4k1024/oris-sdk@0.3.0`|
 
 ## Storage Backends
 
-| Backend | Use Case | Dependency |
-|---------|----------|------------|
-| **SQLite** (default) | Single-node, local-first, zero config | Built-in |
-| **MySQL** (v0.3.0+) | Multi-node teams, shared server | Go: `go-sql-driver/mysql`, Python: `pip install oris-rt-sdk[mysql]`, TS: `npm install mysql2` |
+|Backend|Use Case|Dependency|
+|---|---|---|
+|**SQLite** (default)|Single-node, local-first, zero config|Built-in|
+|**MySQL** (v0.3.0+)|Multi-node teams, shared server|Go: `go-sql-driver/mysql`, Python: `pip install oris-rt-sdk[mysql]`, TS: `npm install mysql2`|
 
 ## Quick Start
 
@@ -147,7 +147,9 @@ client.close();
 
 All SDKs use Ed25519 with a 32-byte raw seed:
 
-- **Hub writes**: sign the entire JSON body, send as `X-OEN-Signature` header (base64)
+- **Hub writes, legacy compatibility**: sign the raw JSON body and send it as `X-OEN-Signature` (base64)
+- **Hub writes, preferred mode**: set `X-OEN-Timestamp` (unix seconds), sign `timestamp + "\n" + HTTP_METHOD + "\n" + REQUEST_PATH + "\n" + raw JSON body`, and send the signature as `X-OEN-Signature` (base64)
+- **Hub replay protection**: when `X-OEN-Timestamp` is present, the hub enforces a configurable age window and rejects timestamps that are too far in the future
 - **Experience writes**: sign only the `payload` field, embed signature inside `envelope.signature` (base64)
 - **Public key for Hub**: base64 encoding
 - **Public key for Experience**: hex encoding
@@ -168,6 +170,7 @@ cd sdks/typescript && npm test
 ## Specs
 
 Reference specifications live in `sdks/spec/`:
+
 - `signing-spec.md` — Ed25519 signing models
 - `oen-envelope-spec.md` — OEN envelope structure
 - `hub-openapi.yaml` — Hub API spec

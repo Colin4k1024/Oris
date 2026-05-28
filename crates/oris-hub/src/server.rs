@@ -16,15 +16,21 @@ use crate::subscription::{SubscriptionManager, SubscriptionStore, WebhookDispatc
 pub struct HubConfig {
     pub bind_addr: SocketAddr,
     pub db_path: String,
+    pub subscription_db_path: String,
     pub gc_interval_seconds: u64,
+    pub api_keys: Vec<String>,
+    pub signature_max_age_seconds: i64,
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
-            bind_addr: SocketAddr::from(([127, 0, 0, 1], 9090)),
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 3000)),
             db_path: ":memory:".to_string(),
+            subscription_db_path: "hub-subscriptions.db".to_string(),
             gc_interval_seconds: 30,
+            api_keys: vec!["dev-local-api-key".to_string()],
+            signature_max_age_seconds: 300,
         }
     }
 }
@@ -44,7 +50,7 @@ impl HubServer {
         let discovery = DiscoveryService::new(Arc::clone(&registry));
         let federation = FederationEngine::new(Arc::clone(&registry));
 
-        let sub_store = Arc::new(SubscriptionStore::new(":memory:")?);
+        let sub_store = Arc::new(SubscriptionStore::new(&self.config.subscription_db_path)?);
         let dispatcher = Arc::new(WebhookDispatcher::new());
         let subscriptions = SubscriptionManager::new(sub_store, dispatcher);
 
@@ -53,7 +59,8 @@ impl HubServer {
             discovery,
             federation,
             subscriptions,
-            token_store: crate::middleware::TokenStore::new(),
+            token_store: crate::middleware::TokenStore::with_tokens(self.config.api_keys.clone()),
+            signature_max_age_seconds: self.config.signature_max_age_seconds,
         });
 
         let limiter = create_limiter(100);

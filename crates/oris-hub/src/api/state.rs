@@ -12,4 +12,5 @@ pub struct AppState {
     pub federation: FederationEngine,
     pub subscriptions: SubscriptionManager,
     pub token_store: TokenStore,
+    pub signature_max_age_seconds: i64,
 }

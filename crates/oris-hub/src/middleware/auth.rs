@@ -4,6 +4,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::sync::Arc;
 
@@ -40,6 +41,11 @@ pub async fn verify_ed25519_signature(
     req: Request,
     next: Next,
 ) -> Result<Response, HubError> {
+    let timestamp = extract_signature_timestamp(&req)?;
+    if let Some(timestamp) = timestamp {
+        verify_timestamp_window(timestamp, state.signature_max_age_seconds)?;
+    }
+
     let sig_header = req
         .headers()
         .get("x-oen-signature")
@@ -72,12 +78,84 @@ pub async fn verify_ed25519_signature(
     let verifying_key = VerifyingKey::from_bytes(&public_key)
         .map_err(|_| HubError::InvalidSignature("invalid public key".into()))?;
 
-    verifying_key
-        .verify(&body_bytes, &signature)
-        .map_err(|_| HubError::InvalidSignature("signature verification failed".into()))?;
+    let verified = match timestamp {
+        Some(timestamp) => {
+            let signed_payload = signature_payload(
+                timestamp,
+                parts.method.as_str(),
+                parts.uri.path(),
+                &body_bytes,
+            );
+            verifying_key.verify(&signed_payload, &signature).is_ok()
+        }
+        None => verifying_key.verify(&body_bytes, &signature).is_ok(),
+    };
+
+    if !verified {
+        return Err(HubError::InvalidSignature(
+            "signature verification failed".into(),
+        ));
+    }
 
     let req = Request::from_parts(parts, Body::from(body_bytes));
     Ok(next.run(req).await)
+}
+
+fn extract_signature_timestamp(req: &Request) -> Result<Option<i64>, HubError> {
+    let Some(ts_header) = req.headers().get("x-oen-timestamp") else {
+        return Ok(None);
+    };
+
+    let ts_value = ts_header
+        .to_str()
+        .map_err(|_| HubError::InvalidSignature("invalid X-OEN-Timestamp header".into()))?;
+
+    ts_value
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| HubError::InvalidSignature("X-OEN-Timestamp must be unix seconds".into()))
+}
+
+fn verify_timestamp_window(timestamp: i64, max_age_seconds: i64) -> Result<(), HubError> {
+    if max_age_seconds <= 0 {
+        return Err(HubError::Internal(
+            "invalid signature replay window configuration".into(),
+        ));
+    }
+
+    let now = Utc::now().timestamp();
+    const CLOCK_SKEW_TOLERANCE_SECONDS: i64 = 30;
+
+    if timestamp < 0 {
+        return Err(HubError::InvalidSignature(
+            "negative X-OEN-Timestamp is not allowed".into(),
+        ));
+    }
+
+    if timestamp > now + CLOCK_SKEW_TOLERANCE_SECONDS {
+        return Err(HubError::InvalidSignature(
+            "future X-OEN-Timestamp exceeds clock skew tolerance".into(),
+        ));
+    }
+
+    if now.saturating_sub(timestamp) > max_age_seconds {
+        return Err(HubError::InvalidSignature(
+            "stale or out-of-window X-OEN-Timestamp".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn signature_payload(timestamp: i64, method: &str, path: &str, body_bytes: &[u8]) -> Vec<u8> {
+    let mut payload = timestamp.to_string().into_bytes();
+    payload.push(b'\n');
+    payload.extend_from_slice(method.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(body_bytes);
+    payload
 }
 
 async fn resolve_public_key(

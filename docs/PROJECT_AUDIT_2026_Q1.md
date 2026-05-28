@@ -1,5 +1,10 @@
 # Oris Project Audit — 2026 Q1
 
+> Historical snapshot notice:
+> This audit reflects repository state as of 2026-03-20 and is retained for historical traceability.
+> Current topology, crate count, and dependency relationships may differ.
+> Treat `Cargo.toml` workspace members and active architecture docs as the authoritative source for present state.
+
 **Date:** 2026-03-20
 **Scope:** Full workspace audit of code quality, architecture health, and strategic gap identification
 **Baseline version:** oris-runtime v0.61.0

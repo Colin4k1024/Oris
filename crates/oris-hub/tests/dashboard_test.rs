@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use std::sync::Arc;
@@ -29,9 +30,21 @@ fn build_app() -> axum::Router {
         federation,
         subscriptions,
         token_store: TokenStore::with_tokens(vec!["test-api-key".to_string()]),
+        signature_max_age_seconds: 300,
     });
 
     build_router(state)
+}
+
+fn sign_request(key: &SigningKey, method: &str, path: &str, body: &[u8], timestamp: i64) -> String {
+    let mut payload = timestamp.to_string().into_bytes();
+    payload.push(b'\n');
+    payload.extend_from_slice(method.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(body);
+    BASE64.encode(key.sign(&payload).to_bytes())
 }
 
 #[tokio::test]
@@ -41,6 +54,7 @@ async fn dashboard_overview_accessible() {
     let req = Request::builder()
         .method("GET")
         .uri("/dashboard")
+        .header("authorization", "Bearer test-api-key")
         .body(Body::empty())
         .unwrap();
 
@@ -71,13 +85,15 @@ async fn dashboard_nodes_page() {
         "version": "0.3.0"
     });
     let body_bytes = serde_json::to_vec(&body).unwrap();
-    let sig = BASE64.encode(key.sign(&body_bytes).to_bytes());
+    let ts = Utc::now().timestamp();
+    let sig = sign_request(&key, "POST", "/hub/nodes", &body_bytes, ts);
 
     let req = Request::builder()
         .method("POST")
         .uri("/hub/nodes")
         .header("content-type", "application/json")
         .header("x-oen-signature", &sig)
+        .header("x-oen-timestamp", ts.to_string())
         .body(Body::from(body_bytes))
         .unwrap();
 
@@ -87,6 +103,7 @@ async fn dashboard_nodes_page() {
     let req = Request::builder()
         .method("GET")
         .uri("/dashboard/nodes")
+        .header("authorization", "Bearer test-api-key")
         .body(Body::empty())
         .unwrap();
 
@@ -130,6 +147,7 @@ async fn dashboard_subscriptions_page() {
     let req = Request::builder()
         .method("GET")
         .uri("/dashboard/subscriptions")
+        .header("authorization", "Bearer test-api-key")
         .body(Body::empty())
         .unwrap();
 
@@ -160,13 +178,15 @@ async fn dashboard_node_detail_page() {
         "version": "0.4.0"
     });
     let body_bytes = serde_json::to_vec(&body).unwrap();
-    let sig = BASE64.encode(key.sign(&body_bytes).to_bytes());
+    let ts = Utc::now().timestamp();
+    let sig = sign_request(&key, "POST", "/hub/nodes", &body_bytes, ts);
 
     let req = Request::builder()
         .method("POST")
         .uri("/hub/nodes")
         .header("content-type", "application/json")
         .header("x-oen-signature", &sig)
+        .header("x-oen-timestamp", ts.to_string())
         .body(Body::from(body_bytes))
         .unwrap();
 
@@ -176,6 +196,7 @@ async fn dashboard_node_detail_page() {
     let req = Request::builder()
         .method("GET")
         .uri("/dashboard/nodes/detail-node-1")
+        .header("authorization", "Bearer test-api-key")
         .body(Body::empty())
         .unwrap();
 
@@ -201,6 +222,7 @@ async fn dashboard_node_not_found() {
     let req = Request::builder()
         .method("GET")
         .uri("/dashboard/nodes/nonexistent-node")
+        .header("authorization", "Bearer test-api-key")
         .body(Body::empty())
         .unwrap();
 
@@ -222,6 +244,7 @@ async fn dashboard_search_page() {
     let req = Request::builder()
         .method("GET")
         .uri("/dashboard/search")
+        .header("authorization", "Bearer test-api-key")
         .body(Body::empty())
         .unwrap();
 
@@ -243,6 +266,7 @@ async fn dashboard_search_with_query() {
     let req = Request::builder()
         .method("GET")
         .uri("/dashboard/search?q=build-fix&task_class=build-fix")
+        .header("authorization", "Bearer test-api-key")
         .body(Body::empty())
         .unwrap();
 
@@ -258,7 +282,7 @@ async fn dashboard_search_with_query() {
 }
 
 #[tokio::test]
-async fn dashboard_no_auth_required() {
+async fn dashboard_requires_auth() {
     let app = build_app();
 
     let paths = [
@@ -278,8 +302,22 @@ async fn dashboard_no_auth_required() {
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "dashboard path {path} should require auth"
+        );
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header("authorization", "Bearer test-api-key")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
             StatusCode::OK,
-            "dashboard path {path} should not require auth"
+            "dashboard path {path} should be accessible with auth"
         );
     }
 }

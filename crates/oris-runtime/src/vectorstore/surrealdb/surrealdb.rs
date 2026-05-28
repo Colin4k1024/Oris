@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use surrealdb::{Connection, Surreal};
-use tracing;
 
 use crate::{
     embedding::embedder_trait::Embedder,
@@ -71,7 +70,6 @@ impl<C: Connection> Store<C> {
             }
             None => {
                 let collection_table_name = &self.collection_name;
-                tracing::debug!(collection = %collection_table_name, "creating SurrealDB collection table");
                 self.db
                     .query(format!(
                         r#"

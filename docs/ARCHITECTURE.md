@@ -1,5 +1,9 @@
 # Oris Evolution Core — Extension Modules
 
+> Scope note:
+> This document describes only the extension-module architecture for `oris-mutation-evaluator` and `oris-genestore`.
+> It is not a full workspace architecture map. For current workspace topology, use `Cargo.toml` workspace members and the project-level architecture documents.
+
 ## Overview
 
 These two crates fill the gaps identified in the Oris vs EvoMap evaluation:

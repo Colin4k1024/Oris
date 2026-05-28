@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use chrono::Utc;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ fn build_app() -> axum::Router {
         federation,
         subscriptions,
         token_store: TokenStore::with_tokens(vec!["test-api-key".to_string()]),
+        signature_max_age_seconds: 300,
     });
 
     build_router(state)
@@ -38,7 +40,18 @@ fn test_signing_key() -> SigningKey {
     SigningKey::generate(&mut OsRng)
 }
 
-fn sign_body(key: &SigningKey, body: &[u8]) -> String {
+fn sign_request(key: &SigningKey, method: &str, path: &str, body: &[u8], timestamp: i64) -> String {
+    let mut payload = timestamp.to_string().into_bytes();
+    payload.push(b'\n');
+    payload.extend_from_slice(method.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(body);
+    BASE64.encode(key.sign(&payload).to_bytes())
+}
+
+fn sign_legacy_body(key: &SigningKey, body: &[u8]) -> String {
     BASE64.encode(key.sign(body).to_bytes())
 }
 
@@ -63,13 +76,15 @@ async fn e2e_register_discover_gc() {
         });
 
         let body_bytes = serde_json::to_vec(&body).unwrap();
-        let sig = sign_body(key, &body_bytes);
+        let ts = Utc::now().timestamp();
+        let sig = sign_request(key, "POST", "/hub/nodes", &body_bytes, ts);
 
         let req = Request::builder()
             .method("POST")
             .uri("/hub/nodes")
             .header("content-type", "application/json")
             .header("x-oen-signature", &sig)
+            .header("x-oen-timestamp", ts.to_string())
             .body(Body::from(body_bytes))
             .unwrap();
 
@@ -153,13 +168,21 @@ async fn e2e_register_discover_gc() {
         "status": null
     });
     let hb_bytes = serde_json::to_vec(&hb_body).unwrap();
-    let hb_sig = sign_body(&keys[0], &hb_bytes);
+    let hb_ts = Utc::now().timestamp();
+    let hb_sig = sign_request(
+        &keys[0],
+        "PUT",
+        "/hub/nodes/node-1/heartbeat",
+        &hb_bytes,
+        hb_ts,
+    );
 
     let req = Request::builder()
         .method("PUT")
         .uri("/hub/nodes/node-1/heartbeat")
         .header("content-type", "application/json")
         .header("x-oen-signature", &hb_sig)
+        .header("x-oen-timestamp", hb_ts.to_string())
         .body(Body::from(hb_bytes))
         .unwrap();
 
@@ -168,12 +191,14 @@ async fn e2e_register_discover_gc() {
 
     // Deregister node-3 (key index 2)
     let empty: &[u8] = b"";
-    let del_sig = sign_body(&keys[2], empty);
+    let del_ts = Utc::now().timestamp();
+    let del_sig = sign_request(&keys[2], "DELETE", "/hub/nodes/node-3", empty, del_ts);
 
     let req = Request::builder()
         .method("DELETE")
         .uri("/hub/nodes/node-3")
         .header("x-oen-signature", &del_sig)
+        .header("x-oen-timestamp", del_ts.to_string())
         .body(Body::empty())
         .unwrap();
 
@@ -229,6 +254,66 @@ async fn e2e_signature_rejected_without_header() {
         .uri("/hub/nodes")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn e2e_legacy_body_only_signature_still_works() {
+    let app = build_app();
+
+    let key = test_signing_key();
+    let pk_b64 = BASE64.encode(key.verifying_key().as_bytes());
+    let body = serde_json::json!({
+        "node_id": "legacy-node",
+        "endpoint": "http://legacy-node:8080",
+        "public_key": pk_b64,
+        "capabilities": ["gene-store"],
+        "region": "us-west-2",
+        "version": "0.3.0"
+    });
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let sig = sign_legacy_body(&key, &body_bytes);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/hub/nodes")
+        .header("content-type", "application/json")
+        .header("x-oen-signature", &sig)
+        .body(Body::from(body_bytes))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn e2e_future_timestamp_signature_rejected() {
+    let app = build_app();
+
+    let key = test_signing_key();
+    let pk_b64 = BASE64.encode(key.verifying_key().as_bytes());
+    let body = serde_json::json!({
+        "node_id": "future-node",
+        "endpoint": "http://future-node:8080",
+        "public_key": pk_b64,
+        "capabilities": ["gene-store"],
+        "region": "us-west-2",
+        "version": "0.3.0"
+    });
+    let body_bytes = serde_json::to_vec(&body).unwrap();
+    let ts = Utc::now().timestamp() + 120;
+    let sig = sign_request(&key, "POST", "/hub/nodes", &body_bytes, ts);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/hub/nodes")
+        .header("content-type", "application/json")
+        .header("x-oen-signature", &sig)
+        .header("x-oen-timestamp", ts.to_string())
+        .body(Body::from(body_bytes))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();
@@ -349,13 +434,15 @@ async fn e2e_gene_promoted_event() {
         "version": "0.3.0"
     });
     let reg_bytes = serde_json::to_vec(&reg_body).unwrap();
-    let reg_sig = sign_body(&origin_key, &reg_bytes);
+    let reg_ts = Utc::now().timestamp();
+    let reg_sig = sign_request(&origin_key, "POST", "/hub/nodes", &reg_bytes, reg_ts);
 
     let req = Request::builder()
         .method("POST")
         .uri("/hub/nodes")
         .header("content-type", "application/json")
         .header("x-oen-signature", &reg_sig)
+        .header("x-oen-timestamp", reg_ts.to_string())
         .body(Body::from(reg_bytes))
         .unwrap();
 
@@ -372,13 +459,21 @@ async fn e2e_gene_promoted_event() {
         "promoted_at": "2026-05-12T10:00:00Z"
     });
     let event_bytes = serde_json::to_vec(&event_body).unwrap();
-    let event_sig = sign_body(&origin_key, &event_bytes);
+    let event_ts = Utc::now().timestamp();
+    let event_sig = sign_request(
+        &origin_key,
+        "POST",
+        "/hub/events/gene_promoted",
+        &event_bytes,
+        event_ts,
+    );
 
     let req = Request::builder()
         .method("POST")
         .uri("/hub/events/gene_promoted")
         .header("content-type", "application/json")
         .header("x-oen-signature", &event_sig)
+        .header("x-oen-timestamp", event_ts.to_string())
         .body(Body::from(event_bytes))
         .unwrap();
 

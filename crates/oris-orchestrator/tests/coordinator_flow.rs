@@ -56,8 +56,8 @@ async fn flow_creates_pr_with_evidence_after_a2a_session() {
         .starts_with("evidence-a2a-session-"));
     assert_eq!(outcome.pull_request.number, 1);
     assert!(outcome.pull_request.url.contains("/pr/1"));
-    assert_eq!(runtime.accepted_handshakes(), 1);
-    assert!(runtime.completion(&outcome.session_id).is_some());
+    assert_eq!(runtime.accepted_handshakes().unwrap(), 1);
+    assert!(runtime.completion(&outcome.session_id).unwrap().is_some());
 
     let payloads = github.recorded_payloads();
     assert_eq!(payloads.len(), 1);
