@@ -15,6 +15,7 @@ Multi-language client SDKs for the Oris Runtime services. **v0.3.0** — now wit
 |Language|Path|Package|Install|
 |---|---|---|---|
 |Go|`sdks/go/`|`github.com/Colin4k1024/Oris/sdks/go`|`go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0`|
+|Java|`sdks/java/`|`io.oris:oris-sdk`|Maven: `<version>0.3.0</version>`|
 |Python|`sdks/python/`|[`oris-rt-sdk`](https://pypi.org/project/oris-rt-sdk/)|`pip install oris-rt-sdk==0.3.0`|
 |TypeScript|`sdks/typescript/`|[`@colin4k1024/oris-sdk`](https://www.npmjs.com/package/@colin4k1024/oris-sdk)|`npm install @colin4k1024/oris-sdk@0.3.0`|
 
@@ -87,6 +88,33 @@ const exp = new ExperienceClient({ baseUrl: "http://exp:8080", apiKey: "ak", see
 const gene = await exp.share({ gene_id: "g1", confidence: 0.9 });
 ```
 
+### Java
+
+```java
+import io.oris.sdk.hub.HubClient;
+import io.oris.sdk.hub.HubConfig;
+import io.oris.sdk.execution.ExecutionClient;
+import io.oris.sdk.execution.ExecutionConfig;
+import io.oris.sdk.experience.ExperienceClient;
+import io.oris.sdk.experience.ExperienceConfig;
+
+// Hub — register a node
+byte[] seed = new byte[32]; // Ed25519 seed
+HubConfig hubCfg = new HubConfig("http://hub:8080", "key", seed, "n1");
+HubClient hub = new HubClient(hubCfg);
+hub.register("http://my-node:9000", List.of("evolve"), "0.1.0", null);
+
+// Execution — run a job
+ExecutionConfig execCfg = new ExecutionConfig("http://exec:8080", "tok");
+ExecutionClient exec = new ExecutionClient(execCfg);
+exec.runJob("thread-1", Map.of("task", "hello"));
+
+// Experience — share a gene
+ExperienceConfig expCfg = new ExperienceConfig("http://exp:8080", "ak", seed, "agent-1");
+ExperienceClient exp = new ExperienceClient(expCfg);
+exp.share(Map.of("gene_id", "g1", "confidence", 0.9));
+```
+
 ## MySQL Storage (v0.3.0+)
 
 Use MySQL as a shared gene store for team/server deployments. The API is identical to SQLite — just change the config.
@@ -143,6 +171,19 @@ const results = await client.store.query({ taskClass: "error-handling" });
 client.close();
 ```
 
+### Java (MySQL)
+
+```java
+import io.oris.sdk.store.SqliteGeneStore;
+// For MySQL, use MySQLGeneStore (coming soon) or implement GeneStore interface
+
+// SQLite (default)
+SqliteGeneStore store = new SqliteGeneStore("oris_genes.db");
+store.save(gene);
+List<Gene> results = store.query(new StoreQuery() {{ setTaskClass("error-handling"); }});
+store.close();
+```
+
 ## Signing
 
 All SDKs use Ed25519 with a 32-byte raw seed:
@@ -159,6 +200,9 @@ All SDKs use Ed25519 with a 32-byte raw seed:
 ```bash
 # Go
 cd sdks/go && go test ./...
+
+# Java
+cd sdks/java && mvn test
 
 # Python
 cd sdks/python && PYTHONPATH=src pytest tests/ -v
