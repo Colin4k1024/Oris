@@ -1,0 +1,150 @@
+<mxfile host="app.diagrams.net" modified="2026-06-11" agent="Claude" version="21.0.0">
+  <diagram id="data-arch" name="Data Architecture">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <!-- Title -->
+        <mxCell id="title" value="Oris 数据架构图" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=24;fontStyle=1;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="700" y="20" width="280" height="40" as="geometry"/>
+        </mxCell>
+        <!-- Data Sources -->
+        <mxCell id="src-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f1f3f5;strokeColor=#adb5bd;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="1720" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="src-label" value="数据产生源 (Data Producers)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#495057;" vertex="1" parent="1">
+          <mxGeometry x="55" y="82" width="220" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="s1" value="Runtime 信号&#xa;(编译诊断/Panic/测试失败)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fa5252;strokeColor=#c92a2a;fontColor=#fff;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="115" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s2" value="Agent 执行结果&#xa;(Graph输出/Tool调用/LLM响应)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7950f2;strokeColor=#6741d9;fontColor=#fff;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="310" y="115" width="240" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s3" value="External Agent&#xa;(SDK上报经验/Gene/Capsule)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1098ad;strokeColor=#0b7285;fontColor=#fff;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="570" y="115" width="230" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s4" value="GitHub/CI&#xa;(Issue/PR/Build结果)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f76707;strokeColor=#d9480f;fontColor=#fff;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="820" y="115" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s5" value="OEN Peer&#xa;(联邦共享Gene)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#37b24d;strokeColor=#2b8a3e;fontColor=#fff;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="115" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s6" value="Operator/CLI&#xa;(手动管理/配置)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="115" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="s7" value="Documents&#xa;(PDF/HTML/CSV/Git)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=10;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="115" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <!-- Core Data Models -->
+        <mxCell id="model-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9db;strokeColor=#fcc419;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="200" width="1720" height="320" as="geometry"/>
+        </mxCell>
+        <mxCell id="model-label" value="核心数据模型 (Core Data Models)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#e67700;" vertex="1" parent="1">
+          <mxGeometry x="55" y="202" width="250" height="26" as="geometry"/>
+        </mxCell>
+        <!-- Gene Model -->
+        <mxCell id="m1" value="Gene (基因)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;id: UUID&#xa;pattern: String (问题模式)&#xa;solution: String (解决方案代码)&#xa;confidence: f64 (0.0-1.0)&#xa;tags: Vec&lt;String&gt;&#xa;task_class: String&#xa;created_at: DateTime&#xa;last_applied: DateTime&#xa;apply_count: u64&#xa;success_count: u64" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#fff5f5;strokeColor=#fa5252;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="235" width="280" height="195" as="geometry"/>
+        </mxCell>
+        <!-- Capsule Model -->
+        <mxCell id="m2" value="Capsule (胶囊)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;id: UUID&#xa;gene_id: UUID (关联Gene)&#xa;context: String (应用上下文)&#xa;outcome: Outcome (成功/失败)&#xa;timestamp: DateTime&#xa;environment: String&#xa;metrics: HashMap&lt;String, f64&gt;&#xa;error_trace: Option&lt;String&gt;" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#fff5f5;strokeColor=#fa5252;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="235" width="280" height="160" as="geometry"/>
+        </mxCell>
+        <!-- Evolution Event -->
+        <mxCell id="m3" value="EvolutionEvent (进化事件)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;id: UUID&#xa;event_type: EventType&#xa;  (Detected|Selected|Mutated|&#xa;   Validated|Solidified|Revoked)&#xa;gene_id: Option&lt;UUID&gt;&#xa;signal: String&#xa;payload: Value&#xa;timestamp: DateTime&#xa;confidence_delta: f64" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#f3f0ff;strokeColor=#7950f2;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="660" y="235" width="280" height="180" as="geometry"/>
+        </mxCell>
+        <!-- Kernel Event -->
+        <mxCell id="m4" value="KernelEvent (内核事件)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;run_id: RunId (UUID)&#xa;seq: Seq (u64, 单调递增)&#xa;step_id: StepId&#xa;action: Action (执行动作)&#xa;effect: Effect (副作用记录)&#xa;timestamp: DateTime&#xa;deterministic: bool&#xa;replay_safe: bool" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#e7f5ff;strokeColor=#339af0;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="960" y="235" width="260" height="170" as="geometry"/>
+        </mxCell>
+        <!-- Graph State -->
+        <mxCell id="m5" value="GraphState (图状态)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;thread_id: String&#xa;checkpoint_id: UUID&#xa;node_states: HashMap&#xa;channel_values: HashMap&#xa;metadata: Value&#xa;created_at: DateTime&#xa;parent_checkpoint: Option&lt;UUID&gt;" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#e7f5ff;strokeColor=#339af0;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="235" width="260" height="155" as="geometry"/>
+        </mxCell>
+        <!-- Hub Registry -->
+        <mxCell id="m6" value="NodeRegistration (节点注册)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;node_id: String&#xa;endpoint: URL&#xa;capabilities: Vec&lt;String&gt;&#xa;version: String&#xa;public_key: Ed25519PubKey&#xa;last_heartbeat: DateTime&#xa;status: Active|Stale|Dead" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#d3f9d8;strokeColor=#37b24d;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="1520" y="235" width="220" height="155" as="geometry"/>
+        </mxCell>
+        <!-- Row 2 Models -->
+        <mxCell id="m7" value="Job (执行任务)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;job_id: UUID&#xa;thread_id: String&#xa;status: Pending|Running|Done|Failed&#xa;input: Value&#xa;output: Option&lt;Value&gt;&#xa;lease_id: UUID&#xa;priority: u32&#xa;created_at / completed_at" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#e7f5ff;strokeColor=#339af0;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="445" width="270" height="165" as="geometry"/>
+        </mxCell>
+        <mxCell id="m8" value="Subscription (订阅)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;id: UUID&#xa;subscriber_id: String&#xa;filter_tags: Vec&lt;String&gt;&#xa;callback_url: URL&#xa;min_confidence: f64&#xa;created_at: DateTime" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#d3f9d8;strokeColor=#37b24d;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="350" y="445" width="250" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="m9" value="OEN Envelope (网络信封)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;sender_id: String&#xa;receiver_id: Option&lt;String&gt;&#xa;payload: Vec&lt;u8&gt;&#xa;signature: Ed25519Signature&#xa;timestamp: DateTime&#xa;nonce: u64&#xa;ttl: Duration" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#d3f9d8;strokeColor=#37b24d;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="620" y="445" width="260" height="150" as="geometry"/>
+        </mxCell>
+        <mxCell id="m10" value="MutationProposal (突变提案)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;id: UUID&#xa;original_code: String&#xa;proposed_code: String&#xa;signal: String (触发信号)&#xa;gene_id: Option&lt;UUID&gt;&#xa;verdict: Promote|ApplyOnly|Reject&#xa;composite_score: f64&#xa;anti_patterns: Vec&lt;AntiPattern&gt;" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#fff0f6;strokeColor=#f06595;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="900" y="445" width="280" height="165" as="geometry"/>
+        </mxCell>
+        <mxCell id="m11" value="EVU Ledger Entry (信用条目)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;entry_id: UUID&#xa;node_id: String&#xa;amount: i64 (正=奖励 负=消耗)&#xa;reason: String&#xa;balance_after: u64&#xa;timestamp: DateTime" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#fff9db;strokeColor=#fcc419;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="445" width="260" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="m12" value="SyncLogEntry (同步日志)&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;id: UUID&#xa;gene_id: UUID&#xa;action: Push|Pull|Conflict&#xa;source_node: String&#xa;target_node: String&#xa;timestamp: DateTime&#xa;hlc_clock: u64" style="shape=table;startSize=0;container=0;collapsible=0;childLayout=tableLayout;fixedRows=0;rowLines=1;fontStyle=0;align=left;overflow=fill;html=1;fillColor=#e6fcf5;strokeColor=#20c997;fontSize=10;spacingLeft=8;rounded=1;" vertex="1" parent="1">
+          <mxGeometry x="1480" y="445" width="250" height="150" as="geometry"/>
+        </mxCell>
+        <!-- Storage Layer -->
+        <mxCell id="store-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6fcf5;strokeColor=#38d9a9;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="640" width="1720" height="160" as="geometry"/>
+        </mxCell>
+        <mxCell id="store-label" value="持久化存储层 (Persistence Layer)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#087f5b;" vertex="1" parent="1">
+          <mxGeometry x="55" y="642" width="250" height="26" as="geometry"/>
+        </mxCell>
+        <!-- SQLite Stores -->
+        <mxCell id="st1" value="SQLite: GeneStore&#xa;━━━━━━━━━━━━━━━━━━&#xa;genes (id, confidence, tags_json)&#xa;gene_tags (gene_id, tag) INDEX&#xa;capsules (id, gene_id, outcome)&#xa;sync_log (id, gene_id, action, hlc)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="675" width="280" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="st2" value="SQLite: Checkpoint Store&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;checkpoints (thread_id, checkpoint_id,&#xa;  parent_id, state_json, metadata)&#xa;writes (checkpoint_id, channel, value)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="360" y="675" width="290" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="st3" value="SQLite: Hub Registry&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;nodes (id, endpoint, capabilities,&#xa;  public_key, heartbeat, status)&#xa;subscriptions (id, filter, callback)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="670" y="675" width="270" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="st4" value="SQLite: Kernel Event Store&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;events (run_id, seq, step_id,&#xa;  action, effect, timestamp)&#xa;snapshots (run_id, seq, state)" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="960" y="675" width="260" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="st5" value="PostgreSQL: Runtime Repository&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;jobs (id, thread_id, status, input,&#xa;  output, lease_id, priority)&#xa;leases (id, job_id, holder, expires)&#xa;pgvector: embeddings" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1240" y="675" width="280" height="110" as="geometry"/>
+        </mxCell>
+        <mxCell id="st6" value="External Vector DBs&#xa;━━━━━━━━━━━━━━━━━━━━&#xa;Qdrant | Pinecone | Weaviate&#xa;Chroma | FAISS | MongoDB&#xa;OpenSearch | SurrealDB" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#7950f2;strokeColor=#6741d9;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1540" y="675" width="200" height="110" as="geometry"/>
+        </mxCell>
+        <!-- Data Flow -->
+        <mxCell id="flow-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#adb5bd;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="820" width="1720" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="flow-label" value="数据流转模式 (Data Flow Patterns)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#495057;" vertex="1" parent="1">
+          <mxGeometry x="55" y="822" width="250" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="f1" value="Event Sourcing&#xa;━━━━━━━━━━━━━━━━━━━━━━&#xa;Kernel事件流 → 追加式日志&#xa;→ Replay回放 → 确定性恢复" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e7f5ff;strokeColor=#339af0;fontColor=#1a1a2e;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="855" width="260" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="f2" value="CQRS&#xa;━━━━━━━━━━━━━━━━━━━━━━&#xa;写路径: OEN签名 → 验证 → 写入&#xa;读路径: 无认证 → 缓存 → 返回" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e7f5ff;strokeColor=#339af0;fontColor=#1a1a2e;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="340" y="855" width="260" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="f3" value="Gene Lifecycle&#xa;━━━━━━━━━━━━━━━━━━━━━━&#xa;Detect → Select → Mutate →&#xa;Evaluate → Solidify/Reject&#xa;Confidence 置信度递增衰减" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff0f6;strokeColor=#f06595;fontColor=#1a1a2e;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="620" y="855" width="260" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="f4" value="Federation Sync&#xa;━━━━━━━━━━━━━━━━━━━━━━&#xa;Local Gene → OEN Envelope →&#xa;Gossip广播 → Trust降级 →&#xa;本地Revalidation → 写入" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d3f9d8;strokeColor=#37b24d;fontColor=#1a1a2e;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="900" y="855" width="260" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="f5" value="Local-First Sync&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;SDK本地SQLite → HLC时钟 →&#xa;Push/Pull to Hub → 冲突解决&#xa;→ Merge (Last-Write-Wins)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6fcf5;strokeColor=#20c997;fontColor=#1a1a2e;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="855" width="270" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="f6" value="Checkpoint&#xa;━━━━━━━━━━━━━━━━━━━━━━━━━&#xa;Graph执行 → 状态快照 →&#xa;持久化 → 中断恢复 →&#xa;从Checkpoint续跑" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e7f5ff;strokeColor=#339af0;fontColor=#1a1a2e;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1470" y="855" width="250" height="80" as="geometry"/>
+        </mxCell>
+        <!-- Relationship arrows -->
+        <mxCell id="rel1" value="1:N" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.3;strokeColor=#fa5252;strokeWidth=1.5;endArrow=classic;fontSize=10;fontColor=#fa5252;" edge="1" source="m1" target="m2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="rel2" value="references" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=1;exitY=0.7;entryX=0;entryY=0.5;strokeColor=#7950f2;strokeWidth=1.5;endArrow=classic;dashed=1;fontSize=10;fontColor=#7950f2;" edge="1" source="m1" target="m3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

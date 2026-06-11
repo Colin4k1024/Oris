@@ -1,0 +1,206 @@
+<mxfile host="app.diagrams.net" modified="2026-06-11" agent="Claude" version="21.0.0">
+  <diagram id="tech-arch" name="Technical Architecture">
+    <mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1800" pageHeight="1500" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <!-- Title -->
+        <mxCell id="title" value="Oris 技术架构图" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=24;fontStyle=1;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="700" y="20" width="280" height="40" as="geometry"/>
+        </mxCell>
+        <!-- Layer 0: Tech Stack Summary -->
+        <mxCell id="ts-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1a1a2e;strokeColor=#343a40;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="1720" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ts-label" value="Tech Stack: Rust (Tokio async) | Axum (HTTP) | SQLite/PostgreSQL (Storage) | Ed25519 (Crypto) | 17 Library Crates | 50+ Feature Flags | ~185K LOC" style="text;html=1;align=center;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1;fontColor=#dee2e6;" vertex="1" parent="1">
+          <mxGeometry x="100" y="75" width="1600" height="40" as="geometry"/>
+        </mxCell>
+        <!-- Layer 1: Interface Layer -->
+        <mxCell id="l1-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e7f5ff;strokeColor=#74c0fc;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="140" width="1720" height="130" as="geometry"/>
+        </mxCell>
+        <mxCell id="l1-label" value="接口层 (Interface Layer)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#1864ab;" vertex="1" parent="1">
+          <mxGeometry x="55" y="142" width="200" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="i1" value="Axum HTTP Server&#xa;━━━━━━━━━━━━━━&#xa;• async handler&#xa;• tower middleware&#xa;• graceful shutdown" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="172" width="200" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="i2" value="REST API Contract&#xa;━━━━━━━━━━━━━━&#xa;• OpenAPI 3.0 spec&#xa;• ApiEnvelope&lt;T&gt;&#xa;• Idempotency keys" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="280" y="172" width="200" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="i3" value="Authentication&#xa;━━━━━━━━━━━━━━&#xa;• Bearer Token&#xa;• API Key&#xa;• Ed25519 Signature&#xa;• HMAC Webhook" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="500" y="172" width="200" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="i4" value="Multi-Language SDK&#xa;━━━━━━━━━━━━━━&#xa;• Go (net/http)&#xa;• TypeScript (fetch)&#xa;• Python (httpx)&#xa;• Java (HttpClient)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="720" y="172" width="200" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="i5" value="CLI / Operator&#xa;━━━━━━━━━━━━━━&#xa;• clap argument parse&#xa;• REPL mode&#xa;• JSON/YAML output" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="940" y="172" width="190" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="i6" value="IPC Protocol&#xa;━━━━━━━━━━━━━━&#xa;• Unix Socket&#xa;• Protobuf-like msg&#xa;• Sandbox ↔ Host" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1150" y="172" width="180" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="i7" value="A2A Protocol&#xa;━━━━━━━━━━━━━━&#xa;• Agent-to-Agent&#xa;• JSON-RPC style&#xa;• MCP Bootstrap" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1350" y="172" width="180" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="i8" value="Observability&#xa;━━━━━━━━━━━━━━&#xa;• tracing spans&#xa;• metrics export&#xa;• structured logs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#339af0;strokeColor=#1864ab;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1550" y="172" width="180" height="85" as="geometry"/>
+        </mxCell>
+        <!-- Layer 2: Business Logic -->
+        <mxCell id="l2-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9db;strokeColor=#fcc419;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="290" width="1720" height="280" as="geometry"/>
+        </mxCell>
+        <mxCell id="l2-label" value="业务逻辑层 (Business Logic Layer)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#e67700;" vertex="1" parent="1">
+          <mxGeometry x="55" y="292" width="280" height="26" as="geometry"/>
+        </mxCell>
+        <!-- Crate Map -->
+        <mxCell id="b1" value="oris-evokernel v0.14&#xa;━━━━━━━━━━━━━━━━━━&#xa;进化编排核心 (11 deps)&#xa;Pipeline | Signal | Adapters" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f03e3e;strokeColor=#c92a2a;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="325" width="250" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="b2" value="oris-evolution v0.4&#xa;━━━━━━━━━━━━━━━━━━&#xa;Gene | Capsule | Pipeline&#xa;Confidence | TaskClass | Selector" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8590c;strokeColor=#d9480f;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="330" y="325" width="260" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="b3" value="oris-kernel v0.2&#xa;━━━━━━━━━━━━━━━━━━&#xa;Event Store | Replay Cursor&#xa;Snapshot | Policy | Interrupt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1098ad;strokeColor=#0b7285;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="610" y="325" width="250" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="b4" value="oris-execution-runtime v0.3&#xa;━━━━━━━━━━━━━━━━━━━━━━━━&#xa;Scheduler | Lease | Repository&#xa;CircuitBreaker | Recovery" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1098ad;strokeColor=#0b7285;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="880" y="325" width="280" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="b5" value="oris-runtime v0.61&#xa;━━━━━━━━━━━━━━━━━━&#xa;Agent | Graph | Tools | LLM&#xa;Memory | RAG | VectorStore" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#7048e8;strokeColor=#5f3dc4;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="325" width="260" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="b6" value="oris-orchestrator v0.5&#xa;━━━━━━━━━━━━━━━━━━&#xa;Autonomous Loop | Release&#xa;GitHub Delivery | TaskPlanner" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8590c;strokeColor=#d9480f;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1460" y="325" width="260" height="70" as="geometry"/>
+        </mxCell>
+        <!-- Row 2 -->
+        <mxCell id="b7" value="oris-sandbox v0.3&#xa;OS进程隔离" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f76707;strokeColor=#d9480f;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="410" width="160" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b8" value="oris-governor v0.3&#xa;晋升/冷却策略" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f76707;strokeColor=#d9480f;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="240" y="410" width="160" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b9" value="oris-intake v0.4&#xa;Issue采集去重" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f76707;strokeColor=#d9480f;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="420" y="410" width="150" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b10" value="oris-mutation-eval v0.3&#xa;二阶段质量门控" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f76707;strokeColor=#d9480f;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="590" y="410" width="180" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b11" value="oris-evolution-network v0.5&#xa;OEN Gossip + Ed25519" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#37b24d;strokeColor=#2b8a3e;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="790" y="410" width="210" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b12" value="oris-experience-repo v0.3&#xa;Gene/Capsule HTTP API" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#37b24d;strokeColor=#2b8a3e;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="410" width="210" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b13" value="oris-hub v (latest)&#xa;注册/发现/联邦" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#37b24d;strokeColor=#2b8a3e;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1250" y="410" width="170" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b14" value="oris-economics v0.2&#xa;EVU信用账本" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f76707;strokeColor=#d9480f;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1440" y="410" width="150" height="45" as="geometry"/>
+        </mxCell>
+        <mxCell id="b15" value="oris-spec v0.2&#xa;OUSL YAML" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f76707;strokeColor=#d9480f;fontColor=#fff;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1610" y="410" width="120" height="45" as="geometry"/>
+        </mxCell>
+        <!-- Row 3: Feature Flags -->
+        <mxCell id="ff-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff4e6;strokeColor=#fd7e14;strokeWidth=1;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="470" width="1700" height="85" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff-label" value="Feature Flags (50+)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1;fontColor=#d9480f;" vertex="1" parent="1">
+          <mxGeometry x="70" y="472" width="140" height="22" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff1" value="sqlite-persistence&#xa;postgres&#xa;kernel-postgres" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="70" y="497" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff2" value="qdrant | chroma | faiss&#xa;mongodb | pinecone&#xa;weaviate | opensearch" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="225" y="497" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff3" value="ollama | mistralai&#xa;gemini | bedrock&#xa;deepseek | qwen" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="420" y="497" width="150" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff4" value="execution-server&#xa;mcp-experimental&#xa;a2a-production" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="585" y="497" width="150" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff5" value="full-evolution-experimental&#xa;governor-experimental&#xa;evolution-network-experimental" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="750" y="497" width="230" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff6" value="tree-sitter&#xa;fastembed | flashrank&#xa;html-to-markdown" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="995" y="497" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff7" value="resource-limits&#xa;gossip-dns | gossip-msgpack&#xa;network-mtls | webhook" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="497" width="210" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff8" value="release-automation&#xa;llm-http&#xa;browser-use" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="1395" y="497" width="150" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="ff9" value="yaml | toml | xml&#xa;excel | lopdf&#xa;pdf-extract | git" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#fd7e14;fontColor=#d9480f;fontSize=9;align=left;spacingLeft=5;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="497" width="150" height="50" as="geometry"/>
+        </mxCell>
+        <!-- Layer 3: Infrastructure -->
+        <mxCell id="l3-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6fcf5;strokeColor=#38d9a9;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="590" width="1720" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="l3-label" value="基础设施层 (Infrastructure Layer)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#087f5b;" vertex="1" parent="1">
+          <mxGeometry x="55" y="592" width="250" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf1" value="SQLite (WAL)&#xa;━━━━━━━━━━━━&#xa;• rusqlite&#xa;• Gene/Capsule Store&#xa;• Checkpoint Store&#xa;• Hub Registry&#xa;• Subscription DB" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="622" width="180" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf2" value="PostgreSQL&#xa;━━━━━━━━━━━━&#xa;• sqlx async&#xa;• pgvector extension&#xa;• Runtime Repository&#xa;• Kernel Store" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="260" y="622" width="180" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf3" value="Tokio Runtime&#xa;━━━━━━━━━━━━&#xa;• Multi-threaded&#xa;• async/await&#xa;• Task scheduling&#xa;• Channel (mpsc/broadcast)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="460" y="622" width="200" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf4" value="Crypto (ed25519-dalek)&#xa;━━━━━━━━━━━━━━━━━━&#xa;• Keypair generation&#xa;• Signature sign/verify&#xa;• Timestamp binding&#xa;• Trust chain" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="680" y="622" width="210" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf5" value="Serde / JSON&#xa;━━━━━━━━━━━━&#xa;• serde_json&#xa;• Type-safe models&#xa;• Schema validation&#xa;• API envelope" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="910" y="622" width="170" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf6" value="HTTP Client (reqwest)&#xa;━━━━━━━━━━━━━━━━━━&#xa;• TLS / mTLS&#xa;• Connection pooling&#xa;• Timeout / Retry&#xa;• LLM API calls" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="622" width="190" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf7" value="OS Process Isolation&#xa;━━━━━━━━━━━━━━━━━━&#xa;• std::process&#xa;• Resource limits&#xa;• Timeout kill&#xa;• Tmpdir sandbox" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="622" width="190" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="inf8" value="Tracing / Metrics&#xa;━━━━━━━━━━━━━━━━━━&#xa;• tracing crate&#xa;• span/event model&#xa;• subscriber filter&#xa;• Structured logging" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#20c997;strokeColor=#087f5b;fontColor=#fff;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="1520" y="622" width="190" height="100" as="geometry"/>
+        </mxCell>
+        <!-- Layer 4: Build & Deploy -->
+        <mxCell id="l4-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#adb5bd;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="40" y="750" width="1720" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="l4-label" value="构建与发布 (Build &amp; Distribution)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#495057;" vertex="1" parent="1">
+          <mxGeometry x="55" y="752" width="260" height="26" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep1" value="Cargo Workspace&#xa;(17 lib + 6 example)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="785" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep2" value="crates.io&#xa;(oris-runtime publish)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="320" y="785" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep3" value="npm / PyPI&#xa;(SDK packages)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="560" y="785" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep4" value="GitHub Actions&#xa;(CI/CD + Release)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="780" y="785" width="190" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep5" value="cargo-deny&#xa;(供应链审计)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="785" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep6" value="Docker / Binary&#xa;(部署产物)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="785" width="170" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep7" value="Feature Flag Gate&#xa;(编译时裁剪)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#495057;strokeColor=#343a40;fontColor=#fff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="785" width="170" height="50" as="geometry"/>
+        </mxCell>
+        <!-- Dependency arrows between crate layers -->
+        <mxCell id="dep-e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.5;exitY=1;entryX=0.3;entryY=0;strokeColor=#c92a2a;strokeWidth=1.5;endArrow=classic;" edge="1" source="b1" target="b2" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="dep-e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;exitX=0.7;exitY=1;entryX=0.5;entryY=0;strokeColor=#c92a2a;strokeWidth=1.5;endArrow=classic;" edge="1" source="b1" target="b3" parent="1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

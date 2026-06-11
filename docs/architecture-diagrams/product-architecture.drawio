@@ -1,0 +1,105 @@
+<mxfile host="app.diagrams.net" modified="2026-06-11" agent="Claude" version="21.0.0">
+  <diagram id="product-arch" name="Product Architecture">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <!-- Title -->
+        <mxCell id="title" value="Oris 产品架构图" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=24;fontStyle=1;fontColor=#1a1a2e;" vertex="1" parent="1">
+          <mxGeometry x="580" y="20" width="280" height="40" as="geometry"/>
+        </mxCell>
+        <!-- Layer 1: User Layer -->
+        <mxCell id="layer1-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8f9fa;strokeColor=#dee2e6;strokeWidth=2;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="1520" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="layer1-label" value="用户层 (User Layer)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#495057;" vertex="1" parent="1">
+          <mxGeometry x="60" y="85" width="180" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="u1" value="AI Agent&#xa;开发者" style="shape=mxgraph.basic.person;fillColor=#4ecdc4;strokeColor=#2c9c94;fontColor=#ffffff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="115" width="80" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="u2" value="DevOps&#xa;工程师" style="shape=mxgraph.basic.person;fillColor=#4ecdc4;strokeColor=#2c9c94;fontColor=#ffffff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="260" y="115" width="80" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="u3" value="平台&#xa;运维" style="shape=mxgraph.basic.person;fillColor=#4ecdc4;strokeColor=#2c9c94;fontColor=#ffffff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="420" y="115" width="80" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="u4" value="外部Agent&#xa;(Go/TS/Py/Java)" style="shape=mxgraph.basic.person;fillColor=#ff6b6b;strokeColor=#c0392b;fontColor=#ffffff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="600" y="115" width="100" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="u5" value="社区&#xa;贡献者" style="shape=mxgraph.basic.person;fillColor=#4ecdc4;strokeColor=#2c9c94;fontColor=#ffffff;fontSize=11;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="780" y="115" width="80" height="70" as="geometry"/>
+        </mxCell>
+        <!-- Layer 2: Product Capabilities -->
+        <mxCell id="layer2-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f4f8;strokeColor=#b8daff;strokeWidth=2;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="40" y="220" width="1520" height="180" as="geometry"/>
+        </mxCell>
+        <mxCell id="layer2-label" value="产品能力层 (Product Capabilities)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#495057;" vertex="1" parent="1">
+          <mxGeometry x="60" y="225" width="280" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="p1" value="自进化执行引擎&#xa;━━━━━━━━━━━━━━&#xa;• 问题检测&#xa;• 基因选择与突变&#xa;• 沙箱验证&#xa;• 信心评估与固化" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#667eea;strokeColor=#4c63d2;fontColor=#ffffff;fontSize=11;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="60" y="260" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="p2" value="持久化执行运行时&#xa;━━━━━━━━━━━━━━&#xa;• 确定性内核&#xa;• 事件日志与回放&#xa;• 中断恢复&#xa;• 快照与租约" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#667eea;strokeColor=#4c63d2;fontColor=#ffffff;fontSize=11;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="300" y="260" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="p3" value="分布式经验网络&#xa;━━━━━━━━━━━━━━&#xa;• Hub注册发现&#xa;• 联邦基因查询&#xa;• OEN签名验证&#xa;• 订阅推送通知" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#667eea;strokeColor=#4c63d2;fontColor=#ffffff;fontSize=11;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="540" y="260" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="p4" value="Agent工作流引擎&#xa;━━━━━━━━━━━━━━&#xa;• StateGraph编排&#xa;• Multi-Agent路由&#xa;• RAG/Chain/Memory&#xa;• 10+向量数据库" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#667eea;strokeColor=#4c63d2;fontColor=#ffffff;fontSize=11;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="780" y="260" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="p5" value="自主运维与交付&#xa;━━━━━━━━━━━━━━&#xa;• Issue自动Intake&#xa;• 任务规划与排期&#xa;• 自动发布到GitHub&#xa;• Operator CLI管理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#667eea;strokeColor=#4c63d2;fontColor=#ffffff;fontSize=11;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="260" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <mxCell id="p6" value="多语言SDK&#xa;━━━━━━━━━━━━━━&#xa;• Go / TypeScript&#xa;• Python / Java&#xa;• Local-First存储&#xa;• Ed25519签名" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#667eea;strokeColor=#4c63d2;fontColor=#ffffff;fontSize=11;align=left;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="260" width="220" height="120" as="geometry"/>
+        </mxCell>
+        <!-- Layer 3: Core Value -->
+        <mxCell id="layer3-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3cd;strokeColor=#ffc107;strokeWidth=2;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="40" y="420" width="1520" height="140" as="geometry"/>
+        </mxCell>
+        <mxCell id="layer3-label" value="核心价值主张 (Core Value Proposition)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#495057;" vertex="1" parent="1">
+          <mxGeometry x="60" y="425" width="320" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="v1" value="🧬 经验复用&#xa;已验证的基因直接Replay&#xa;跳过重复推理" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd93d;strokeColor=#e6b800;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="80" y="460" width="240" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="v2" value="🔒 安全进化&#xa;沙箱隔离+二阶段评估&#xa;确保零回归" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd93d;strokeColor=#e6b800;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="360" y="460" width="240" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="v3" value="🌐 分布式协作&#xa;多Agent共享经验池&#xa;信任降级+本地验证" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd93d;strokeColor=#e6b800;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="640" y="460" width="240" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="v4" value="⚡ 确定性执行&#xa;事件溯源+精确回放&#xa;崩溃恢复无数据丢失" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd93d;strokeColor=#e6b800;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="920" y="460" width="240" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="v5" value="🚀 自主交付&#xa;Issue→PR→Release&#xa;全自动化闭环" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd93d;strokeColor=#e6b800;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="460" width="240" height="80" as="geometry"/>
+        </mxCell>
+        <!-- Layer 4: Deployment Modes -->
+        <mxCell id="layer4-bg" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f0f0f0;strokeColor=#cccccc;strokeWidth=2;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="40" y="580" width="1520" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="layer4-label" value="部署模式 (Deployment Modes)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#495057;" vertex="1" parent="1">
+          <mxGeometry x="60" y="585" width="240" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="d1" value="单机嵌入式&#xa;(Local-First)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8e6cf;strokeColor=#56ab91;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="100" y="620" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="d2" value="微服务集群&#xa;(Hub+Repo+Runtime)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8e6cf;strokeColor=#56ab91;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="380" y="620" width="240" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="d3" value="联邦网络&#xa;(Multi-Hub Federation)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8e6cf;strokeColor=#56ab91;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="700" y="620" width="240" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="d4" value="crates.io Library&#xa;(Rust嵌入)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8e6cf;strokeColor=#56ab91;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="620" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="d5" value="SDK接入&#xa;(Go/TS/Py/Java)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#a8e6cf;strokeColor=#56ab91;fontColor=#1a1a2e;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="620" width="200" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
