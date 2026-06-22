@@ -14,7 +14,7 @@
 
 1. **可优先标准化**：已经有稳定边界、测试覆盖和生产语义的能力。首选是 `a2a-production` 依赖的 A2A contract/network facade。
 2. **需补契约后标准化**：已有实现和示例，但 API、数据契约、错误语义、验证矩阵还不足。包括 `evolution-experimental`、`governor-experimental`、`agent-contract-experimental` 中被 A2A 稳定路径实际依赖的子集。
-3. **继续实验隔离**：能力仍是 scaffold 或强依赖外部运行环境，不能直接改成标准。包括 `economics-experimental`、`spec-experimental`、`mcp-experimental`、`release-automation-experimental`、完整 `full-evolution-experimental`。
+3. **继续实验隔离**：能力仍是 scaffold 或强依赖外部运行环境，不能直接改成标准。包括 `economics-experimental`、`spec-experimental`、`release-automation-experimental`、完整 `full-evolution-experimental`。
 
 最短标准化路径不是把所有 `*-experimental` 直接重命名，而是增加标准 feature alias，保留旧 feature 作为兼容入口，并逐步把文档和示例迁移过去。
 
@@ -30,7 +30,7 @@
 
 | Feature | 当前依赖 | 观察 |
 |---|---|---|
-| `mcp-experimental` | `execution-server` | MCP bootstrap 仅暴露 `/v1/mcp/*`，文档明确 experimental |
+| `mcp-bootstrap` | `mcp-experimental` | 标准 bootstrap/capability discovery 入口；旧名保留兼容 |
 | `evokernel-facade` | `dep:oris-evokernel` | 内部 facade，不直接面向用户语义 |
 | `evolution-experimental` | `evokernel-facade` | 暴露 `oris_runtime::evolution` |
 | `governor-experimental` | `evokernel-facade` | 暴露 `oris_runtime::governor` |
@@ -177,7 +177,6 @@ evolution-network-experimental = ["evokernel-facade", "evolution-experimental"]
 |---|---|
 | `economics-experimental` | 当前文档仍称 local ledger scaffold，缺少稳定账本语义和跨节点一致性保证 |
 | `spec-experimental` | OUSL compiler 仍是 repository-native scaffold，缺少兼容策略 |
-| `mcp-experimental` | MCP bootstrap 处于 v0 bootstrap 合约，且路由默认 disabled |
 | `release-automation-experimental` | 涉及自动发布，高风险，需安全/权限/回滚证明 |
 | `full-evolution-experimental` | 聚合过宽，不能整体标准化 |
 

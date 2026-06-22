@@ -34,7 +34,7 @@
 - 不标准化 `full-evolution-experimental`。
 - 不标准化 `economics-experimental`。
 - 不标准化 `spec-experimental`。
-- 不标准化 `mcp-experimental`。
+- 不标准化完整 MCP 协议，仅标准化 bootstrap/capability discovery 切片。
 - 不标准化 `release-automation-experimental`。
 - 不宣称 always-on autonomous self-evolution 稳定。
 
@@ -212,7 +212,6 @@ evolution-experimental = ["task-class-toml"]
 
 保留实验隔离：
 
-- `mcp-experimental`
 - `economics-experimental`
 - `spec-experimental`
 - `full-evolution-experimental`
@@ -235,6 +234,51 @@ cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolu
 - 标准 `task-class-toml` feature 可编译并通过 TOML 加载测试。
 - 旧 `evolution-experimental` 兼容入口仍可编译并通过同一测试。
 - `oris-runtime/full-evolution-experimental` wiring 仍通过。
+
+---
+
+## 第三批处理范围
+
+目标：
+
+- 将 MCP bootstrap/capability discovery 从 `mcp-experimental` 推荐入口迁出。
+- 新增标准 feature `mcp-bootstrap`，旧 `mcp-experimental` 保留为兼容别名。
+- starter Axum 示例改用 `mcp-bootstrap`。
+- 文档明确：标准化范围只包含 bootstrap metadata 与 capability discovery，不声明完整 MCP 协议生命周期稳定。
+
+实现：
+
+```toml
+mcp-bootstrap = ["mcp-experimental"]
+mcp-experimental = ["execution-server"]
+```
+
+保留实验隔离：
+
+- 完整 MCP JSON-RPC transport/session lifecycle
+- MCP tool invocation bridge
+- MCP auth/session identity bridge
+- `economics-experimental`
+- `spec-experimental`
+- `full-evolution-experimental`
+- `release-automation-experimental`
+
+已执行：
+
+```bash
+cargo fmt --all -- --check
+cargo test -p oris-runtime --features "execution-server,mcp-bootstrap" mcp_
+cargo test -p oris-runtime --features "execution-server,mcp-experimental" mcp_
+cargo test -p oris-execution-server --features mcp-bootstrap --no-run
+cargo test -p oris_starter_axum --no-run
+```
+
+结果：
+
+- 标准 `mcp-bootstrap` 入口通过 MCP bootstrap/capability discovery 测试。
+- 旧 `mcp-experimental` 兼容入口通过同一测试。
+- `oris-execution-server/mcp-bootstrap` 可编译。
+- starter Axum 示例使用标准 `mcp-bootstrap` 后可编译。
 
 ---
 

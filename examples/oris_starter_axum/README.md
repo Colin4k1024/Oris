@@ -93,7 +93,7 @@ This starter enables `a2a-production` by default. The stable compatibility surfa
 Experimental evolution-network endpoints such as `/v1/evolution/publish` and `/evolution/a2a/*`
 remain hidden unless `full-evolution-experimental` is explicitly enabled.
 
-## MCP capability discovery smoke test (experimental bootstrap slice)
+## MCP capability discovery smoke test
 
 Enable MCP bootstrap:
 

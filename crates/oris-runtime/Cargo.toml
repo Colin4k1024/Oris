@@ -243,6 +243,10 @@ execution-server = [
     "oris-kernel/execution-server",
     "oris-execution-runtime/execution-server",
 ]
+# Standard MCP bootstrap metadata and capability discovery slice. The legacy
+# `mcp-experimental` feature remains enabled underneath so existing cfg gates
+# and downstream users keep working during the migration window.
+mcp-bootstrap = ["mcp-experimental"]
 mcp-experimental = ["execution-server"]
 # Stable /a2a compatibility boundary for production execution flows.
 a2a-production = [

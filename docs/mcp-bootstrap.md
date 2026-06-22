@@ -1,16 +1,18 @@
-# MCP Bootstrap (Slice 1)
+# MCP Bootstrap (Standard Slice)
 
-This document defines the first MCP integration slice shipped for Oris runtime.
+This document defines the MCP bootstrap integration slice shipped for Oris runtime.
 
 ## Scope in this slice
 
-- Compile-time gate: `mcp-experimental` feature.
+- Compile-time gate: `mcp-bootstrap` feature.
+- Legacy compatibility gate: `mcp-experimental`.
 - Runtime gate: `ORIS_MCP_BOOTSTRAP_ENABLED`.
 - Bootstrap status endpoint: `GET /v1/mcp/bootstrap`.
 - Capability discovery endpoint: `GET /v1/mcp/capabilities` (enabled only when bootstrap gate is on).
 - Capability registry includes at least one Oris-backed tool mapping.
 
-This slice intentionally does **not** claim full MCP protocol support.
+This slice intentionally does **not** claim full MCP protocol support. It only
+standardizes bootstrap metadata and capability discovery.
 
 ## Bootstrap configuration
 
