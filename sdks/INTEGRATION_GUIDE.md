@@ -14,6 +14,56 @@ Oris 通过三个独立 HTTP 服务对外暴露核心能力，本文档说明如
 - 只想运行任务 → 仅接 **Execution Runtime**
 - 只想贡献/消费 Gene → 仅接 **Experience Repo**（读操作无需认证）
 - 参与完整 Oris 网络 → 三个服务均接
+- 只想在 Agent 框架内复用经验 → 仅接 **本地 Store + Evolution Adapter**，远端 Experience Repo 可后续再启用
+
+---
+
+## Framework Adapter：本地优先进化闭环
+
+Eino / LangChain 适配层位于基础 SDK 之上，不重新实现 HTTP 协议。默认流程：
+
+```text
+工具或 Agent 失败
+  -> detect_signal(error, context)
+  -> 本地 store 查询匹配 Gene
+  -> replay 返回可解释步骤或提示
+  -> 用户/框架执行验证
+  -> solidify 保存新 Gene
+  -> 可选 sync/share 到 Experience Repo
+```
+
+### Python / LangChain
+
+```python
+from langchain.agents import create_agent
+from oris_sdk import LocalStore, OrisEvolutionAdapter
+from oris_sdk.langchain import create_oris_middleware
+
+store = LocalStore("oris_genes.db")
+adapter = OrisEvolutionAdapter(store)
+oris_middleware = create_oris_middleware(adapter, task_class="agent-tool")
+
+agent = create_agent(
+    model="openai:gpt-5",
+    tools=[...],
+    middleware=[oris_middleware],
+)
+```
+
+### Go / Eino
+
+Go 侧提供无框架依赖的 `evolution` core，以及基于 Eino `compose.ToolMiddleware` 的薄绑定：
+
+```go
+adapter := evolution.NewAdapter(store, evolution.ReplayPolicy{
+    MinConfidence: 0.7,
+    Mode: evolution.ReplayModeSuggest,
+})
+
+toolMiddleware := einoadapter.ToolMiddleware(adapter, einoadapter.Config{
+    TaskClass: "eino-tool",
+})
+```
 
 ---
 
@@ -56,11 +106,12 @@ python3 -c "import secrets; print(secrets.token_hex(32))"
 
 ```bash
 # Go
-go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0
+go get github.com/Colin4k1024/Oris/sdks/go@v0.4.0
 
 # Python
-pip install oris-rt-sdk==0.3.0
-pip install oris-rt-sdk[mysql]==0.3.0  # 带 MySQL 支持
+pip install oris-rt-sdk==0.4.0
+pip install oris-rt-sdk[mysql]==0.4.0       # 带 MySQL 支持
+pip install oris-rt-sdk[langchain]==0.4.0   # 带 LangChain 适配器
 
 # TypeScript
 npm install @colin4k1024/oris-sdk@0.3.0

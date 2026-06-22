@@ -8,6 +8,17 @@ from oris_sdk.mysql_store import MySQLStore, MySQLConfig
 from oris_sdk.store_protocol import StoreProtocol
 from oris_sdk.sync_manager import SyncManager
 from oris_sdk.client import OrisClient, OrisConfig
+from oris_sdk.evolution import (
+    OrisEvolutionAdapter,
+    EvolutionSignal,
+    EvolutionCandidate,
+    ReplayDecision,
+    ReplayPolicy,
+    SolidifyInput,
+    Status,
+    ValidationResult,
+    detect_signal,
+)
 
 __all__ = [
     "HubClient",
@@ -33,4 +44,13 @@ __all__ = [
     "SyncManager",
     "OrisClient",
     "OrisConfig",
+    "OrisEvolutionAdapter",
+    "EvolutionSignal",
+    "EvolutionCandidate",
+    "ReplayDecision",
+    "ReplayPolicy",
+    "SolidifyInput",
+    "Status",
+    "ValidationResult",
+    "detect_signal",
 ]

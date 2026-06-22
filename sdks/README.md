@@ -1,6 +1,6 @@
 # Oris SDKs
 
-Multi-language client SDKs for the Oris Runtime services. **v0.3.0** — now with MySQL storage backend.
+Multi-language client SDKs for the Oris Runtime services. **Go/Python v0.4.0** adds Eino and LangChain evolution adapters for agent experience reuse and self-deposition.
 
 ## Services
 
@@ -14,9 +14,9 @@ Multi-language client SDKs for the Oris Runtime services. **v0.3.0** — now wit
 
 |Language|Path|Package|Install|
 |---|---|---|---|
-|Go|`sdks/go/`|`github.com/Colin4k1024/Oris/sdks/go`|`go get github.com/Colin4k1024/Oris/sdks/go@v0.3.0`|
+|Go|`sdks/go/`|`github.com/Colin4k1024/Oris/sdks/go`|`go get github.com/Colin4k1024/Oris/sdks/go@v0.4.0`|
 |Java|`sdks/java/`|`io.oris:oris-sdk`|Maven: `<version>0.3.0</version>`|
-|Python|`sdks/python/`|[`oris-rt-sdk`](https://pypi.org/project/oris-rt-sdk/)|`pip install oris-rt-sdk==0.3.0`|
+|Python|`sdks/python/`|[`oris-rt-sdk`](https://pypi.org/project/oris-rt-sdk/)|`pip install oris-rt-sdk==0.4.0`|
 |TypeScript|`sdks/typescript/`|[`@colin4k1024/oris-sdk`](https://www.npmjs.com/package/@colin4k1024/oris-sdk)|`npm install @colin4k1024/oris-sdk@0.3.0`|
 
 ## Storage Backends
@@ -25,6 +25,31 @@ Multi-language client SDKs for the Oris Runtime services. **v0.3.0** — now wit
 |---|---|---|
 |**SQLite** (default)|Single-node, local-first, zero config|Built-in|
 |**MySQL** (v0.3.0+)|Multi-node teams, shared server|Go: `go-sql-driver/mysql`, Python: `pip install oris-rt-sdk[mysql]`, TS: `npm install mysql2`|
+
+## Framework Adapters
+
+Oris evolution adapters sit above the base SDK clients. They reuse the existing Store, Sync, and Experience clients, then connect Detect -> Select -> Replay -> Validate -> Solidify to an agent framework lifecycle.
+
+| Framework | Path | Status | Install |
+|---|---|---|---|
+| Go / Eino | `sdks/go/evolution`, `sdks/go/einoadapter` | Core + ToolsNode middleware available | `go get github.com/Colin4k1024/Oris/sdks/go@v0.4.0` |
+| Python / LangChain | `oris_sdk.evolution`, `oris_sdk.langchain` | Core + middleware available | `pip install oris-rt-sdk[langchain]==0.4.0` |
+
+The core evolution adapter is local-first: it can select and replay experience from the SDK store without a running Experience Repo. If Experience Repo is configured through the existing SDK, share/fetch can be layered in without changing framework code.
+
+### Agent Experience Self-Deposition
+
+The adapter pattern for both Eino and LangChain is the same:
+
+1. Seed or connect an Oris store.
+2. Let the framework middleware observe tool failures.
+3. Convert the failure into an `EvolutionSignal`.
+4. Select a matching Gene/Capsule from the local store or Experience Repo.
+5. Replay safe instructions back into the agent.
+6. After the retry succeeds, call `solidify` to save the new pattern as a Gene.
+7. Optionally sync/share that Gene to Experience Repo.
+
+That final `solidify` call is the self-deposition step: the agent turns a solved failure into reusable experience for future runs.
 
 ## Quick Start
 
