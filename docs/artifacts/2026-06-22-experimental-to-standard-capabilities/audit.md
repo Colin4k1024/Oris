@@ -1,6 +1,6 @@
 # Audit — Experimental Capabilities to Standard Capabilities
 
-**状态**: implemented-first-batch
+**状态**: implemented-fourth-batch
 **日期**: 2026-06-22
 **阶段**: audit
 **主责角色**: tech-lead / architect
@@ -14,11 +14,17 @@
 
 1. **可优先标准化**：已经有稳定边界、测试覆盖和生产语义的能力。首选是 `a2a-production` 依赖的 A2A contract/network facade。
 2. **需补契约后标准化**：已有实现和示例，但 API、数据契约、错误语义、验证矩阵还不足。包括 `evolution-experimental`、`governor-experimental`、`agent-contract-experimental` 中被 A2A 稳定路径实际依赖的子集。
-3. **继续实验隔离**：能力仍是 scaffold 或强依赖外部运行环境，不能直接改成标准。包括 `economics-experimental`、`spec-experimental`、`release-automation-experimental`、完整 `full-evolution-experimental`。
+3. **继续实验隔离**：能力强依赖外部运行环境、自动发布权限或宽路由边界，不能直接改成标准。包括 `release-automation-experimental`、完整 `full-evolution-experimental`、完整 MCP JSON-RPC/session/tool bridge，以及 evolution-network 宽路由。
 
 最短标准化路径不是把所有 `*-experimental` 直接重命名，而是增加标准 feature alias，保留旧 feature 作为兼容入口，并逐步把文档和示例迁移过去。
 
 第一批已落地：新增标准 feature 入口 `evolution`、`governor`、`agent-contract`、`evolution-network`，并让 `a2a-production` 改为依赖标准入口。旧 `*-experimental` 仍作为内部 cfg 与兼容入口保留。
+
+第二批已落地：`oris-evolution` 的 TOML task-class 加载迁移到标准 `task-class-toml`，旧 `evolution-experimental` 作为兼容别名保留。
+
+第三批已落地：MCP bootstrap metadata/capability discovery 迁移到标准 `mcp-bootstrap`，旧 `mcp-experimental` 作为兼容别名保留；完整 MCP JSON-RPC/session/tool bridge 仍不标准化。
+
+第四批已落地：新增标准 feature 入口 `economics` 与 `spec-contract`，分别限定为本地 EVU ledger/reputation baseline 与 OUSL YAML parsing/mutation-plan compiler baseline。旧 `economics-experimental`、`spec-experimental` 作为兼容别名保留；分布式经济结算与 spec migration 仍不纳入稳定承诺。
 
 ---
 
@@ -35,8 +41,10 @@
 | `evolution-experimental` | `evokernel-facade` | 暴露 `oris_runtime::evolution` |
 | `governor-experimental` | `evokernel-facade` | 暴露 `oris_runtime::governor` |
 | `evolution-network-experimental` | `evokernel-facade`, `evolution-experimental` | 暴露 OEN / A2A evolution routes |
-| `economics-experimental` | `evokernel-facade` | EVU/reputation layer scaffold |
-| `spec-experimental` | `evokernel-facade` | OUSL spec compiler scaffold |
+| `economics` | `economics-experimental` | 标准本地 EVU/reputation baseline |
+| `spec-contract` | `spec-experimental` | 标准 OUSL YAML compiler baseline |
+| `economics-experimental` | `evokernel-facade` | 旧兼容入口 |
+| `spec-experimental` | `evokernel-facade` | 旧兼容入口 |
 | `agent-contract-experimental` | `evokernel-facade` | A2A/proposal contracts |
 | `full-evolution-experimental` | aggregate | 示例和集成测试使用的全量实验 bundle |
 
@@ -175,10 +183,12 @@ evolution-network-experimental = ["evokernel-facade", "evolution-experimental"]
 
 | 能力 | 原因 |
 |---|---|
-| `economics-experimental` | 当前文档仍称 local ledger scaffold，缺少稳定账本语义和跨节点一致性保证 |
-| `spec-experimental` | OUSL compiler 仍是 repository-native scaffold，缺少兼容策略 |
 | `release-automation-experimental` | 涉及自动发布，高风险，需安全/权限/回滚证明 |
 | `full-evolution-experimental` | 聚合过宽，不能整体标准化 |
+| evolution-network 宽路由 | `/v1/evolution/*`、`/evolution/a2a/*`、session replication/lifecycle 属于网络编排扩展，不能等同于稳定 `/a2a/*` |
+| 完整 MCP 协议桥 | JSON-RPC transport、session lifecycle、tool invocation、auth/session identity 尚未形成稳定契约 |
+| distributed economics | 跨节点 EVU 结算、一致性和最终性尚未冻结 |
+| spec migration | OUSL 版本迁移和兼容策略尚未冻结 |
 
 ---
 

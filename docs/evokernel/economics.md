@@ -4,17 +4,18 @@
 > **Implementation Status: In Progress** 🔄
 Source: migrated from internal planning notes.
 
-Last synced: March 3, 2026
+Last synced: June 22, 2026
 
-## Current Implementation Snapshot (March 3, 2026)
+## Current Implementation Snapshot (June 22, 2026)
 
-The current `crates/oris-economics` crate is an experimental local ledger scaffold:
+The current `crates/oris-economics` crate is a standard local ledger baseline:
 
 - `EvuAccount`, `ReputationRecord`, `StakePolicy`, and `ValidationSettlement`
 - `EconomicsSignal` plus `EvuLedger` helpers for:
   publish stake reservation, remote reuse settlement, validator divergence penalties,
   selector reputation bias, and governor-facing signal snapshots
-- experimental re-export through `oris-runtime::economics` behind `economics-experimental`
+- standard re-export through `oris-runtime::economics` behind `economics`
+- legacy `economics-experimental` remains available as a compatibility alias
 
 Currently wired into the checked-in EvoKernel flow:
 
@@ -26,6 +27,7 @@ Still not implemented:
 
 - validator staking enforcement
 - publish-window rate limits
+- cross-node economic consensus or distributed settlement finality
 
 ## Related Documents
 

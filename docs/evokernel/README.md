@@ -21,11 +21,11 @@ Current checked-in boundary:
 If you want to exercise the latest code that exists in this repository today, start with the checked-in example suite and smoke test:
 
 ```bash
-cargo add oris-runtime --features full-evolution-experimental
+cargo add oris-runtime --features evolution
 cargo run -p evo_oris_repo
 cargo run -p evo_oris_repo --bin supervised_devloop
 cargo run -p evo_oris_repo --bin network_exchange
-cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+cargo test -p oris-runtime --features evolution --lib --no-run
 ```
 
 Feature guide:
@@ -34,8 +34,10 @@ Feature guide:
 - `governor` exposes policy-only promotion, revocation, and cooldown decisions.
 - `agent-contract` exposes the proposal-only external agent contract surface.
 - `evolution-network` exposes the network facade; `a2a-production` keeps only the stable `/a2a/*` route subset.
+- `economics` exposes the standard local EVU ledger and reputation accounting surface.
+- `spec-contract` exposes the standard OUSL YAML parsing and mutation-plan compiler surface.
 - `task-class-toml` enables TOML-backed task-class loading in `oris-evolution`.
-- `full-evolution-experimental` matches the repository example and test surface by additionally exposing `economics`, `spec_contract`, and wider experimental network routes.
+- `full-evolution-experimental` remains the aggregate repository demo/test surface and still includes wider experimental network routes.
 - Legacy `*-experimental` feature names remain available as compatibility aliases during the migration window.
 
 The current repository-backed flow is:
@@ -103,10 +105,10 @@ See [evokernel-v0.1.md](../evokernel-v0.1.md) for architecture overview.
 | EvoKernel | `crates/oris-evokernel` | standard supervised baseline, governor-aware capture added | `evolution` |
 | Governor | `crates/oris-governor` | standard policy-only decision surface | `governor` |
 | Evolution Network | `crates/oris-evolution-network` | standard facade entrypoint; wider publish/fetch/revoke routes remain experimental outside `a2a-production` | `evolution-network` |
-| Economics | `crates/oris-economics` | in progress, experimental ledger scaffold | `economics-experimental` |
-| Spec | `crates/oris-spec` | in progress, experimental YAML compiler scaffold | `spec-experimental` |
+| Economics | `crates/oris-economics` | standard local EVU ledger and reputation accounting baseline; distributed settlement semantics remain outside the stable boundary | `economics` |
+| Spec | `crates/oris-spec` | standard OUSL YAML parsing and mutation-plan compiler baseline; migration workflows remain future work | `spec-contract` |
 | Agent Contract | `crates/oris-agent-contract` | standard proposal-only contract surface | `agent-contract` |
-| Full stack | `crates/oris-runtime` re-exports | experimental aggregate | `full-evolution-experimental` |
+| Full stack | `crates/oris-runtime` re-exports | aggregate demo/test surface with experimental wide routes | `full-evolution-experimental` |
 
 The `Gate` column shows the narrowest recommended module-level flag. Use `full-evolution-experimental` only when you want the checked-in example and the full experimental facade bundle exposed through `oris-runtime` together.
 

@@ -14,12 +14,13 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
 - `Publish`, `Fetch`, `Report`, and `Revoke` message types
 - `Gene`, `Capsule`, and `EvolutionEvent` network asset variants
 - request and response structs for publish, fetch, and revoke flows
-- experimental re-export through `oris-runtime::evolution_network` behind `evolution-network-experimental`
+- standard re-export through `oris-runtime::evolution_network` behind `evolution-network`
+- legacy `evolution-network-experimental` remains available as a compatibility alias
 - runtime `execution-server` exposes experimental HTTP routes:
   - `POST /v1/evolution/publish`
   - `POST /v1/evolution/fetch`
   - `POST /v1/evolution/revoke`
-  - `POST /v1/evolution/a2a/handshake` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
+  - `POST /v1/evolution/a2a/handshake` (requires `agent-contract` in addition to `evolution-network`)
   - `POST /a2a/hello` (preferred compatibility handshake endpoint)
   - `POST /a2a/fetch` (compatibility asset + task discovery endpoint with `include_tasks`)
   - `POST /a2a/tasks/distribute` and `POST /a2a/tasks/claim` (compatibility queue aliases)
@@ -37,9 +38,9 @@ The current `crates/oris-evolution-network` crate provides protocol contracts:
   - `GET /v1/evolution/a2a/sessions/:session_id`
   - `GET /v1/evolution/a2a/sessions/:sender_id/replicate`
   - `POST /v1/evolution/a2a/sessions/replicate`
-  - `GET /v1/evolution/a2a/tasks/:task_id/lifecycle` (requires `agent-contract-experimental` in addition to `evolution-network-experimental`)
-- when `agent-contract-experimental` is enabled, publish/fetch/revoke calls require a prior successful handshake for the same `sender_id` and a negotiated matching capability
-- when both `agent-contract-experimental` and `sqlite-persistence` are enabled, negotiated handshake sessions are persisted in runtime storage and can be reused after process restart
+  - `GET /v1/evolution/a2a/tasks/:task_id/lifecycle` (requires `agent-contract` in addition to `evolution-network`)
+- when `agent-contract` is enabled, publish/fetch/revoke calls require a prior successful handshake for the same `sender_id` and a negotiated matching capability
+- when both `agent-contract` and `sqlite-persistence` are enabled, negotiated handshake sessions are persisted in runtime storage and can be reused after process restart
 - runtime task execution, replay outcomes, and worker supervised acknowledgements now emit A2A lifecycle transitions that can be queried by task id
 - remote A2A task session transitions follow `Started -> Dispatched -> InProgress* -> Completed|Failed|Cancelled`
 - session completion payloads are normalized into `ReplayFeedback` (`SkipPlanner` or `PlanFallback`) so remote results can feed replay-aware evolution decisions

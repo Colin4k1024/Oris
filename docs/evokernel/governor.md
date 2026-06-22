@@ -17,7 +17,8 @@ The current `crates/oris-governor` crate implements a narrow default policy:
 - confidence regression checks using decayed confidence vs. historical peak
 - a promotion cooling window
 - `Candidate`, `Promoted`, and `Revoked` decisions
-- experimental re-export through `oris-runtime::governor` behind `governor-experimental`
+- standard re-export through `oris-runtime::governor` behind `governor`
+- legacy `governor-experimental` remains available as a compatibility alias
 
 Not yet implemented in the checked-in crate:
 

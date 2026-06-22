@@ -60,8 +60,8 @@ pub mod agent_contract;
 pub mod chain;
 /// Document loaders: PDF, HTML, CSV, Git, S3, and more (feature-gated). Experimental API in 0.1.x.
 pub mod document_loaders;
-/// Economics layer: EVU ledger and reputation accounting. Experimental API.
-#[cfg(feature = "economics-experimental")]
+/// Economics layer: local EVU ledger and reputation accounting. Standard local capability.
+#[cfg(any(feature = "economics", feature = "economics-experimental"))]
 pub mod economics;
 /// Embedding models (OpenAI, Ollama, FastEmbed, etc.; feature-gated). Experimental API in 0.1.x.
 pub mod embedding;
@@ -105,8 +105,8 @@ pub mod retrievers;
 pub mod schemas;
 /// Semantic routing and routing layers. Experimental API in 0.1.x.
 pub mod semantic_router;
-/// Spec compiler contracts: repository-native OUSL YAML definitions. Experimental API.
-#[cfg(feature = "spec-experimental")]
+/// Spec compiler contracts: repository-native OUSL YAML definitions. Standard compiler capability.
+#[cfg(any(feature = "spec-contract", feature = "spec-experimental"))]
 pub mod spec_contract;
 /// Text splitters and code splitters (tree-sitter when enabled). Experimental API in 0.1.x.
 pub mod text_splitter;

@@ -18,11 +18,11 @@ The current `crates/oris-agent-contract` crate is a proposal-only contract scaff
 - A2A protocol constants (`oris.a2a@0.1.0-experimental`)
 - A2A handshake request/response and capability negotiation envelope types
 - A2A task lifecycle and standard error envelope types
-- direct `oris_runtime::agent_contract` access is gated by `agent-contract-experimental`
+- direct `oris_runtime::agent_contract` access is gated by the standard `agent-contract` feature
 - `examples/evo_oris_repo` exercises the proposal path through `oris-runtime` with `full-evolution-experimental`
 - the checked-in replay example uses `EvoKernel::replay_or_fallback_for_run(...)` so reuse events stay attributable to the current replay execution
-- execution-server exposes experimental `POST /v1/evolution/a2a/handshake` for protocol and capability negotiation when both `agent-contract-experimental` and `evolution-network-experimental` are enabled
-- execution-server enforces negotiated A2A capabilities for `/v1/evolution/publish`, `/v1/evolution/fetch`, and `/v1/evolution/revoke` when `agent-contract-experimental` is enabled
+- execution-server exposes experimental `POST /v1/evolution/a2a/handshake` for protocol and capability negotiation when both `agent-contract` and `evolution-network` are enabled
+- execution-server enforces negotiated A2A capabilities for `/v1/evolution/publish`, `/v1/evolution/fetch`, and `/v1/evolution/revoke` when `agent-contract` is enabled
 - when `sqlite-persistence` is enabled, negotiated A2A sessions are persisted in runtime repository storage and survive process restart
 - negotiated sessions are bound to authenticated caller identity (`actor_type`, `actor_id`, `actor_role`) when auth is enabled
 - execution-server records A2A task lifecycle events (`Queued`, `Running`, `Succeeded`, `Failed`, `Cancelled`) for runtime task execution stages

@@ -69,8 +69,8 @@ These routes are intentionally kept out of the stable production subset.
 If you previously enabled `full-evolution-experimental` only for compatibility `/a2a` traffic:
 
 1. Switch to `a2a-production` for production compatibility traffic.
-2. Use `evolution`, `governor`, `agent-contract`, or `evolution-network` when you only need
-   the corresponding standard capability surface.
+2. Use `evolution`, `governor`, `agent-contract`, `evolution-network`, `economics`, or
+   `spec-contract` when you only need the corresponding standard capability surface.
 3. Keep `full-evolution-experimental` only where publish/fetch/revoke and evolution session
    orchestration are explicitly required.
 4. Update runbooks and monitors to treat `/a2a/*` as the stable entrypoints.

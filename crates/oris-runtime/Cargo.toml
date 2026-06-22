@@ -262,6 +262,8 @@ evolution = ["evolution-experimental"]
 governor = ["governor-experimental"]
 evolution-network = ["evolution-network-experimental"]
 agent-contract = ["agent-contract-experimental"]
+economics = ["economics-experimental"]
+spec-contract = ["spec-experimental"]
 evolution-experimental = ["evokernel-facade"]
 governor-experimental = ["evokernel-facade"]
 evolution-network-experimental = ["evokernel-facade", "evolution-experimental"]
@@ -269,12 +271,12 @@ economics-experimental = ["evokernel-facade"]
 spec-experimental = ["evokernel-facade"]
 agent-contract-experimental = ["evokernel-facade"]
 full-evolution-experimental = [
-    "evolution-experimental",
-    "governor-experimental",
-    "evolution-network-experimental",
-    "economics-experimental",
-    "spec-experimental",
-    "agent-contract-experimental",
+    "evolution",
+    "governor",
+    "evolution-network",
+    "economics",
+    "spec-contract",
+    "agent-contract",
 ]
 # Retriever features
 wikipedia = []

@@ -1,8 +1,8 @@
 # Delivery Plan — Standardize Experimental Capabilities
 
-**状态**: implemented-first-batch
+**状态**: implemented-fourth-batch
 **日期**: 2026-06-22
-**阶段**: story-1-complete-story-2-covered
+**阶段**: story-4-complete
 **关联审查**: `audit.md`
 
 ---
@@ -32,11 +32,10 @@
 ### Out of Scope
 
 - 不标准化 `full-evolution-experimental`。
-- 不标准化 `economics-experimental`。
-- 不标准化 `spec-experimental`。
 - 不标准化完整 MCP 协议，仅标准化 bootstrap/capability discovery 切片。
 - 不标准化 `release-automation-experimental`。
 - 不宣称 always-on autonomous self-evolution 稳定。
+- distributed economics、spec migration 等后续成熟度项不纳入第一批。
 
 ---
 
@@ -212,8 +211,6 @@ evolution-experimental = ["task-class-toml"]
 
 保留实验隔离：
 
-- `economics-experimental`
-- `spec-experimental`
 - `full-evolution-experimental`
 - `release-automation-experimental`
 - evolution-network 宽路由：`/v1/evolution/*` 和 `/evolution/a2a/*`
@@ -258,8 +255,6 @@ mcp-experimental = ["execution-server"]
 - 完整 MCP JSON-RPC transport/session lifecycle
 - MCP tool invocation bridge
 - MCP auth/session identity bridge
-- `economics-experimental`
-- `spec-experimental`
 - `full-evolution-experimental`
 - `release-automation-experimental`
 
@@ -279,6 +274,45 @@ cargo test -p oris_starter_axum --no-run
 - 旧 `mcp-experimental` 兼容入口通过同一测试。
 - `oris-execution-server/mcp-bootstrap` 可编译。
 - starter Axum 示例使用标准 `mcp-bootstrap` 后可编译。
+
+---
+
+## 第四批处理范围
+
+目标：
+
+- 将 `oris-runtime` 的 economics/spec 推荐入口从实验名迁出。
+- 新增标准 feature `economics` 与 `spec-contract`。
+- 保留旧 `economics-experimental` 与 `spec-experimental` 作为兼容别名。
+- 明确标准范围只包含本地 EVU ledger/reputation baseline 与 OUSL YAML parsing/mutation-plan compiler baseline。
+
+实现：
+
+```toml
+economics = ["economics-experimental"]
+spec-contract = ["spec-experimental"]
+economics-experimental = ["evokernel-facade"]
+spec-experimental = ["evokernel-facade"]
+```
+
+保留实验隔离：
+
+- distributed economics：跨节点 EVU 结算、一致性和最终性。
+- spec migration：OUSL 版本迁移和兼容策略。
+- `full-evolution-experimental`：聚合 demo/test surface。
+- `release-automation-experimental`：真实发布执行器。
+- evolution-network 宽路由：`/v1/evolution/*`、`/evolution/a2a/*`、session replication/lifecycle。
+
+验证：
+
+```bash
+cargo fmt --all -- --check
+cargo test -p oris-economics
+cargo test -p oris-spec
+cargo test -p oris-runtime --test economics_feature_wiring --features economics
+cargo test -p oris-runtime --test spec_contract_feature_wiring --features spec-contract
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+```
 
 ---
 
