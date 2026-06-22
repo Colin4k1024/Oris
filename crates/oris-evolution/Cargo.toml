@@ -8,7 +8,8 @@ license = "MIT"
 description = "Append-only evolution memory and pipeline for Oris EvoKernel."
 
 [features]
-evolution-experimental = ["dep:toml"]
+task-class-toml = ["dep:toml"]
+evolution-experimental = ["task-class-toml"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

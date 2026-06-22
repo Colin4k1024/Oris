@@ -30,8 +30,13 @@ cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolu
 
 Feature guide:
 
-- `evolution-experimental` exposes `oris_runtime::evolution` only.
-- `full-evolution-experimental` matches the repository example and test surface by additionally exposing `governor`, `evolution_network`, `economics`, `spec_contract`, and `agent_contract`.
+- `evolution` exposes the standard supervised `oris_runtime::evolution` surface.
+- `governor` exposes policy-only promotion, revocation, and cooldown decisions.
+- `agent-contract` exposes the proposal-only external agent contract surface.
+- `evolution-network` exposes the network facade; `a2a-production` keeps only the stable `/a2a/*` route subset.
+- `task-class-toml` enables TOML-backed task-class loading in `oris-evolution`.
+- `full-evolution-experimental` matches the repository example and test surface by additionally exposing `economics`, `spec_contract`, and wider experimental network routes.
+- Legacy `*-experimental` feature names remain available as compatibility aliases during the migration window.
 
 The current repository-backed flow is:
 
@@ -93,16 +98,16 @@ See [evokernel-v0.1.md](../evokernel-v0.1.md) for architecture overview.
 | Layer | Local crate/module | Status | Gate |
 | --- | --- | --- | --- |
 | Kernel | `crates/oris-kernel` | implemented baseline | default |
-| Evolution | `crates/oris-evolution` | in progress, implemented baseline with extended lifecycle primitives | `evolution-experimental` |
-| Sandbox | `crates/oris-sandbox` | implemented baseline, blast radius helper added | `evolution-experimental` |
-| EvoKernel | `crates/oris-evokernel` | implemented baseline, governor-aware capture added | `evolution-experimental` |
-| Governor | `crates/oris-governor` | in progress, experimental scaffold with default policy | `governor-experimental` |
-| Evolution Network | `crates/oris-evolution-network` | in progress, experimental protocol scaffold | `evolution-network-experimental` |
+| Evolution | `crates/oris-evolution` | standard supervised baseline with extended lifecycle primitives | `evolution` |
+| Sandbox | `crates/oris-sandbox` | standard supervised execution baseline, blast radius helper added | `evolution` |
+| EvoKernel | `crates/oris-evokernel` | standard supervised baseline, governor-aware capture added | `evolution` |
+| Governor | `crates/oris-governor` | standard policy-only decision surface | `governor` |
+| Evolution Network | `crates/oris-evolution-network` | standard facade entrypoint; wider publish/fetch/revoke routes remain experimental outside `a2a-production` | `evolution-network` |
 | Economics | `crates/oris-economics` | in progress, experimental ledger scaffold | `economics-experimental` |
 | Spec | `crates/oris-spec` | in progress, experimental YAML compiler scaffold | `spec-experimental` |
-| Agent Contract | `crates/oris-agent-contract` | in progress, experimental proposal contract scaffold | `agent-contract-experimental` |
+| Agent Contract | `crates/oris-agent-contract` | standard proposal-only contract surface | `agent-contract` |
 | Full stack | `crates/oris-runtime` re-exports | experimental aggregate | `full-evolution-experimental` |
 
-The `Gate` column shows the narrowest module-level flag. Use `full-evolution-experimental` when you want the checked-in example and the full facade bundle exposed through `oris-runtime` together.
+The `Gate` column shows the narrowest recommended module-level flag. Use `full-evolution-experimental` only when you want the checked-in example and the full experimental facade bundle exposed through `oris-runtime` together.
 
 Pages marked `In Progress` describe the target design and now include implementation snapshots where the current crate only exposes a subset of the planned behavior.

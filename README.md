@@ -65,7 +65,7 @@ Oris maps EvoMap concepts to concrete framework behavior:
 | Worker Pool | `EvolutionPipeline` stages |
 | Task Queue | Signal intake and selection flow |
 | Bounty System | Issue intake and prioritization |
-| A2A Protocol | `oris-evolution-network` experimental protocol |
+| A2A Protocol | Stable `/a2a/*` compatibility boundary via `a2a-production`; broader evolution-network routes remain experimental |
 
 See [EvoMap alignment details](docs/evomap-vs-oris-comparison.md).
 
@@ -118,7 +118,7 @@ Maturity below reflects the current checked-in framework surface.
 | Evolution Core | `crates/oris-evolution` | Standard supervised baseline with extended lifecycle primitives | `evolution` |
 | Sandbox | `crates/oris-sandbox` | Standard supervised execution baseline | `evolution` |
 | EvoKernel | `crates/oris-evokernel` | Standard supervised baseline with governor-aware capture | `evolution` |
-| Intake | `crates/oris-intake` | Implemented baseline for issue intake/prioritization | `intake-experimental` |
+| Intake | `crates/oris-intake` | Implemented baseline for issue intake/prioritization | standalone crate |
 | Evolution Network | `crates/oris-evolution-network` | Standard feature entrypoint; `a2a-production` exposes only the stable A2A subset, while publish/fetch/revoke routes remain experimental | `evolution-network` |
 | Experience Repository | `crates/oris-experience-repo` | v0.3.0 — Ed25519 signature verification fully enabled, PKI key registry, rate limiting on all endpoints | standalone crate |
 | Full Framework Facade | `crates/oris-runtime` re-exports | Aggregate framework surface | `full-evolution-experimental` |

@@ -194,6 +194,50 @@ cargo test -p oris-execution-server --features evolution-network --no-run
 
 ---
 
+## 第二批处理范围
+
+目标：
+
+- 将 `oris-evolution` 中 TOML task-class 加载从过宽的 `evolution-experimental` 命名迁出。
+- 新增标准 feature `task-class-toml`，旧 `evolution-experimental` 保留为兼容别名。
+- 修正 README 中不存在的 `intake-experimental` gate，改为 `standalone crate`。
+- 同步 EvoKernel 文档中的标准 feature 指引。
+
+实现：
+
+```toml
+task-class-toml = ["dep:toml"]
+evolution-experimental = ["task-class-toml"]
+```
+
+保留实验隔离：
+
+- `mcp-experimental`
+- `economics-experimental`
+- `spec-experimental`
+- `full-evolution-experimental`
+- `release-automation-experimental`
+- evolution-network 宽路由：`/v1/evolution/*` 和 `/evolution/a2a/*`
+
+已执行：
+
+```bash
+cargo fmt --all -- --check
+cargo test -p oris-evolution
+cargo test -p oris-evolution --features task-class-toml load_task_classes_from_toml_parses_standard_task_class_file
+cargo test -p oris-evolution --features evolution-experimental load_task_classes_from_toml_parses_standard_task_class_file
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+```
+
+结果：
+
+- `oris-evolution` 默认测试通过。
+- 标准 `task-class-toml` feature 可编译并通过 TOML 加载测试。
+- 旧 `evolution-experimental` 兼容入口仍可编译并通过同一测试。
+- `oris-runtime/full-evolution-experimental` wiring 仍通过。
+
+---
+
 ## 推荐执行顺序
 
 1. Story 1 + Story 2 先合并：低风险，直接解决稳定路径依赖实验命名问题。

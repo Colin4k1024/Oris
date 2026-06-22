@@ -322,7 +322,7 @@ pub fn builtin_task_class_definitions() -> Vec<TaskClassDefinition> {
 
 // ─── TOML persistence ─────────────────────────────────────────────────────────
 
-#[cfg(feature = "evolution-experimental")]
+#[cfg(feature = "task-class-toml")]
 #[derive(Deserialize)]
 struct TaskClassesToml {
     task_classes: Vec<TaskClassDefinition>,
@@ -333,8 +333,8 @@ struct TaskClassesToml {
 /// The file must contain a top-level `[[task_classes]]` array whose entries
 /// each have `id`, `name`, `description`, and `signal_keywords` fields.
 ///
-/// Only available with the `evolution-experimental` feature.
-#[cfg(feature = "evolution-experimental")]
+/// Only available with the `task-class-toml` feature.
+#[cfg(feature = "task-class-toml")]
 pub fn load_task_classes_from_toml(
     path: &std::path::Path,
 ) -> Result<Vec<TaskClassDefinition>, String> {
@@ -345,11 +345,11 @@ pub fn load_task_classes_from_toml(
 
 /// Load task class definitions.
 ///
-/// When the `evolution-experimental` feature is enabled, attempts to load from
+/// When the `task-class-toml` feature is enabled, attempts to load from
 /// `~/.oris/oris-task-classes.toml` if it exists; otherwise falls back to
 /// `builtin_task_class_definitions()`.
 pub fn load_task_classes() -> Vec<TaskClassDefinition> {
-    #[cfg(feature = "evolution-experimental")]
+    #[cfg(feature = "task-class-toml")]
     {
         if let Some(home) = std::env::var_os("HOME") {
             let path = std::path::Path::new(&home)
@@ -675,6 +675,35 @@ mod tests {
         assert!(
             has_missing_import,
             "builtin missing-import class must be present"
+        );
+    }
+
+    #[cfg(feature = "task-class-toml")]
+    #[test]
+    fn load_task_classes_from_toml_parses_standard_task_class_file() {
+        let path =
+            std::env::temp_dir().join(format!("oris-task-classes-{}.toml", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"
+[[task_classes]]
+id = "api-contract"
+name = "API Contract"
+description = "Request and response contract changes"
+signal_keywords = ["openapi", "schema", "breaking"]
+"#,
+        )
+        .expect("write task class toml");
+
+        let defs = load_task_classes_from_toml(&path).expect("parse task class toml");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].id, "api-contract");
+        assert_eq!(defs[0].name, "API Contract");
+        assert_eq!(
+            defs[0].signal_keywords,
+            vec!["openapi", "schema", "breaking"]
         );
     }
 }
