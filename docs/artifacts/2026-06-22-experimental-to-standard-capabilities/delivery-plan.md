@@ -1,8 +1,8 @@
 # Delivery Plan — Standardize Experimental Capabilities
 
-**状态**: implemented-fourth-batch
+**状态**: implemented-fifth-batch
 **日期**: 2026-06-22
-**阶段**: story-4-complete
+**阶段**: story-5-complete
 **关联审查**: `audit.md`
 
 ---
@@ -311,6 +311,43 @@ cargo test -p oris-economics
 cargo test -p oris-spec
 cargo test -p oris-runtime --test economics_feature_wiring --features economics
 cargo test -p oris-runtime --test spec_contract_feature_wiring --features spec-contract
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+```
+
+---
+
+## 第五批处理范围
+
+目标：
+
+- 将已经标准化的 runtime facade 与 execution-server 条件编译从“只识别实验名”迁移到 `any(standard, legacy)`。
+- 覆盖 `evolution`、`governor`、`agent-contract`、`evolution-network`、`mcp-bootstrap`。
+- 保持旧 `*-experimental` 和 `mcp-experimental` 编译入口兼容。
+- 不迁移 `full-evolution-experimental`，因为它仍是刻意保留的聚合实验边界。
+
+实现：
+
+```rust
+#[cfg(any(feature = "evolution", feature = "evolution-experimental"))]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
+#[cfg(all(
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(feature = "evolution-network", feature = "evolution-network-experimental"),
+))]
+```
+
+验证：
+
+```bash
+cargo fmt --all -- --check
+cargo test -p oris-runtime --features evolution --lib --no-run
+cargo test -p oris-runtime --features governor --lib --no-run
+cargo test -p oris-runtime --features agent-contract --lib --no-run
+cargo test -p oris-runtime --features evolution-network --lib --no-run
+cargo test -p oris-runtime --features "execution-server,mcp-bootstrap" mcp_
+cargo test -p oris-runtime --features "sqlite-persistence,execution-server,a2a-production" a2a_production_route_boundary_hides_evolution_network_routes
+cargo test -p oris-runtime --test architecture --features "execution-server,agent-contract,evolution-network" gep_
+cargo test -p oris-runtime --features "execution-server,mcp-experimental" mcp_
 cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
 ```
 

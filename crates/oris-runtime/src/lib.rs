@@ -54,7 +54,7 @@
 /// Agents: conversational and unified agents, tools, executor, middleware, Deep Agent. **Stable API.**
 pub mod agent;
 /// Agent runtime contract: proposal-only interface for external agents. Standard capability.
-#[cfg(feature = "agent-contract-experimental")]
+#[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
 pub mod agent_contract;
 /// Chains: LLM, conversational, sequential, QA, SQL, RAG chains and options. Experimental API in 0.1.x.
 pub mod chain;
@@ -68,10 +68,13 @@ pub mod embedding;
 /// Unified error types and utilities.
 pub mod error;
 /// EvoKernel API: supervised mutation, sandboxed validation, evolution memory, replay-first reuse.
-#[cfg(feature = "evolution-experimental")]
+#[cfg(any(feature = "evolution", feature = "evolution-experimental"))]
 pub mod evolution;
 /// Evolution network: OEN envelope and remote asset transport contracts for standard A2A flows.
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 pub mod evolution_network;
 /// Execution runtime control plane, scheduler, repositories, and compatibility re-exports.
 pub mod execution_runtime;
@@ -79,7 +82,7 @@ pub mod execution_runtime;
 #[cfg(feature = "execution-server")]
 pub mod execution_server;
 /// Governor: policy-only promotion, revocation, and cooldown rules. Standard capability.
-#[cfg(feature = "governor-experimental")]
+#[cfg(any(feature = "governor", feature = "governor-experimental"))]
 pub mod governor;
 /// Graph: state graphs, streaming, persistence, subgraphs, interrupts. **Stable API.**
 pub mod graph;

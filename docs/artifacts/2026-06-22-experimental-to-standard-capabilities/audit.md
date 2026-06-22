@@ -1,6 +1,6 @@
 # Audit — Experimental Capabilities to Standard Capabilities
 
-**状态**: implemented-fourth-batch
+**状态**: implemented-fifth-batch
 **日期**: 2026-06-22
 **阶段**: audit
 **主责角色**: tech-lead / architect
@@ -26,6 +26,8 @@
 
 第四批已落地：新增标准 feature 入口 `economics` 与 `spec-contract`，分别限定为本地 EVU ledger/reputation baseline 与 OUSL YAML parsing/mutation-plan compiler baseline。旧 `economics-experimental`、`spec-experimental` 作为兼容别名保留；分布式经济结算与 spec migration 仍不纳入稳定承诺。
 
+第五批已落地：`oris-runtime` 内部 facade、execution-server handler、MCP bootstrap re-export 和 A2A/GEP 架构测试的 `cfg` 条件已迁移为 `any(standard, legacy)` 形式。标准 feature 与旧实验 feature 都能触发同一能力面，代码维护时不再只通过实验名识别这些标准能力。
+
 ---
 
 ## Evidence
@@ -38,23 +40,27 @@
 |---|---|---|
 | `mcp-bootstrap` | `mcp-experimental` | 标准 bootstrap/capability discovery 入口；旧名保留兼容 |
 | `evokernel-facade` | `dep:oris-evokernel` | 内部 facade，不直接面向用户语义 |
-| `evolution-experimental` | `evokernel-facade` | 暴露 `oris_runtime::evolution` |
-| `governor-experimental` | `evokernel-facade` | 暴露 `oris_runtime::governor` |
-| `evolution-network-experimental` | `evokernel-facade`, `evolution-experimental` | 暴露 OEN / A2A evolution routes |
+| `evolution` | `evolution-experimental` | 标准 supervised evolution facade |
+| `governor` | `governor-experimental` | 标准 policy-only governor facade |
+| `agent-contract` | `agent-contract-experimental` | 标准 proposal/A2A contract facade |
+| `evolution-network` | `evolution-network-experimental` | 标准 network facade；宽路由仍按边界隔离 |
 | `economics` | `economics-experimental` | 标准本地 EVU/reputation baseline |
 | `spec-contract` | `spec-experimental` | 标准 OUSL YAML compiler baseline |
+| `evolution-experimental` | `evokernel-facade` | 旧兼容入口 |
+| `governor-experimental` | `evokernel-facade` | 旧兼容入口 |
+| `evolution-network-experimental` | `evokernel-facade`, `evolution-experimental` | 旧兼容入口 |
 | `economics-experimental` | `evokernel-facade` | 旧兼容入口 |
 | `spec-experimental` | `evokernel-facade` | 旧兼容入口 |
-| `agent-contract-experimental` | `evokernel-facade` | A2A/proposal contracts |
+| `agent-contract-experimental` | `evokernel-facade` | 旧兼容入口 |
 | `full-evolution-experimental` | aggregate | 示例和集成测试使用的全量实验 bundle |
 
-`a2a-production` 已是稳定 feature，但仍依赖两个实验 feature 名称：
+`a2a-production` 已是稳定 feature，并依赖标准 feature 名称：
 
 ```toml
 a2a-production = [
     "execution-server",
-    "agent-contract-experimental",
-    "evolution-network-experimental",
+    "agent-contract",
+    "evolution-network",
 ]
 ```
 

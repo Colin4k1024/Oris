@@ -14,9 +14,9 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
-use oris_execution_runtime::models::{
-    BountyRecord, BountyStatus, RecipeRecord, SessionMessageRecord, WorkerRecord,
-};
+#[cfg(feature = "sqlite-persistence")]
+use oris_execution_runtime::models::{BountyRecord, BountyStatus, SessionMessageRecord};
+use oris_execution_runtime::models::{RecipeRecord, WorkerRecord};
 use oris_execution_runtime::{
     ExecutionCheckpointView, ExecutionGraphBridge, ExecutionGraphBridgeErrorKind,
     KernelObservability,
@@ -27,8 +27,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 use crate::agent_contract::{
     infer_replay_fallback_reason_code, normalize_replay_fallback_contract, A2aCapability,
@@ -40,13 +43,25 @@ use crate::agent_contract::{
     AgentCapabilityLevel, AgentRole, ReplayFeedback, ReplayPlannerDirective,
     A2A_TASK_SESSION_PROTOCOL_VERSION,
 };
-#[cfg(all(feature = "evolution-network-experimental", not(test)))]
+#[cfg(all(
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ),
+    not(test)
+))]
 use crate::evolution::default_store_root;
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 use crate::evolution::{
     EvoEvolutionStore, EvolutionNetworkNode, ImportOutcome, JsonlEvolutionStore,
 };
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 use crate::evolution_network::{FetchQuery, FetchResponse, PublishRequest, RevokeNotice};
 use crate::execution_runtime::api_errors::ApiError;
 #[cfg(feature = "sqlite-persistence")]
@@ -69,8 +84,11 @@ use crate::execution_runtime::models::AttemptExecutionStatus;
 use crate::execution_runtime::repository::RuntimeRepository;
 #[cfg(all(
     feature = "sqlite-persistence",
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 use crate::execution_runtime::sqlite_runtime_repository::{A2aCompatTaskRow, A2aSessionRow};
 #[cfg(feature = "sqlite-persistence")]
@@ -189,13 +207,19 @@ pub struct ExecutionApiAuthConfig {
     pub compat_node_secret_role: ApiRole,
     pub keyed_api_keys: HashMap<String, StaticApiKeyConfig>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     issued_compat_node_secrets: Arc<StdRwLock<HashMap<String, A2aIssuedCompatNodeSecret>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     issued_compat_node_secret_by_sender: Arc<StdRwLock<HashMap<String, String>>>,
 }
@@ -207,7 +231,7 @@ pub struct StaticApiKeyConfig {
     pub role: ApiRole,
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum McpTransportKind {
     #[serde(rename = "http")]
@@ -216,7 +240,7 @@ pub enum McpTransportKind {
     Stdio,
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 impl McpTransportKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -234,14 +258,14 @@ impl McpTransportKind {
     }
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 impl Default for McpTransportKind {
     fn default() -> Self {
         Self::Http
     }
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct McpBootstrapConfig {
     pub enabled: bool,
@@ -250,7 +274,7 @@ pub struct McpBootstrapConfig {
     pub server_version: String,
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 impl Default for McpBootstrapConfig {
     fn default() -> Self {
         Self {
@@ -262,7 +286,7 @@ impl Default for McpBootstrapConfig {
     }
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 impl McpBootstrapConfig {
     pub fn from_env() -> Self {
         let mut cfg = Self::default();
@@ -290,7 +314,7 @@ impl McpBootstrapConfig {
     }
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct McpCapabilityMapping {
     pub tool_name: String,
@@ -301,7 +325,7 @@ pub struct McpCapabilityMapping {
     pub input_schema: Value,
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 fn parse_env_bool(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
@@ -309,7 +333,7 @@ fn parse_env_bool(raw: &str) -> bool {
     )
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 fn default_mcp_capability_registry() -> Vec<McpCapabilityMapping> {
     vec![McpCapabilityMapping {
         tool_name: "oris.runtime.jobs.run".to_string(),
@@ -330,8 +354,11 @@ fn default_mcp_capability_registry() -> Vec<McpCapabilityMapping> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct A2aSessionPrincipal {
@@ -341,8 +368,11 @@ struct A2aSessionPrincipal {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug)]
 enum A2aPrivilegeProfile {
@@ -352,8 +382,11 @@ enum A2aPrivilegeProfile {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl A2aPrivilegeProfile {
     fn as_str(&self) -> &'static str {
@@ -389,8 +422,11 @@ impl A2aPrivilegeProfile {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Copy, Debug)]
 enum A2aPrivilegeAction {
@@ -406,8 +442,11 @@ enum A2aPrivilegeAction {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl A2aPrivilegeAction {
     fn as_str(&self) -> &'static str {
@@ -426,8 +465,11 @@ impl A2aPrivilegeAction {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug)]
 struct A2aSession {
@@ -439,8 +481,11 @@ struct A2aSession {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug)]
 struct A2aIssuedCompatNodeSecret {
@@ -449,8 +494,11 @@ struct A2aIssuedCompatNodeSecret {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -465,8 +513,11 @@ enum EvomapSemanticTaskStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl EvomapSemanticTaskStatus {
     fn as_str(&self) -> &'static str {
@@ -496,8 +547,11 @@ impl EvomapSemanticTaskStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapSemanticTaskRecord {
@@ -513,8 +567,11 @@ pub struct EvomapSemanticTaskRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapSemanticSubmissionRecord {
@@ -527,8 +584,11 @@ pub struct EvomapSemanticSubmissionRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapAssetVerificationRecord {
@@ -541,8 +601,11 @@ pub struct EvomapAssetVerificationRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapAssetVoteRecord {
@@ -555,8 +618,11 @@ pub struct EvomapAssetVoteRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -566,8 +632,11 @@ enum EvomapCouncilSessionStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl EvomapCouncilSessionStatus {
     fn as_str(&self) -> &'static str {
@@ -579,8 +648,11 @@ impl EvomapCouncilSessionStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapCouncilSessionRecord {
@@ -594,8 +666,11 @@ pub struct EvomapCouncilSessionRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapCouncilProposalRecord {
@@ -615,8 +690,11 @@ pub struct EvomapCouncilProposalRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -632,8 +710,11 @@ enum EvomapProjectStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl EvomapProjectStatus {
     fn as_str(&self) -> &'static str {
@@ -667,8 +748,11 @@ impl EvomapProjectStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapProjectRecord {
@@ -692,8 +776,11 @@ pub struct EvomapProjectRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapServiceRecord {
@@ -711,8 +798,11 @@ pub struct EvomapServiceRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -723,8 +813,11 @@ enum EvomapBidStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl EvomapBidStatus {
     fn as_str(&self) -> &'static str {
@@ -746,8 +839,11 @@ impl EvomapBidStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapBidRecord {
@@ -766,8 +862,11 @@ pub struct EvomapBidRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct EvomapDisputeRuleRecord {
@@ -781,62 +880,92 @@ pub struct EvomapDisputeRuleRecord {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const A2A_SESSION_TTL_HOURS: i64 = 24;
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const A2A_TASK_EVENT_HISTORY_LIMIT: usize = 256;
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const A2A_COMPAT_CLAIM_LEASE_MS: u64 = 60_000;
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const A2A_COMPAT_TASK_CLAIM_URL: &str = "/a2a/task/claim";
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const A2A_COMPAT_HUB_NODE_ID_DEFAULT: &str = "oris-runtime";
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const GEP_A2A_PROTOCOL_NAME: &str = "gep-a2a";
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const GEP_A2A_PROTOCOL_VERSION: &str = "1.0.0";
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const GEP_A2A_SCHEMA_PROFILE_CURRENT: &str = "gep-a2a-envelope-schema@1";
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 const GEP_A2A_SCHEMA_PROFILE_LEGACY: &str = "gep-a2a-envelope-schema@0";
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 struct GepA2aNegotiationEvidence {
@@ -856,8 +985,11 @@ struct GepA2aNegotiationEvidence {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn capability_to_gep_wire_name(capability: &A2aCapability) -> &'static str {
     match capability {
@@ -872,8 +1004,11 @@ fn capability_to_gep_wire_name(capability: &A2aCapability) -> &'static str {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn capability_from_gep_wire_name(value: &str) -> Option<A2aCapability> {
     let normalized = value
@@ -894,8 +1029,11 @@ fn capability_from_gep_wire_name(value: &str) -> Option<A2aCapability> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn dedup_capabilities(input: Vec<A2aCapability>) -> Vec<A2aCapability> {
     let mut deduped = Vec::new();
@@ -908,8 +1046,11 @@ fn dedup_capabilities(input: Vec<A2aCapability>) -> Vec<A2aCapability> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn parse_gep_capabilities_field(
     capabilities: Option<&Value>,
@@ -981,8 +1122,11 @@ fn parse_gep_capabilities_field(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn gep_schema_hash_from_profile(profile: &str) -> String {
     let mut hasher = Sha256::new();
@@ -991,8 +1135,11 @@ fn gep_schema_hash_from_profile(profile: &str) -> String {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn gep_supported_schema_hashes() -> Vec<String> {
     vec![
@@ -1002,8 +1149,11 @@ fn gep_supported_schema_hashes() -> Vec<String> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn legacy_schema_capability_window() -> Vec<A2aCapability> {
     vec![
@@ -1016,8 +1166,11 @@ fn legacy_schema_capability_window() -> Vec<A2aCapability> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn normalize_gep_schema_hash(
     schema_hash: Option<String>,
@@ -1054,8 +1207,11 @@ fn normalize_gep_schema_hash(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn negotiate_gep_capabilities(
     requested: &[A2aCapability],
@@ -1126,8 +1282,11 @@ fn negotiate_gep_capabilities(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[cfg(feature = "sqlite-persistence")]
 fn append_gep_negotiation_audit_log(
@@ -1155,8 +1314,11 @@ fn append_gep_negotiation_audit_log(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[cfg(not(feature = "sqlite-persistence"))]
 fn append_gep_negotiation_audit_log(
@@ -1169,8 +1331,11 @@ fn append_gep_negotiation_audit_log(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 struct GepA2aEnvelope<T> {
@@ -1195,8 +1360,11 @@ struct GepA2aEnvelope<T> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 trait GepA2aEnvelopeCompatible {
     fn sender_id_mut(&mut self) -> &mut Option<String>;
@@ -1205,8 +1373,11 @@ trait GepA2aEnvelopeCompatible {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn parse_gep_envelope_or_plain<T>(
     raw: Value,
@@ -1349,8 +1520,11 @@ where
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn parse_gep_hello_or_plain(
     raw: Value,
@@ -1484,8 +1658,11 @@ fn parse_gep_hello_or_plain(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aTaskLifecycleResponse {
@@ -1494,8 +1671,11 @@ pub struct A2aTaskLifecycleResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aTaskSessionLookupQuery {
@@ -1504,8 +1684,11 @@ pub struct A2aTaskSessionLookupQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aSessionReplicationExportQuery {
@@ -1513,8 +1696,11 @@ pub struct A2aSessionReplicationExportQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct A2aSessionReplicationPayload {
@@ -1528,8 +1714,11 @@ pub struct A2aSessionReplicationPayload {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aSessionReplicationImportRequest {
@@ -1539,8 +1728,11 @@ pub struct A2aSessionReplicationImportRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aSessionReplicationResponse {
@@ -1551,8 +1743,11 @@ pub struct A2aSessionReplicationResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatDistributeRequest {
@@ -1569,8 +1764,11 @@ pub struct A2aCompatDistributeRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatDistributeResponse {
@@ -1581,8 +1779,11 @@ pub struct A2aCompatDistributeResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -1598,8 +1799,11 @@ pub enum A2aCompatReportStatus {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatReportRequest {
@@ -1629,8 +1833,11 @@ pub struct A2aCompatReportRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatReportResponse {
@@ -1642,8 +1849,11 @@ pub struct A2aCompatReportResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatTaskCompleteRequest {
@@ -1689,8 +1899,11 @@ pub struct A2aCompatTaskCompleteRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatWorkClaimRequest {
@@ -1706,8 +1919,11 @@ pub struct A2aCompatWorkClaimRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatWorkAssignment {
@@ -1723,8 +1939,11 @@ pub struct A2aCompatWorkAssignment {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatWorkClaimResponse {
@@ -1734,8 +1953,11 @@ pub struct A2aCompatWorkClaimResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatWorkCompleteRequest {
@@ -1785,8 +2007,11 @@ pub struct A2aCompatWorkCompleteRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatWorkCompleteResponse {
@@ -1798,8 +2023,11 @@ pub struct A2aCompatWorkCompleteResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatHeartbeatRequest {
@@ -1815,8 +2043,11 @@ pub struct A2aCompatHeartbeatRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatAvailableWorkItem {
@@ -1832,8 +2063,11 @@ pub struct A2aCompatAvailableWorkItem {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatHeartbeatResponse {
@@ -1848,8 +2082,11 @@ pub struct A2aCompatHeartbeatResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatHelloPayload {
@@ -1860,8 +2097,11 @@ pub struct A2aCompatHelloPayload {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatHelloResponse {
@@ -1875,8 +2115,11 @@ pub struct A2aCompatHelloResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatDistributeRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -1893,8 +2136,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatDistributeRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatFetchRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -1911,8 +2157,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatFetchRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatClaimRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -1929,8 +2178,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatClaimRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatReportRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -1947,8 +2199,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatReportRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatTaskCompleteRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -1965,8 +2220,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatTaskCompleteRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatWorkClaimRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -1983,8 +2241,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatWorkClaimRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatWorkCompleteRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -2001,8 +2262,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatWorkCompleteRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl GepA2aEnvelopeCompatible for A2aCompatHeartbeatRequest {
     fn sender_id_mut(&mut self) -> &mut Option<String> {
@@ -2019,8 +2283,11 @@ impl GepA2aEnvelopeCompatible for A2aCompatHeartbeatRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatClaimRequest {
@@ -2034,8 +2301,11 @@ pub struct A2aCompatClaimRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatClaimTask {
@@ -2051,8 +2321,11 @@ pub struct A2aCompatClaimTask {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatClaimResponse {
@@ -2062,8 +2335,11 @@ pub struct A2aCompatClaimResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct A2aCompatFetchRequest {
@@ -2093,8 +2369,11 @@ pub struct A2aCompatFetchRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatFetchTask {
@@ -2112,8 +2391,11 @@ pub struct A2aCompatFetchTask {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct A2aCompatFetchResponse {
@@ -2129,8 +2411,11 @@ pub struct A2aCompatFetchResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug)]
 struct A2aCompatQueueEntry {
@@ -2659,13 +2944,19 @@ impl ExecutionApiAuthConfig {
             compat_node_secret_role: ApiRole::Operator,
             keyed_api_keys: HashMap::new(),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             issued_compat_node_secrets: Arc::new(StdRwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             issued_compat_node_secret_by_sender: Arc::new(StdRwLock::new(HashMap::new())),
         }
@@ -2695,8 +2986,11 @@ impl ExecutionApiAuthConfig {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     fn has_issued_compat_node_secrets(&self) -> bool {
         self.issued_compat_node_secrets
@@ -2711,115 +3005,181 @@ pub struct ExecutionApiState {
     pub compiled: Arc<CompiledGraph<MessagesState>>,
     pub graph_bridge: Arc<dyn ExecutionGraphBridge>,
     pub cancelled_threads: Arc<RwLock<HashSet<String>>>,
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     pub evolution_store: Arc<dyn EvoEvolutionStore>,
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     pub evolution_node: Arc<EvolutionNetworkNode>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     a2a_sessions: Arc<RwLock<HashMap<String, A2aSession>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     a2a_task_lifecycle_events: Arc<RwLock<HashMap<String, Vec<A2aTaskLifecycleEvent>>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     a2a_task_sessions: Arc<RwLock<HashMap<String, A2aTaskSessionSnapshot>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     a2a_compat_task_queue: Arc<RwLock<VecDeque<A2aCompatQueueEntry>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_semantic_tasks: Arc<RwLock<HashMap<String, EvomapSemanticTaskRecord>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_semantic_submissions: Arc<RwLock<HashMap<String, Vec<EvomapSemanticSubmissionRecord>>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_asset_verifications:
         Arc<RwLock<HashMap<String, HashMap<String, EvomapAssetVerificationRecord>>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_asset_votes: Arc<RwLock<HashMap<String, HashMap<String, EvomapAssetVoteRecord>>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_council_sessions: Arc<RwLock<HashMap<String, EvomapCouncilSessionRecord>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_council_active_session_id: Arc<RwLock<Option<String>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_council_proposals: Arc<RwLock<HashMap<String, EvomapCouncilProposalRecord>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_projects: Arc<RwLock<HashMap<String, EvomapProjectRecord>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_project_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_services: Arc<RwLock<HashMap<String, EvomapServiceRecord>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_bids: Arc<RwLock<HashMap<String, EvomapBidRecord>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_dispute_rules: Arc<RwLock<HashMap<String, EvomapDisputeRuleRecord>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_market_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_decision_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_report_idempotency: Arc<RwLock<HashMap<String, Value>>>,
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     evomap_revoke_idempotency: Arc<RwLock<HashMap<String, RevokeNotice>>>,
     pub auth: ExecutionApiAuthConfig,
-    #[cfg(feature = "mcp-experimental")]
+    #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
     pub mcp_bootstrap: McpBootstrapConfig,
-    #[cfg(feature = "mcp-experimental")]
+    #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
     pub mcp_capability_registry: Arc<Vec<McpCapabilityMapping>>,
     #[cfg(feature = "sqlite-persistence")]
     pub idempotency_store: Option<SqliteIdempotencyStore>,
@@ -2835,12 +3195,24 @@ pub struct ExecutionApiState {
 
 impl ExecutionApiState {
     pub fn new(compiled: Arc<CompiledGraph<MessagesState>>) -> Self {
-        #[cfg(all(feature = "evolution-network-experimental", test))]
+        #[cfg(all(
+            any(
+                feature = "evolution-network",
+                feature = "evolution-network-experimental"
+            ),
+            test
+        ))]
         let evolution_store: Arc<dyn EvoEvolutionStore> =
             Arc::new(JsonlEvolutionStore::new(std::env::temp_dir().join(
                 format!("oris-runtime-evolution-test-{}", uuid::Uuid::new_v4()),
             )));
-        #[cfg(all(feature = "evolution-network-experimental", not(test)))]
+        #[cfg(all(
+            any(
+                feature = "evolution-network",
+                feature = "evolution-network-experimental"
+            ),
+            not(test)
+        ))]
         let evolution_store: Arc<dyn EvoEvolutionStore> =
             Arc::new(JsonlEvolutionStore::new(default_store_root()));
 
@@ -2848,114 +3220,180 @@ impl ExecutionApiState {
             graph_bridge: Arc::new(CompiledGraphExecutionBridge::new(compiled.clone())),
             compiled,
             cancelled_threads: Arc::new(RwLock::new(HashSet::new())),
-            #[cfg(feature = "evolution-network-experimental")]
+            #[cfg(any(
+                feature = "evolution-network",
+                feature = "evolution-network-experimental"
+            ))]
             evolution_store: evolution_store.clone(),
-            #[cfg(feature = "evolution-network-experimental")]
+            #[cfg(any(
+                feature = "evolution-network",
+                feature = "evolution-network-experimental"
+            ))]
             evolution_node: Arc::new(EvolutionNetworkNode::new(evolution_store)),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             a2a_sessions: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             a2a_task_lifecycle_events: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             a2a_task_sessions: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             a2a_compat_task_queue: Arc::new(RwLock::new(VecDeque::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_semantic_tasks: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_semantic_submissions: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_asset_verifications: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_asset_votes: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_council_sessions: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_council_active_session_id: Arc::new(RwLock::new(None)),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_council_proposals: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_projects: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_project_idempotency: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_services: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_bids: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_dispute_rules: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_market_idempotency: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_decision_idempotency: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_report_idempotency: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(all(
-                feature = "agent-contract-experimental",
-                feature = "evolution-network-experimental"
+                any(feature = "agent-contract", feature = "agent-contract-experimental"),
+                any(
+                    feature = "evolution-network",
+                    feature = "evolution-network-experimental"
+                )
             ))]
             evomap_revoke_idempotency: Arc::new(RwLock::new(HashMap::new())),
             auth: ExecutionApiAuthConfig::default(),
-            #[cfg(feature = "mcp-experimental")]
+            #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
             mcp_bootstrap: McpBootstrapConfig::default(),
-            #[cfg(feature = "mcp-experimental")]
+            #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
             mcp_capability_registry: Arc::new(default_mcp_capability_registry()),
             #[cfg(feature = "sqlite-persistence")]
             idempotency_store: None,
@@ -2990,7 +3428,10 @@ impl ExecutionApiState {
         self
     }
 
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     pub fn with_evolution_store(mut self, store: Arc<dyn EvoEvolutionStore>) -> Self {
         self.evolution_node = Arc::new(EvolutionNetworkNode::new(store.clone()));
         self.evolution_store = store;
@@ -3112,19 +3553,19 @@ impl ExecutionApiState {
         self
     }
 
-    #[cfg(feature = "mcp-experimental")]
+    #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
     pub fn with_mcp_bootstrap(mut self, config: McpBootstrapConfig) -> Self {
         self.mcp_bootstrap = config;
         self
     }
 
-    #[cfg(feature = "mcp-experimental")]
+    #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
     pub fn with_mcp_bootstrap_from_env(mut self) -> Self {
         self.mcp_bootstrap = McpBootstrapConfig::from_env();
         self
     }
 
-    #[cfg(feature = "mcp-experimental")]
+    #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
     pub fn with_mcp_capability_registry(
         mut self,
         capability_registry: Vec<McpCapabilityMapping>,
@@ -3194,8 +3635,11 @@ pub fn build_router(state: ExecutionApiState) -> Router {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
     let router = router
@@ -3335,10 +3779,13 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
             "/a2a/community/governance",
             post(evomap_governance_principles),
         );
-    // Lifecycle query is exposed here only when full-evolution-experimental is
-    // NOT active. When it is active, with_evolution_routes already registers the
-    // same path and a duplicate would panic.
-    #[cfg(not(feature = "full-evolution-experimental"))]
+    // Lifecycle query is exposed from the A2A group only for the stable
+    // production boundary. Wider evolution route sets register the same path
+    // inside `with_evolution_routes`.
+    #[cfg(all(
+        feature = "a2a-production",
+        not(feature = "full-evolution-experimental")
+    ))]
     let router = router.route(
         "/v1/evolution/a2a/tasks/:task_id/lifecycle",
         get(evolution_a2a_task_lifecycle),
@@ -3347,15 +3794,21 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
 }
 
 #[cfg(not(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 )))]
 fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
     router
 }
 
 #[cfg(all(
-    feature = "evolution-network-experimental",
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ),
     any(
         not(feature = "a2a-production"),
         feature = "full-evolution-experimental"
@@ -3368,7 +3821,7 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
         .route("/v1/evolution/revoke", post(evolution_revoke))
         // EvoMap compatibility alias for publish
         .route("/a2a/publish", post(evolution_publish));
-    #[cfg(feature = "agent-contract-experimental")]
+    #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
     let router = router
         .route("/v1/evolution/a2a/handshake", post(evolution_a2a_handshake))
         .route("/evolution/a2a/hello", post(evolution_a2a_hello))
@@ -3420,7 +3873,10 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
 }
 
 #[cfg(not(all(
-    feature = "evolution-network-experimental",
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ),
     any(
         not(feature = "a2a-production"),
         feature = "full-evolution-experimental"
@@ -3430,19 +3886,19 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
     router
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 fn with_mcp_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
     router
         .route("/v1/mcp/bootstrap", get(mcp_bootstrap_status))
         .route("/v1/mcp/capabilities", get(mcp_capability_discovery))
 }
 
-#[cfg(not(feature = "mcp-experimental"))]
+#[cfg(not(any(feature = "mcp-bootstrap", feature = "mcp-experimental")))]
 fn with_mcp_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiState> {
     router
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 #[derive(Clone, Debug, serde::Serialize)]
 struct McpBootstrapStatusResponse {
     enabled: bool,
@@ -3452,7 +3908,7 @@ struct McpBootstrapStatusResponse {
     capability_count: usize,
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 #[derive(Clone, Debug, serde::Serialize)]
 struct McpCapabilityDiscoveryResponse {
     server_name: String,
@@ -3461,7 +3917,7 @@ struct McpCapabilityDiscoveryResponse {
     capabilities: Vec<McpCapabilityMapping>,
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 async fn mcp_bootstrap_status(
     State(state): State<ExecutionApiState>,
     headers: HeaderMap,
@@ -3480,7 +3936,7 @@ async fn mcp_bootstrap_status(
     }))
 }
 
-#[cfg(feature = "mcp-experimental")]
+#[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
 async fn mcp_capability_discovery(
     State(state): State<ExecutionApiState>,
     headers: HeaderMap,
@@ -3507,12 +3963,18 @@ async fn mcp_capability_discovery(
 async fn healthz_endpoint(
     State(_state): State<ExecutionApiState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     let evolution =
         Some(_state.evolution_node.health_snapshot().map_err(|err| {
             ApiError::internal(format!("failed to inspect evolution health: {err}"))
         })?);
-    #[cfg(not(feature = "evolution-network-experimental"))]
+    #[cfg(not(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )))]
     let evolution: Option<serde_json::Value> = None;
 
     Ok((
@@ -3537,8 +3999,11 @@ async fn metrics_endpoint(
     let queue_depth = 0usize;
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     let a2a_task_queue_depth = {
         #[cfg(feature = "sqlite-persistence")]
@@ -3558,17 +4023,26 @@ async fn metrics_endpoint(
         }
     };
     #[cfg(not(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     )))]
     let a2a_task_queue_depth = 0usize;
 
     let body = state
         .runtime_metrics
         .render_prometheus(queue_depth, a2a_task_queue_depth);
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     let mut body = body;
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     {
         let evolution_metrics =
             state
@@ -3836,8 +4310,11 @@ fn api_key_id_from_headers(headers: &HeaderMap) -> Option<&str> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn default_a2a_compat_hub_node_id() -> String {
     std::env::var("ORIS_A2A_HUB_NODE_ID")
@@ -3848,8 +4325,11 @@ fn default_a2a_compat_hub_node_id() -> String {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn generate_issued_compat_node_secret() -> String {
     format!(
@@ -3862,8 +4342,11 @@ fn generate_issued_compat_node_secret() -> String {
 /// Generate a short one-time claim code (6 alphanumeric characters)
 /// Used for EvoMap compatibility - same lifecycle as node_secret
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn generate_claim_code() -> String {
     // Generate a 6-character alphanumeric code from UUID
@@ -3878,8 +4361,11 @@ fn generate_claim_code() -> String {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn purge_expired_issued_compat_node_secrets(
     auth: &ExecutionApiAuthConfig,
@@ -3911,8 +4397,11 @@ fn purge_expired_issued_compat_node_secrets(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn issue_compat_node_secret(
     state: &ExecutionApiState,
@@ -3950,8 +4439,11 @@ fn issue_compat_node_secret(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn authenticate_issued_compat_node_secret(
     headers: &HeaderMap,
@@ -3981,8 +4473,11 @@ fn authenticate_issued_compat_node_secret(
 }
 
 #[cfg(not(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 )))]
 fn authenticate_issued_compat_node_secret(
     _headers: &HeaderMap,
@@ -4127,8 +4622,11 @@ fn resolve_auth_context(headers: &HeaderMap, state: &ExecutionApiState) -> Optio
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn resolve_a2a_principal(
     headers: &HeaderMap,
@@ -4669,8 +5167,11 @@ fn supported_auth_methods(state: &ExecutionApiState) -> Vec<&'static str> {
         methods.push("x-api-key-id+x-api-key");
     }
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     if state.auth.has_issued_compat_node_secrets() {
         methods.push("bearer(issued_node_secret)");
@@ -4757,7 +5258,10 @@ fn validate_worker_id(worker_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 fn validate_sender_id(sender_id: &str) -> Result<(), ApiError> {
     if sender_id.trim().is_empty() {
         return Err(ApiError::bad_request("sender_id must not be empty"));
@@ -4766,8 +5270,11 @@ fn validate_sender_id(sender_id: &str) -> Result<(), ApiError> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn resolve_compat_sender_id(
     sender_id: Option<String>,
@@ -4797,8 +5304,11 @@ fn resolve_compat_sender_id(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn resolve_compat_protocol_version(
     protocol_version: Option<String>,
@@ -4823,16 +5333,22 @@ async fn ensure_not_cancelled(state: &ExecutionApiState, thread_id: &str) -> Res
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn lifecycle_timestamp_ms(now: chrono::DateTime<Utc>) -> u64 {
     now.timestamp_millis().max(0) as u64
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn datetime_from_unix_ms(
     ms: u64,
@@ -4849,8 +5365,11 @@ fn datetime_from_unix_ms(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn append_a2a_task_lifecycle_event(
     state: &ExecutionApiState,
@@ -4877,8 +5396,11 @@ async fn append_a2a_task_lifecycle_event(
 
 async fn record_task_queued(state: &ExecutionApiState, task_id: &str, summary: &str) {
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     {
         append_a2a_task_lifecycle_event(
@@ -4893,16 +5415,22 @@ async fn record_task_queued(state: &ExecutionApiState, task_id: &str, summary: &
     }
 
     #[cfg(not(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     )))]
     let _ = (state, task_id, summary);
 }
 
 async fn record_task_running(state: &ExecutionApiState, task_id: &str, summary: &str) {
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     {
         append_a2a_task_lifecycle_event(
@@ -4917,16 +5445,22 @@ async fn record_task_running(state: &ExecutionApiState, task_id: &str, summary: 
     }
 
     #[cfg(not(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     )))]
     let _ = (state, task_id, summary);
 }
 
 async fn record_task_succeeded(state: &ExecutionApiState, task_id: &str, summary: &str) {
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     {
         append_a2a_task_lifecycle_event(
@@ -4941,8 +5475,11 @@ async fn record_task_succeeded(state: &ExecutionApiState, task_id: &str, summary
     }
 
     #[cfg(not(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     )))]
     let _ = (state, task_id, summary);
 }
@@ -4954,8 +5491,11 @@ async fn record_task_failed(
     details: Option<String>,
 ) {
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     {
         append_a2a_task_lifecycle_event(
@@ -4975,16 +5515,22 @@ async fn record_task_failed(
     }
 
     #[cfg(not(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     )))]
     let _ = (state, task_id, summary, details);
 }
 
 async fn record_task_cancelled(state: &ExecutionApiState, task_id: &str, summary: &str) {
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     {
         append_a2a_task_lifecycle_event(
@@ -4999,15 +5545,21 @@ async fn record_task_cancelled(state: &ExecutionApiState, task_id: &str, summary
     }
 
     #[cfg(not(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     )))]
     let _ = (state, task_id, summary);
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn ensure_task_session_protocol_version(version: &str, rid: &str) -> Result<(), ApiError> {
     let supported_versions = [
@@ -5032,8 +5584,11 @@ fn ensure_task_session_protocol_version(version: &str, rid: &str) -> Result<(), 
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn derive_replay_feedback(req: &A2aTaskSessionCompletionRequest) -> ReplayFeedback {
     let planner_directive = if req.used_capsule {
@@ -5081,8 +5636,11 @@ fn derive_replay_feedback(req: &A2aTaskSessionCompletionRequest) -> ReplayFeedba
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn normalized_experience_field(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
@@ -5094,8 +5652,11 @@ fn normalized_experience_field(value: &str) -> Option<String> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn append_unique_signal(signals: &mut Vec<String>, value: &str) {
     if let Some(normalized) = normalized_experience_field(value) {
@@ -5106,8 +5667,11 @@ fn append_unique_signal(signals: &mut Vec<String>, value: &str) {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn a2a_experience_gene_id(sender_id: &str, task_id: &str, feedback: &ReplayFeedback) -> String {
     let mut hasher = Sha256::new();
@@ -5128,8 +5692,11 @@ fn a2a_experience_gene_id(sender_id: &str, task_id: &str, feedback: &ReplayFeedb
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn persist_a2a_reported_experience(
     state: &ExecutionApiState,
@@ -5195,8 +5762,11 @@ async fn persist_a2a_reported_experience(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn terminal_session_state(terminal_state: &A2aTaskLifecycleState) -> Option<A2aTaskSessionState> {
     match terminal_state {
@@ -5208,8 +5778,11 @@ fn terminal_session_state(terminal_state: &A2aTaskLifecycleState) -> Option<A2aT
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn task_session_ack(
     session: &A2aTaskSessionSnapshot,
@@ -5228,7 +5801,10 @@ fn task_session_ack(
     }
 }
 
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 pub async fn evolution_publish(
     State(state): State<ExecutionApiState>,
     headers: HeaderMap,
@@ -5236,9 +5812,9 @@ pub async fn evolution_publish(
 ) -> Result<Json<ApiEnvelope<ImportOutcome>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
-    #[cfg(feature = "agent-contract-experimental")]
+    #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
     let principal = resolve_a2a_principal(&headers, &state);
-    #[cfg(feature = "agent-contract-experimental")]
+    #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
     ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
@@ -5259,7 +5835,10 @@ pub async fn evolution_publish(
     }))
 }
 
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 pub async fn evolution_fetch(
     State(state): State<ExecutionApiState>,
     headers: HeaderMap,
@@ -5267,9 +5846,9 @@ pub async fn evolution_fetch(
 ) -> Result<Json<ApiEnvelope<FetchResponse>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
-    #[cfg(feature = "agent-contract-experimental")]
+    #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
     let principal = resolve_a2a_principal(&headers, &state);
-    #[cfg(feature = "agent-contract-experimental")]
+    #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
     ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
@@ -5291,7 +5870,10 @@ pub async fn evolution_fetch(
     }))
 }
 
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 pub async fn evolution_revoke(
     State(state): State<ExecutionApiState>,
     headers: HeaderMap,
@@ -5299,9 +5881,9 @@ pub async fn evolution_revoke(
 ) -> Result<Json<ApiEnvelope<RevokeNotice>>, ApiError> {
     let rid = request_id(&headers);
     validate_sender_id(&req.sender_id).map_err(|e| e.with_request_id(rid.clone()))?;
-    #[cfg(feature = "agent-contract-experimental")]
+    #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
     let principal = resolve_a2a_principal(&headers, &state);
-    #[cfg(feature = "agent-contract-experimental")]
+    #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
     ensure_a2a_authorized_action(
         &state,
         &req.sender_id,
@@ -5324,8 +5906,11 @@ pub async fn evolution_revoke(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn runtime_a2a_capabilities() -> Vec<A2aCapability> {
     vec![
@@ -5340,8 +5925,11 @@ fn runtime_a2a_capabilities() -> Vec<A2aCapability> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn negotiate_a2a_handshake(req: &A2aHandshakeRequest) -> A2aHandshakeResponse {
     let Some(negotiated_protocol) = req.negotiate_supported_protocol() else {
@@ -5378,8 +5966,11 @@ fn negotiate_a2a_handshake(req: &A2aHandshakeRequest) -> A2aHandshakeResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn privilege_profile_from_handshake(
     capability_level: &AgentCapabilityLevel,
@@ -5392,8 +5983,11 @@ fn privilege_profile_from_handshake(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn privilege_profile_from_capabilities(
     enabled_capabilities: &[A2aCapability],
@@ -5413,8 +6007,11 @@ fn privilege_profile_from_capabilities(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[cfg(feature = "sqlite-persistence")]
 fn append_a2a_privilege_audit_log(
@@ -5460,8 +6057,11 @@ fn append_a2a_privilege_audit_log(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[cfg(not(feature = "sqlite-persistence"))]
 fn append_a2a_privilege_audit_log(
@@ -5478,8 +6078,11 @@ fn append_a2a_privilege_audit_log(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[cfg(feature = "sqlite-persistence")]
 fn append_a2a_replay_feedback_audit_log(
@@ -5528,8 +6131,11 @@ fn append_a2a_replay_feedback_audit_log(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[cfg(not(feature = "sqlite-persistence"))]
 fn append_a2a_replay_feedback_audit_log(
@@ -5545,8 +6151,11 @@ fn append_a2a_replay_feedback_audit_log(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn ensure_a2a_authorized_action(
     state: &ExecutionApiState,
@@ -5755,8 +6364,11 @@ async fn ensure_a2a_authorized_action(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_handshake(
     State(state): State<ExecutionApiState>,
@@ -5824,8 +6436,11 @@ pub async fn evolution_a2a_handshake(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_hello(
     state: State<ExecutionApiState>,
@@ -5836,8 +6451,11 @@ pub async fn evolution_a2a_hello(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_hello_compat(
     state: State<ExecutionApiState>,
@@ -5905,8 +6523,11 @@ pub async fn evolution_a2a_hello_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_fetch_compat(
     state: State<ExecutionApiState>,
@@ -5948,8 +6569,11 @@ pub async fn evolution_a2a_fetch_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_tasks_distribute_compat(
     state: State<ExecutionApiState>,
@@ -5985,8 +6609,11 @@ pub async fn evolution_a2a_tasks_distribute_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_tasks_claim_compat(
     state: State<ExecutionApiState>,
@@ -6023,8 +6650,11 @@ pub async fn evolution_a2a_tasks_claim_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_tasks_report_compat(
     state: State<ExecutionApiState>,
@@ -6060,8 +6690,11 @@ pub async fn evolution_a2a_tasks_report_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_task_complete_compat(
     state: State<ExecutionApiState>,
@@ -6098,8 +6731,11 @@ pub async fn evolution_a2a_task_complete_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_work_claim_compat(
     state: State<ExecutionApiState>,
@@ -6141,8 +6777,11 @@ pub async fn evolution_a2a_work_claim_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_work_complete_compat(
     state: State<ExecutionApiState>,
@@ -6179,8 +6818,11 @@ pub async fn evolution_a2a_work_complete_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_heartbeat_compat(
     state: State<ExecutionApiState>,
@@ -6233,8 +6875,11 @@ pub async fn evolution_a2a_heartbeat_compat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn compat_envelope_value<T: serde::Serialize>(
     envelope: &ApiEnvelope<T>,
@@ -6247,8 +6892,11 @@ fn compat_envelope_value<T: serde::Serialize>(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn attach_protocol_negotiation(
     root: &mut serde_json::Map<String, Value>,
@@ -6266,8 +6914,11 @@ fn attach_protocol_negotiation(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn compat_fetch_payload(response: &A2aCompatFetchResponse) -> Value {
     let mut payload = serde_json::Map::new();
@@ -6302,8 +6953,11 @@ fn compat_fetch_payload(response: &A2aCompatFetchResponse) -> Value {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn compat_fetch_results(assets: &[crate::evolution_network::NetworkAsset]) -> Vec<Value> {
     assets
@@ -6342,8 +6996,11 @@ fn compat_fetch_results(assets: &[crate::evolution_network::NetworkAsset]) -> Ve
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn compat_asset_id(asset: &crate::evolution_network::NetworkAsset) -> Option<&str> {
     match asset {
@@ -6354,8 +7011,11 @@ fn compat_asset_id(asset: &crate::evolution_network::NetworkAsset) -> Option<&st
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn compat_asset_type(asset: &crate::evolution_network::NetworkAsset) -> &'static str {
     match asset {
@@ -6366,8 +7026,11 @@ fn compat_asset_type(asset: &crate::evolution_network::NetworkAsset) -> &'static
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn compat_asset_content_hash(asset: &crate::evolution_network::NetworkAsset) -> Option<String> {
     match asset {
@@ -6397,8 +7060,11 @@ fn compat_asset_content_hash(asset: &crate::evolution_network::NetworkAsset) -> 
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn compat_asset_matches_filters(
     asset: &crate::evolution_network::NetworkAsset,
@@ -6449,8 +7115,11 @@ fn compat_asset_matches_filters(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn build_a2a_fetch_task(
     session_id: String,
@@ -6483,8 +7152,11 @@ fn build_a2a_fetch_task(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn list_a2a_fetch_tasks(
     state: &ExecutionApiState,
@@ -6541,8 +7213,11 @@ async fn list_a2a_fetch_tasks(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_fetch(
     State(state): State<ExecutionApiState>,
@@ -6663,8 +7338,11 @@ pub async fn evolution_a2a_fetch(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn find_a2a_session_id_for_task(
     state: &ExecutionApiState,
@@ -6686,8 +7364,11 @@ async fn find_a2a_session_id_for_task(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn resolve_compat_task_complete_status(
     req: &A2aCompatTaskCompleteRequest,
@@ -6702,8 +7383,11 @@ fn resolve_compat_task_complete_status(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn default_task_complete_summary(status: &A2aCompatReportStatus) -> &'static str {
     match status {
@@ -6715,8 +7399,11 @@ fn default_task_complete_summary(status: &A2aCompatReportStatus) -> &'static str
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_task_complete(
     state: State<ExecutionApiState>,
@@ -6759,8 +7446,11 @@ pub async fn evolution_a2a_task_complete(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn resolve_active_work_assignment_task_id(
     state: &ExecutionApiState,
@@ -6913,8 +7603,11 @@ async fn resolve_active_work_assignment_task_id(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn validate_active_a2a_task_lease_owner(
     claimed_by: Option<&str>,
@@ -6963,8 +7656,11 @@ fn validate_active_a2a_task_lease_owner(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn ensure_active_a2a_task_lease_owner(
     state: &ExecutionApiState,
@@ -7033,8 +7729,11 @@ async fn ensure_active_a2a_task_lease_owner(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_work_claim(
     state: State<ExecutionApiState>,
@@ -7075,8 +7774,11 @@ pub async fn evolution_a2a_work_claim(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_work_complete(
     State(state): State<ExecutionApiState>,
@@ -7158,8 +7860,11 @@ pub async fn evolution_a2a_work_complete(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_heartbeat(
     State(state): State<ExecutionApiState>,
@@ -7216,8 +7921,11 @@ pub async fn evolution_a2a_heartbeat(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_tasks_distribute(
     State(state): State<ExecutionApiState>,
@@ -7337,8 +8045,11 @@ pub async fn evolution_a2a_tasks_distribute(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_tasks_claim(
     State(state): State<ExecutionApiState>,
@@ -7482,8 +8193,11 @@ pub async fn evolution_a2a_tasks_claim(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_tasks_report(
     State(state): State<ExecutionApiState>,
@@ -7719,8 +8433,11 @@ pub async fn evolution_a2a_tasks_report(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_task_lifecycle(
     State(state): State<ExecutionApiState>,
@@ -7763,8 +8480,11 @@ pub async fn evolution_a2a_task_lifecycle(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_session_start(
     State(state): State<ExecutionApiState>,
@@ -7822,8 +8542,11 @@ pub async fn evolution_a2a_session_start(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_session_dispatch(
     State(state): State<ExecutionApiState>,
@@ -7887,8 +8610,11 @@ pub async fn evolution_a2a_session_dispatch(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_session_progress(
     State(state): State<ExecutionApiState>,
@@ -7959,8 +8685,11 @@ pub async fn evolution_a2a_session_progress(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_session_complete(
     State(state): State<ExecutionApiState>,
@@ -8079,8 +8808,11 @@ pub async fn evolution_a2a_session_complete(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_export_session(
     State(state): State<ExecutionApiState>,
@@ -8176,8 +8908,11 @@ pub async fn evolution_a2a_export_session(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_import_session(
     State(state): State<ExecutionApiState>,
@@ -8284,8 +9019,11 @@ pub async fn evolution_a2a_import_session(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evolution_a2a_session_snapshot(
     State(state): State<ExecutionApiState>,
@@ -10247,8 +10985,11 @@ mod tests {
     use tower::util::ServiceExt;
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     use crate::evolution::EvoEvolutionStore;
     use crate::execution_runtime::models::AttemptExecutionStatus;
@@ -10335,8 +11076,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     async fn handshake_agent_with_caps(
         router: &axum::Router,
@@ -10347,8 +11091,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     async fn handshake_agent_with_caps_and_level(
         router: &axum::Router,
@@ -10385,8 +11132,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     async fn handshake_agent_with_caps_and_protocols(
         router: &axum::Router,
@@ -10429,8 +11179,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     async fn fetch_lifecycle_events(
         router: &axum::Router,
@@ -10503,7 +11256,10 @@ mod tests {
         assert_eq!(legacy_hello_resp.status(), StatusCode::NOT_FOUND);
     }
 
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     #[tokio::test]
     async fn evolution_publish_fetch_and_revoke_routes_work() {
         let store_root =
@@ -10515,7 +11271,7 @@ mod tests {
             )),
         );
 
-        #[cfg(feature = "agent-contract-experimental")]
+        #[cfg(any(feature = "agent-contract", feature = "agent-contract-experimental"))]
         {
             let handshake_json = handshake_agent_with_caps(
                 &router,
@@ -10639,8 +11395,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_publish_requires_handshake_when_agent_contract_enabled() {
@@ -10671,8 +11430,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_publish_rejects_missing_negotiated_capability() {
@@ -10707,8 +11469,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -10762,8 +11527,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -10873,8 +11641,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -10948,8 +11719,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_handshake_route_accepts_compatible_agent() {
@@ -10971,8 +11745,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_handshake_route_rejects_incompatible_protocol() {
@@ -11009,8 +11786,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_handshake_accepts_v1_protocol_only_client() {
@@ -11032,8 +11812,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_hello_compat_exposes_evomap_registration_payload() {
@@ -11059,8 +11842,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn auth_issued_node_secret_from_hello_allows_compat_followup_calls() {
@@ -11119,8 +11905,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_namespace_facade_alias_routes_map_to_existing_compat_handlers() {
@@ -11242,8 +12031,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_reported_experience_is_fetchable_by_new_agent() {
@@ -11376,8 +12168,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_builtin_and_reported_experience_storyline_enforces_retention() {
@@ -11634,8 +12429,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_fetch_supports_asset_filter_fields_for_evolver_client() {
@@ -11851,8 +12649,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_fetch_include_tasks_supports_claim_flow_discovery() {
@@ -12015,8 +12816,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_fetch_returns_sync_cursor_and_supports_resume_token_delta() {
@@ -12141,8 +12945,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_gep_envelope_translation_maps_hello_and_fetch_requests() {
@@ -12245,8 +13052,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_gep_envelope_translation_maps_task_claim_and_complete_requests() {
@@ -12342,8 +13152,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_task_claim_endpoint_reuses_lease_conflict_semantics() {
@@ -12427,8 +13240,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_task_complete_endpoint_maps_terminal_state_and_clears_claimability() {
@@ -12555,8 +13371,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_tasks_report_rejects_running_without_active_claim() {
@@ -12621,8 +13440,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_task_complete_rejects_expired_claim_lease() {
@@ -12719,8 +13541,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_scheduler_deterministic_matrix_is_replay_equivalent() {
@@ -12984,8 +13809,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_work_assignment_lifecycle_blocks_double_complete() {
@@ -13125,8 +13953,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_work_complete_enforces_assignment_ownership() {
@@ -13213,8 +14044,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_work_claim_supports_optional_task_id_filter() {
@@ -13311,8 +14145,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_heartbeat_reports_deterministic_available_work_shape() {
@@ -13459,8 +14296,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_fetch_validation_errors_include_a2a_error_code_details() {
@@ -13564,8 +14404,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_fetch_gep_envelope_validation_matrix_covers_protocol_version_and_payload_errors(
@@ -13712,8 +14555,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_fetch_gep_envelope_rejects_unknown_schema_hash_fail_closed() {
@@ -13767,8 +14613,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_hello_gep_envelope_records_legacy_negotiation_downgrade() {
@@ -13844,8 +14693,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_hello_gep_envelope_rejects_non_hello_message_type_with_deterministic_details(
@@ -13891,7 +14743,10 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "evolution-network-experimental"))]
+    #[cfg(not(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )))]
     #[tokio::test]
     async fn evolution_a2a_namespace_facade_routes_remain_feature_gated_when_disabled() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
@@ -14004,8 +14859,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_compat_distribute_and_report_map_to_session_flow() {
@@ -14144,8 +15002,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_compat_claim_returns_distributed_task_and_respects_active_lease() {
@@ -14279,8 +15140,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_compat_claim_supports_optional_task_id_filter() {
@@ -14437,8 +15301,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_compat_accepts_node_id_alias_and_defaults_protocol_v1() {
@@ -14547,8 +15414,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_compat_e2e_fetch_claim_complete_and_heartbeat_supports_route_variants() {
@@ -14809,8 +15679,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_compat_validation_errors_include_a2a_error_code_details() {
@@ -14866,8 +15739,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -14956,8 +15832,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -15071,8 +15950,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -15163,8 +16045,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_lifecycle_events_track_run_flow_and_query_by_task_id() {
@@ -15215,8 +16100,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_lifecycle_events_capture_replay_failure_terminal_state() {
@@ -15256,8 +16144,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -15322,8 +16213,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_remote_task_session_happy_path_is_executable() {
@@ -15477,8 +16371,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_remote_task_session_failure_semantics_are_deterministic() {
@@ -15571,8 +16468,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_remote_task_session_rejects_incompatible_protocol_version() {
@@ -15617,8 +16517,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evolution_a2a_privilege_profiles_enforce_allow_deny_matrix() {
@@ -15764,8 +16667,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental",
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ),
         feature = "sqlite-persistence"
     ))]
     #[tokio::test]
@@ -15967,8 +16873,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn auth_node_secret_compat_mode_only_applies_to_a2a_paths() {
@@ -16008,8 +16917,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn auth_node_secret_compat_mode_authenticates_and_audits_denied_calls() {
@@ -16475,8 +17387,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn audit_logs_capture_a2a_compat_endpoint_actions() {
@@ -16637,8 +17552,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn audit_logs_capture_a2a_compat_fetch_work_heartbeat_actions_with_actor() {
@@ -18091,13 +19009,19 @@ mod tests {
         let health_json: serde_json::Value =
             serde_json::from_slice(&health_body).expect("health json");
         assert_eq!(health_json["status"], "ok");
-        #[cfg(feature = "evolution-network-experimental")]
+        #[cfg(any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        ))]
         assert_eq!(health_json["evolution"]["status"], "ok");
-        #[cfg(not(feature = "evolution-network-experimental"))]
+        #[cfg(not(any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )))]
         assert!(health_json["evolution"].is_null());
     }
 
-    #[cfg(feature = "mcp-experimental")]
+    #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
     #[tokio::test]
     async fn mcp_bootstrap_status_defaults_disabled_and_gates_capability_discovery() {
         let router = build_router(ExecutionApiState::new(build_test_graph().await));
@@ -18137,7 +19061,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "mcp-experimental")]
+    #[cfg(any(feature = "mcp-bootstrap", feature = "mcp-experimental"))]
     #[tokio::test]
     async fn mcp_capability_discovery_returns_registry_when_enabled() {
         let custom_capability = super::McpCapabilityMapping {
@@ -18191,8 +19115,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn metrics_endpoint_exposes_a2a_compat_metrics() {
@@ -18516,7 +19443,10 @@ mod tests {
         assert!(metrics_text.contains("oris_a2a_heartbeat_total 1"));
     }
 
-    #[cfg(feature = "evolution-network-experimental")]
+    #[cfg(any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    ))]
     #[tokio::test]
     async fn evolution_metrics_and_health_are_exposed_from_runtime_routes() {
         let store_root = std::env::temp_dir().join(format!(
@@ -19698,8 +20628,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_protocol_route_surface_includes_wiki_required_endpoints() {
@@ -19749,8 +20682,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_discovery_route_surface_includes_market_and_directory_endpoints() {
@@ -19781,8 +20717,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_asset_discovery_ranked_and_categories_are_deterministic_and_idempotent() {
@@ -19910,8 +20849,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_asset_discovery_rejects_invalid_asset_type() {
@@ -19941,8 +20883,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_asset_discovery_search_worker_role_is_forbidden() {
@@ -19971,8 +20916,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_asset_governance_semantics_cover_detail_timeline_related_and_usage() {
@@ -20193,8 +21141,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_asset_governance_semantics_return_deterministic_reference_errors() {
@@ -20269,8 +21220,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_asset_governance_verify_and_vote_worker_role_is_forbidden() {
@@ -20349,8 +21303,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_council_workflow_semantics_support_session_propose_vote_execute_and_idempotency(
@@ -20530,8 +21487,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_council_execution_preconditions_and_vote_conflicts_are_deterministic() {
@@ -20644,8 +21604,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_council_propose_worker_role_is_forbidden() {
@@ -20682,8 +21645,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_governance_route_surface_includes_council_and_project_endpoints() {
@@ -20751,8 +21717,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_project_workflow_semantics_support_state_transitions_and_suggestions() {
@@ -20957,8 +21926,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_project_merge_requires_review_approval() {
@@ -21006,8 +21978,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_project_propose_worker_role_is_forbidden() {
@@ -21038,8 +22013,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_service_bid_dispute_semantics_support_publish_bid_list_accept_and_rule() {
@@ -21192,8 +22170,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_bid_accept_requires_service_owner() {
@@ -21258,8 +22239,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_service_publish_worker_role_is_forbidden() {
@@ -21298,8 +22282,11 @@ mod tests {
     // ─── Economic Lifecycle: service, bid, dispute rule ─────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_service_register_returns_service() {
@@ -21333,8 +22320,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_service_register_missing_title_rejected() {
@@ -21352,8 +22342,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_service_get_returns_service() {
@@ -21397,8 +22390,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_service_get_unknown_returns_404() {
@@ -21417,8 +22413,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_service_list_returns_services() {
@@ -21469,8 +22468,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_service_list_category_filter() {
@@ -21518,8 +22520,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_submit_returns_bid() {
@@ -21572,8 +22577,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_get_returns_bid() {
@@ -21637,8 +22645,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_get_unknown_returns_404() {
@@ -21657,8 +22668,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_evaluate_returns_winner() {
@@ -21738,8 +22752,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_evaluate_lowest_bid_strategy() {
@@ -21816,8 +22833,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_evaluate_non_owner_forbidden() {
@@ -21863,8 +22883,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_evaluate_invalid_strategy_rejected() {
@@ -21910,8 +22933,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_bid_evaluate_no_open_bids_returns_no_open_bids() {
@@ -21963,8 +22989,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_dispute_rule_get_returns_ruleset() {
@@ -21998,8 +23027,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_dispute_rule_get_by_id_returns_stored_rule() {
@@ -22086,8 +23118,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_protocol_validate_returns_tier_gate_and_capability_contract() {
@@ -22134,8 +23169,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_protocol_report_and_decision_support_idempotent_semantic_flow() {
@@ -22245,8 +23283,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_protocol_decision_rejects_invalid_decision_value() {
@@ -22275,8 +23316,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_protocol_core_worker_role_is_forbidden() {
@@ -22313,8 +23357,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_task_lifecycle_supports_submit_report_accept_and_release_transitions() {
@@ -22443,8 +23490,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_task_accept_submission_requires_submitted_state() {
@@ -22489,8 +23539,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_task_submit_worker_role_is_forbidden() {
@@ -22526,8 +23579,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_task_list_supports_status_pagination_and_stable_ordering() {
@@ -22599,8 +23655,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn audit_logs_capture_semantic_protocol_core_actions() {
@@ -22757,8 +23816,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn audit_logs_capture_semantic_task_lifecycle_write_actions() {
@@ -22904,8 +23966,11 @@ mod tests {
 
     #[cfg(all(
         feature = "sqlite-persistence",
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn audit_logs_capture_semantic_market_and_governance_write_actions() {
@@ -23088,8 +24153,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_semantic_assets_auth_matrix_supports_node_secret_and_api_key_and_blocks_worker()
@@ -23197,8 +24265,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn evomap_semantic_contract_e2e_covers_protocol_task_asset_and_governance_flows() {
@@ -23405,8 +24476,11 @@ mod tests {
     // ── /a2a/validate tests (issue #328) ─────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_validate_accepted_with_default_tier() {
@@ -23436,8 +24510,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_validate_rejected_when_model_tier_insufficient() {
@@ -23470,8 +24547,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_validate_filters_requested_capabilities() {
@@ -23504,8 +24584,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_validate_accepts_arbitrary_sender_id() {
@@ -23532,8 +24615,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_validate_succeeds_without_optional_fields() {
@@ -23556,8 +24642,11 @@ mod tests {
     // ── /a2a/report tests (issue #328) ───────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_report_submits_to_open_task() {
@@ -23605,8 +24694,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_report_idempotency_key_returns_cached_response() {
@@ -23675,8 +24767,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_report_returns_404_for_unknown_task() {
@@ -23699,8 +24794,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_report_requires_sender_id() {
@@ -23745,8 +24843,11 @@ mod tests {
     // ── /a2a/decision tests (issue #328) ─────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_decision_accepts_submitted_task() {
@@ -23816,8 +24917,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_decision_rejects_invalid_decision_value() {
@@ -23869,8 +24973,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_decision_idempotency_key_returns_same_decision_id() {
@@ -23967,8 +25074,11 @@ mod tests {
     // ── /a2a/revoke tests (issue #328) ────────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_revoke_rejects_empty_asset_ids() {
@@ -23995,8 +25105,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_revoke_rejects_invalid_payload() {
@@ -24014,8 +25127,11 @@ mod tests {
     // ── /a2a/policy/model-tiers tests (issue #328) ────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_model_tiers_returns_tier_list() {
@@ -24042,8 +25158,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_model_tiers_deterministic_shape() {
@@ -24076,8 +25195,11 @@ mod tests {
     // ── /a2a/task/submit tests (issue #329) ──────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_submit_creates_open_task() {
@@ -24110,8 +25232,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_submit_uses_explicit_task_id() {
@@ -24139,8 +25264,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_submit_requires_sender_or_created_by() {
@@ -24162,8 +25290,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_submit_accepts_created_by_field() {
@@ -24192,8 +25323,11 @@ mod tests {
     // ── /a2a/task/list tests (issue #329) ────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_list_returns_submitted_tasks() {
@@ -24238,8 +25372,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_list_filters_by_status() {
@@ -24301,8 +25438,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_list_pagination_respects_limit_and_offset() {
@@ -24348,8 +25488,11 @@ mod tests {
     // ── /a2a/task/:id tests (issue #329) ─────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_get_returns_task_detail() {
@@ -24392,8 +25535,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_get_returns_404_for_unknown_task() {
@@ -24410,8 +25556,11 @@ mod tests {
     // ── /a2a/task/my tests (issue #329) ──────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_my_returns_own_tasks_only() {
@@ -24467,8 +25616,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_my_requires_sender_id() {
@@ -24489,8 +25641,11 @@ mod tests {
     // ── /a2a/task/eligible-count tests (issue #329) ───────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_eligible_count_reflects_open_and_released_tasks() {
@@ -24563,8 +25718,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_eligible_count_zero_when_no_tasks() {
@@ -24586,8 +25744,11 @@ mod tests {
     // ── /a2a/task/release tests (issue #329) ─────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_release_transitions_to_released_status() {
@@ -24655,8 +25816,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_release_returns_404_for_unknown_task() {
@@ -24680,8 +25844,11 @@ mod tests {
     // ── /a2a/ask tests (issue #329) ──────────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_ask_creates_queued_question() {
@@ -24713,8 +25880,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_ask_question_appears_in_task_list() {
@@ -24778,8 +25948,11 @@ mod tests {
     // ── Full lifecycle (submit → list → detail → eligible → release) ─────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_task_full_lifecycle_submit_detail_release_eligible() {
@@ -24893,8 +26066,11 @@ mod tests {
     // ── /a2a/assets/* tests (issue #330) ──────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_search_requires_sender_id() {
@@ -24909,8 +26085,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_search_empty_sender_id_rejected() {
@@ -24925,8 +26104,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_search_requires_handshake() {
@@ -24942,8 +26124,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_search_returns_results_shape() {
@@ -24979,8 +26164,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_search_mode_field_is_search() {
@@ -25014,8 +26202,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_ranked_returns_ranked_mode() {
@@ -25048,8 +26239,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_explore_returns_explore_mode() {
@@ -25082,8 +26276,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_recommended_returns_recommended_mode() {
@@ -25116,8 +26313,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_trending_returns_trending_mode() {
@@ -25150,8 +26350,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_categories_returns_categories_shape() {
@@ -25185,8 +26388,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_search_pagination_limit_respected() {
@@ -25223,8 +26429,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_ranked_deterministic_for_same_inputs() {
@@ -25264,8 +26473,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_assets_search_idempotent_flag_is_true() {
@@ -25315,8 +26527,11 @@ mod tests {
     // ── /a2a/assets/:id (detail + governance) tests (issue #331) ─────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_requires_sender_id() {
@@ -25331,8 +26546,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_unknown_asset_returns_404() {
@@ -25347,8 +26565,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_returns_full_shape() {
@@ -25379,8 +26600,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_verify_records_verification() {
@@ -25411,8 +26635,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_verify_idempotent_on_repeat() {
@@ -25453,8 +26680,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_verify_rejects_invalid_status() {
@@ -25481,8 +26711,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_vote_records_vote() {
@@ -25512,8 +26745,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_vote_idempotent_on_repeat() {
@@ -25553,8 +26789,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_vote_rejects_invalid_vote_value() {
@@ -25581,8 +26820,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_audit_trail_reflects_governance_events() {
@@ -25635,8 +26877,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_reviews_returns_reviews_shape() {
@@ -25696,8 +26941,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_governance_worker_role_rejected_on_verify() {
@@ -25728,8 +26976,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_asset_detail_governance_worker_role_rejected_on_vote() {
@@ -25762,8 +27013,11 @@ mod tests {
     // ─── Council Session ────────────────────────────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_session_open_returns_ok() {
@@ -25796,8 +27050,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_session_open_idempotent_same_settings() {
@@ -25834,8 +27091,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_session_invalid_action_rejected() {
@@ -25857,8 +27117,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_session_close_returns_ok() {
@@ -25905,8 +27168,11 @@ mod tests {
     // ─── Council Propose ────────────────────────────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_propose_missing_title_rejected() {
@@ -25927,8 +27193,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_propose_records_proposal() {
@@ -25959,8 +27228,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_propose_idempotent_on_repeat() {
@@ -26014,8 +27286,11 @@ mod tests {
     // ─── Council Vote ───────────────────────────────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_vote_records_vote() {
@@ -26086,8 +27361,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_vote_idempotent_on_repeat() {
@@ -26159,8 +27437,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_vote_conflict_rejected() {
@@ -26250,8 +27531,11 @@ mod tests {
     // ─── Council Execute ────────────────────────────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_execute_insufficient_quorum_rejected() {
@@ -26320,8 +27604,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_execute_approved_proposal_succeeds() {
@@ -26410,8 +27697,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_council_execute_idempotent_on_repeat() {
@@ -26503,8 +27793,11 @@ mod tests {
     // ─── Project Workflow ───────────────────────────────────────────────────────
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_create_returns_project() {
@@ -26536,8 +27829,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_create_missing_title_rejected() {
@@ -26558,8 +27854,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_get_returns_project() {
@@ -26594,8 +27893,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_get_unknown_returns_404() {
@@ -26610,8 +27912,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_state_active() {
@@ -26659,8 +27964,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_state_paused() {
@@ -26708,8 +28016,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_state_completed() {
@@ -26757,8 +28068,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_state_invalid_rejected() {
@@ -26799,8 +28113,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_list_get_returns_list() {
@@ -26863,8 +28180,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_list_get_status_filter() {
@@ -26907,8 +28227,11 @@ mod tests {
     }
 
     #[cfg(all(
-        feature = "agent-contract-experimental",
-        feature = "evolution-network-experimental"
+        any(feature = "agent-contract", feature = "agent-contract-experimental"),
+        any(
+            feature = "evolution-network",
+            feature = "evolution-network-experimental"
+        )
     ))]
     #[tokio::test]
     async fn a2a_project_id_suggestions_returns_suggestions() {
@@ -26958,8 +28281,11 @@ mod tests {
 
 /// Request for creating a bounty
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapBountyCreateRequest {
@@ -26971,8 +28297,11 @@ pub struct EvomapBountyCreateRequest {
 
 /// Response for bounty operations
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvomapBountyResponse {
@@ -26985,34 +28314,41 @@ pub struct EvomapBountyResponse {
 
 /// Create a new bounty
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bounty_create(
-    state: State<ExecutionApiState>,
+    State(state): State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapBountyCreateRequest>,
 ) -> Result<Json<ApiEnvelope<EvomapBountyResponse>>, ApiError> {
     let rid = request_id(&headers);
     let bounty_id = format!("bounty-{}", uuid::Uuid::new_v4());
     let now = Utc::now().timestamp_millis();
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let _ = &state;
 
-    // Use repository if available
-    if let Some(repo) = state.runtime_repo.as_ref() {
-        let bounty = BountyRecord {
-            bounty_id: bounty_id.clone(),
-            title: req.title.clone(),
-            description: req.description.clone(),
-            reward: req.reward,
-            status: BountyStatus::Open,
-            created_by: req.created_by.clone(),
-            created_at_ms: now,
-            closed_at_ms: None,
-            accepted_by: None,
-            accepted_at_ms: None,
-        };
-        repo.upsert_bounty(&bounty)
-            .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        if let Some(repo) = state.runtime_repo.as_ref() {
+            let bounty = BountyRecord {
+                bounty_id: bounty_id.clone(),
+                title: req.title.clone(),
+                description: req.description.clone(),
+                reward: req.reward,
+                status: BountyStatus::Open,
+                created_by: req.created_by.clone(),
+                created_at_ms: now,
+                closed_at_ms: None,
+                accepted_by: None,
+                accepted_at_ms: None,
+            };
+            repo.upsert_bounty(&bounty)
+                .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+        }
     }
 
     let response = EvomapBountyResponse {
@@ -27032,8 +28368,11 @@ pub async fn evomap_bounty_create(
 
 /// Accept a bounty
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bounty_accept(
     _state: State<ExecutionApiState>,
@@ -27060,8 +28399,11 @@ pub async fn evomap_bounty_accept(
 
 /// Close/complete a bounty
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bounty_close(
     _state: State<ExecutionApiState>,
@@ -27088,8 +28430,11 @@ pub async fn evomap_bounty_close(
 
 /// Request for swarm task decomposition
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapSwarmDecompositionRequest {
@@ -27100,8 +28445,11 @@ pub struct EvomapSwarmDecompositionRequest {
 
 /// Response for swarm decomposition
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvomapSwarmDecompositionResponse {
@@ -27111,8 +28459,11 @@ pub struct EvomapSwarmDecompositionResponse {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct SwarmDecomposition {
@@ -27123,8 +28474,11 @@ pub struct SwarmDecomposition {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ChildTask {
@@ -27135,8 +28489,11 @@ pub struct ChildTask {
 
 /// Propose task decomposition for swarm intelligence
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_swarm_propose_decomposition(
     _state: State<ExecutionApiState>,
@@ -27184,8 +28541,11 @@ pub async fn evomap_swarm_propose_decomposition(
 
 /// Worker registration request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapWorkerRegisterRequest {
@@ -27197,8 +28557,11 @@ pub struct EvomapWorkerRegisterRequest {
 
 /// Worker registration response
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvomapWorkerRegisterResponse {
@@ -27211,8 +28574,11 @@ pub struct EvomapWorkerRegisterResponse {
 
 /// Register a worker
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_worker_register(
     _state: State<ExecutionApiState>,
@@ -27243,8 +28609,11 @@ pub async fn evomap_worker_register(
 
 /// Recipe create request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapRecipeCreateRequest {
@@ -27257,8 +28626,11 @@ pub struct EvomapRecipeCreateRequest {
 
 /// Recipe response
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvomapRecipeResponse {
@@ -27270,8 +28642,11 @@ pub struct EvomapRecipeResponse {
 
 /// Create a recipe
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_recipe_create(
     _state: State<ExecutionApiState>,
@@ -27298,8 +28673,11 @@ pub async fn evomap_recipe_create(
 
 /// Get a recipe
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_recipe_get(
     _state: State<ExecutionApiState>,
@@ -27324,8 +28702,11 @@ pub async fn evomap_recipe_get(
 
 /// Fork a recipe
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_recipe_fork(
     _state: State<ExecutionApiState>,
@@ -27352,8 +28733,11 @@ pub async fn evomap_recipe_fork(
 
 /// Organism express request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapOrganismExpressRequest {
@@ -27363,8 +28747,11 @@ pub struct EvomapOrganismExpressRequest {
 
 /// Organism response
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvomapOrganismResponse {
@@ -27378,8 +28765,11 @@ pub struct EvomapOrganismResponse {
 
 /// Express a recipe as organism
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_organism_express(
     _state: State<ExecutionApiState>,
@@ -27408,8 +28798,11 @@ pub async fn evomap_organism_express(
 
 /// Get organism status
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_organism_get(
     _state: State<ExecutionApiState>,
@@ -27436,8 +28829,11 @@ pub async fn evomap_organism_get(
 
 /// Session join request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapSessionJoinRequest {
@@ -27447,8 +28843,11 @@ pub struct EvomapSessionJoinRequest {
 
 /// Session message request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapSessionMessageRequest {
@@ -27459,8 +28858,11 @@ pub struct EvomapSessionMessageRequest {
 
 /// Session submit request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapSessionSubmitRequest {
@@ -27471,8 +28873,11 @@ pub struct EvomapSessionSubmitRequest {
 
 /// Session response
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvomapSessionResponse {
@@ -27483,8 +28888,11 @@ pub struct EvomapSessionResponse {
 
 /// Join a collaborative session
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_session_join(
     _state: State<ExecutionApiState>,
@@ -27509,8 +28917,11 @@ pub async fn evomap_session_join(
 
 /// Send message to session
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_session_message(
     _state: State<ExecutionApiState>,
@@ -27531,52 +28942,58 @@ pub async fn evomap_session_message(
 
 /// Submit to session
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_session_submit(
-    state: State<ExecutionApiState>,
+    State(state): State<ExecutionApiState>,
     headers: HeaderMap,
     Json(req): Json<EvomapSessionSubmitRequest>,
 ) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
-    let now = Utc::now().timestamp_millis();
-    let submission_id = format!("sub-{}", uuid::Uuid::new_v4());
+    #[cfg(not(feature = "sqlite-persistence"))]
+    let _ = (&state, &req);
 
-    // Use repository for persistence
-    if let Some(repo) = state.runtime_repo.as_ref() {
-        // Verify session exists
-        let session = repo
-            .get_session(&req.session_id)
-            .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+    #[cfg(feature = "sqlite-persistence")]
+    {
+        let now = Utc::now().timestamp_millis();
+        let submission_id = format!("sub-{}", uuid::Uuid::new_v4());
 
-        if session.is_none() {
-            return Err(
-                ApiError::not_found(format!("Session {} not found", req.session_id))
-                    .with_request_id(rid),
-            );
+        if let Some(repo) = state.runtime_repo.as_ref() {
+            let session = repo
+                .get_session(&req.session_id)
+                .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+
+            if session.is_none() {
+                return Err(
+                    ApiError::not_found(format!("Session {} not found", req.session_id))
+                        .with_request_id(rid),
+                );
+            }
+
+            let message = SessionMessageRecord {
+                message_id: submission_id.clone(),
+                session_id: req.session_id.clone(),
+                sender_id: req.sender_id.clone(),
+                content: req.submission_json.clone(),
+                message_type: "submission".to_string(),
+                sent_at_ms: now,
+            };
+            repo.add_session_message(&message)
+                .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
+
+            return Ok(Json(ApiEnvelope {
+                meta: ApiMeta::ok(),
+                request_id: rid,
+                data: serde_json::json!({
+                    "submission_id": submission_id,
+                    "submitted_at_ms": now
+                }),
+            }));
         }
-
-        // Store submission as a message
-        let message = SessionMessageRecord {
-            message_id: submission_id.clone(),
-            session_id: req.session_id.clone(),
-            sender_id: req.sender_id.clone(),
-            content: req.submission_json.clone(),
-            message_type: "submission".to_string(),
-            sent_at_ms: now,
-        };
-        repo.add_session_message(&message)
-            .map_err(|e| ApiError::internal(format!("db error: {}", e)))?;
-
-        return Ok(Json(ApiEnvelope {
-            meta: ApiMeta::ok(),
-            request_id: rid,
-            data: serde_json::json!({
-                "submission_id": submission_id,
-                "submitted_at_ms": now
-            }),
-        }));
     }
 
     // Fallback: return not implemented if no repo
@@ -27585,8 +29002,11 @@ pub async fn evomap_session_submit(
 
 /// Dispute open request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapDisputeOpenRequest {
@@ -27597,8 +29017,11 @@ pub struct EvomapDisputeOpenRequest {
 
 /// Dispute evidence request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapDisputeEvidenceRequest {
@@ -27609,8 +29032,11 @@ pub struct EvomapDisputeEvidenceRequest {
 
 /// Dispute resolve request
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapDisputeResolveRequest {
@@ -27621,8 +29047,11 @@ pub struct EvomapDisputeResolveRequest {
 
 /// Dispute response
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct EvomapDisputeResponse {
@@ -27634,8 +29063,11 @@ pub struct EvomapDisputeResponse {
 
 /// Open a dispute
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_dispute_open(
     _state: State<ExecutionApiState>,
@@ -27662,8 +29094,11 @@ pub async fn evomap_dispute_open(
 
 /// Submit dispute evidence
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_dispute_evidence(
     _state: State<ExecutionApiState>,
@@ -27684,8 +29119,11 @@ pub async fn evomap_dispute_evidence(
 
 /// Resolve a dispute
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_dispute_resolve(
     _state: State<ExecutionApiState>,
@@ -27709,8 +29147,11 @@ pub async fn evomap_dispute_resolve(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_value_response(rid: String, data: Value) -> Json<ApiEnvelope<Value>> {
     Json(ApiEnvelope {
@@ -27721,8 +29162,11 @@ fn evomap_value_response(rid: String, data: Value) -> Json<ApiEnvelope<Value>> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapValidateRequest {
@@ -27733,8 +29177,11 @@ pub struct EvomapValidateRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapSemanticReportRequest {
@@ -27746,8 +29193,11 @@ pub struct EvomapSemanticReportRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapDecisionRequest {
@@ -27760,8 +29210,11 @@ pub struct EvomapDecisionRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapTaskSubmitRequest {
@@ -27773,8 +29226,11 @@ pub struct EvomapTaskSubmitRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapTaskReleaseRequest {
@@ -27784,8 +29240,11 @@ pub struct EvomapTaskReleaseRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapTaskAcceptSubmissionRequest {
@@ -27795,8 +29254,11 @@ pub struct EvomapTaskAcceptSubmissionRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapAskRequest {
@@ -27806,8 +29268,11 @@ pub struct EvomapAskRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapTaskListQuery {
@@ -27818,8 +29283,11 @@ pub struct EvomapTaskListQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapAssetDiscoveryQuery {
@@ -27833,8 +29301,11 @@ pub struct EvomapAssetDiscoveryQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapAssetGovernanceQuery {
@@ -27844,8 +29315,11 @@ pub struct EvomapAssetGovernanceQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapAssetVerifyRequest {
@@ -27857,8 +29331,11 @@ pub struct EvomapAssetVerifyRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapAssetVoteRequest {
@@ -27869,8 +29346,11 @@ pub struct EvomapAssetVoteRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapCouncilSessionRequest {
@@ -27882,8 +29362,11 @@ pub struct EvomapCouncilSessionRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapCouncilProposeRequest {
@@ -27895,8 +29378,11 @@ pub struct EvomapCouncilProposeRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapCouncilVoteRequest {
@@ -27907,8 +29393,11 @@ pub struct EvomapCouncilVoteRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapCouncilExecuteRequest {
@@ -27917,8 +29406,11 @@ pub struct EvomapCouncilExecuteRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectProposeRequest {
@@ -27931,8 +29423,11 @@ pub struct EvomapProjectProposeRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectClaimRequest {
@@ -27941,8 +29436,11 @@ pub struct EvomapProjectClaimRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectProgressRequest {
@@ -27953,8 +29451,11 @@ pub struct EvomapProjectProgressRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectReviewRequest {
@@ -27967,8 +29468,11 @@ pub struct EvomapProjectReviewRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectMergeRequest {
@@ -27977,8 +29481,11 @@ pub struct EvomapProjectMergeRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectListRequest {
@@ -27992,8 +29499,11 @@ pub struct EvomapProjectListRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectSuggestionsQuery {
@@ -28004,8 +29514,11 @@ pub struct EvomapProjectSuggestionsQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectCreateRequest {
@@ -28018,8 +29531,11 @@ pub struct EvomapProjectCreateRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectStateRequest {
@@ -28029,8 +29545,11 @@ pub struct EvomapProjectStateRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectGetListQuery {
@@ -28044,8 +29563,11 @@ pub struct EvomapProjectGetListQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapProjectIdSuggestionsQuery {
@@ -28053,8 +29575,11 @@ pub struct EvomapProjectIdSuggestionsQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapServicePublishRequest {
@@ -28070,8 +29595,11 @@ pub struct EvomapServicePublishRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapBidCreateRequest {
@@ -28085,8 +29613,11 @@ pub struct EvomapBidCreateRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapBidAcceptRequest {
@@ -28095,8 +29626,11 @@ pub struct EvomapBidAcceptRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapBidListQuery {
@@ -28110,8 +29644,11 @@ pub struct EvomapBidListQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapDisputeRuleRequest {
@@ -28129,8 +29666,11 @@ pub struct EvomapDisputeRuleRequest {
 // ── New request types for economic lifecycle endpoints ─────────────────────
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapServiceRegisterRequest {
@@ -28146,8 +29686,11 @@ pub struct EvomapServiceRegisterRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapServiceListQuery {
@@ -28162,8 +29705,11 @@ pub struct EvomapServiceListQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapBidSubmitRequest {
@@ -28177,8 +29723,11 @@ pub struct EvomapBidSubmitRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapBidEvaluateRequest {
@@ -28189,8 +29738,11 @@ pub struct EvomapBidEvaluateRequest {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct EvomapDisputeRuleGetQuery {
@@ -28199,8 +29751,11 @@ pub struct EvomapDisputeRuleGetQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Copy, Debug)]
 enum EvomapAssetDiscoveryMode {
@@ -28213,8 +29768,11 @@ enum EvomapAssetDiscoveryMode {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 impl EvomapAssetDiscoveryMode {
     fn as_str(&self) -> &'static str {
@@ -28230,8 +29788,11 @@ impl EvomapAssetDiscoveryMode {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug)]
 pub struct EvomapAssetDiscoveryItem {
@@ -28250,8 +29811,11 @@ pub struct EvomapAssetDiscoveryItem {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_parse_discovery_tokens(raw: Option<&str>) -> Vec<String> {
     let mut tokens = Vec::new();
@@ -28271,8 +29835,11 @@ fn evomap_parse_discovery_tokens(raw: Option<&str>) -> Vec<String> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_strategy_metadata_value(entries: &[String], key: &str) -> Option<String> {
     entries.iter().find_map(|entry| {
@@ -28291,8 +29858,11 @@ fn evomap_strategy_metadata_value(entries: &[String], key: &str) -> Option<Strin
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_discovery_term_hits(candidate: &str, terms: &[String]) -> usize {
     let candidate = candidate.to_ascii_lowercase();
@@ -28303,8 +29873,11 @@ fn evomap_discovery_term_hits(candidate: &str, terms: &[String]) -> usize {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_discovery_signal_hits(candidates: &[String], query_signals: &[String]) -> Vec<String> {
     let mut matched = Vec::new();
@@ -28321,8 +29894,11 @@ fn evomap_discovery_signal_hits(candidates: &[String], query_signals: &[String])
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_asset_type(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -28334,8 +29910,11 @@ fn evomap_normalize_asset_type(raw: &str) -> Option<&'static str> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_discovery_source_rank(source: &str) -> i32 {
     if source.eq_ignore_ascii_case("reported_experience") {
@@ -28350,8 +29929,11 @@ fn evomap_discovery_source_rank(source: &str) -> i32 {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_build_discovery_item(
     asset: &crate::evolution_network::NetworkAsset,
@@ -28468,8 +30050,11 @@ fn evomap_build_discovery_item(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn evomap_assets_discovery(
     state: ExecutionApiState,
@@ -28735,8 +30320,11 @@ async fn evomap_assets_discovery(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_assets_search(
     State(state): State<ExecutionApiState>,
@@ -28747,8 +30335,11 @@ pub async fn evomap_assets_search(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_assets_ranked(
     State(state): State<ExecutionApiState>,
@@ -28759,8 +30350,11 @@ pub async fn evomap_assets_ranked(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_assets_explore(
     State(state): State<ExecutionApiState>,
@@ -28771,8 +30365,11 @@ pub async fn evomap_assets_explore(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_assets_recommended(
     State(state): State<ExecutionApiState>,
@@ -28783,8 +30380,11 @@ pub async fn evomap_assets_recommended(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_assets_trending(
     State(state): State<ExecutionApiState>,
@@ -28795,8 +30395,11 @@ pub async fn evomap_assets_trending(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_assets_categories(
     State(state): State<ExecutionApiState>,
@@ -28807,8 +30410,11 @@ pub async fn evomap_assets_categories(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_tier_rank(raw: &str) -> i32 {
     match raw.trim().to_ascii_uppercase().as_str() {
@@ -28822,8 +30428,11 @@ fn evomap_tier_rank(raw: &str) -> i32 {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn idempotency_key_from_headers_or_payload(headers: &HeaderMap, payload: &Value) -> Option<String> {
     headers
@@ -28843,8 +30452,11 @@ fn idempotency_key_from_headers_or_payload(headers: &HeaderMap, payload: &Value)
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn semantic_sender(payload: &Value) -> Option<String> {
     payload
@@ -28857,8 +30469,11 @@ fn semantic_sender(payload: &Value) -> Option<String> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn to_semantic_task_json(task: &EvomapSemanticTaskRecord) -> Value {
     serde_json::json!({
@@ -28875,8 +30490,11 @@ fn to_semantic_task_json(task: &EvomapSemanticTaskRecord) -> Value {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_validate(
     State(state): State<ExecutionApiState>,
@@ -28938,8 +30556,11 @@ pub async fn evomap_validate(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_report(
     state: State<ExecutionApiState>,
@@ -29042,8 +30663,11 @@ pub async fn evomap_report(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_decision(
     State(state): State<ExecutionApiState>,
@@ -29158,8 +30782,11 @@ pub async fn evomap_decision(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_revoke(
     state: State<ExecutionApiState>,
@@ -29205,8 +30832,11 @@ pub async fn evomap_revoke(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_model_tiers(headers: HeaderMap) -> Result<Json<ApiEnvelope<Value>>, ApiError> {
     let rid = request_id(&headers);
@@ -29225,8 +30855,11 @@ pub async fn evomap_model_tiers(headers: HeaderMap) -> Result<Json<ApiEnvelope<V
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_submit(
     State(state): State<ExecutionApiState>,
@@ -29269,8 +30902,11 @@ pub async fn evomap_task_submit(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_list(
     State(state): State<ExecutionApiState>,
@@ -29317,8 +30953,11 @@ pub async fn evomap_task_list(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_my(
     State(state): State<ExecutionApiState>,
@@ -29353,8 +30992,11 @@ pub async fn evomap_task_my(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_get(
     State(state): State<ExecutionApiState>,
@@ -29376,8 +31018,11 @@ pub async fn evomap_task_get(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_submissions(
     State(state): State<ExecutionApiState>,
@@ -29401,8 +31046,11 @@ pub async fn evomap_task_submissions(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_eligible_count(
     State(state): State<ExecutionApiState>,
@@ -29428,8 +31076,11 @@ pub async fn evomap_task_eligible_count(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_release(
     State(state): State<ExecutionApiState>,
@@ -29466,8 +31117,11 @@ pub async fn evomap_task_release(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_accept_submission(
     State(state): State<ExecutionApiState>,
@@ -29521,8 +31175,11 @@ pub async fn evomap_task_accept_submission(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_swarm(
     state: State<ExecutionApiState>,
@@ -29550,8 +31207,11 @@ pub async fn evomap_task_swarm(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_task_ask(
     State(state): State<ExecutionApiState>,
@@ -29590,8 +31250,11 @@ pub async fn evomap_task_ask(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapListQuery {
@@ -29599,8 +31262,11 @@ pub struct EvomapListQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapDirectoryQuery {
@@ -29610,8 +31276,11 @@ pub struct EvomapDirectoryQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_directory(
     State(state): State<ExecutionApiState>,
@@ -29641,8 +31310,11 @@ pub async fn evomap_directory(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct EvomapRecipeListQuery {
@@ -29651,8 +31323,11 @@ pub struct EvomapRecipeListQuery {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_recipe_list(
     State(state): State<ExecutionApiState>,
@@ -29682,8 +31357,11 @@ pub async fn evomap_recipe_list(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_organism_active(
     headers: HeaderMap,
@@ -29700,8 +31378,11 @@ pub async fn evomap_organism_active(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_stats(
     State(state): State<ExecutionApiState>,
@@ -29723,8 +31404,11 @@ pub async fn evomap_stats(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_nodes(
     State(state): State<ExecutionApiState>,
@@ -29755,8 +31439,11 @@ pub async fn evomap_nodes(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_project_id(project_id: &str, rid: &str) -> Result<String, ApiError> {
     let project_id = project_id.trim();
@@ -29775,8 +31462,11 @@ fn evomap_normalize_project_id(project_id: &str, rid: &str) -> Result<String, Ap
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_project_review_outcome(raw: &str) -> Option<(&'static str, EvomapProjectStatus)> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -29792,8 +31482,11 @@ fn evomap_project_review_outcome(raw: &str) -> Option<(&'static str, EvomapProje
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_project_json(project: &EvomapProjectRecord) -> Value {
     serde_json::json!({
@@ -29818,8 +31511,11 @@ fn evomap_project_json(project: &EvomapProjectRecord) -> Value {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_project_suggestion_rank(status: &EvomapProjectStatus) -> u8 {
     match status {
@@ -29835,8 +31531,11 @@ fn evomap_project_suggestion_rank(status: &EvomapProjectStatus) -> u8 {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_project_suggestion_reason(status: &EvomapProjectStatus) -> &'static str {
     match status {
@@ -29852,8 +31551,11 @@ fn evomap_project_suggestion_reason(status: &EvomapProjectStatus) -> &'static st
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_propose(
     State(state): State<ExecutionApiState>,
@@ -29974,8 +31676,11 @@ pub async fn evomap_project_propose(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_claim(
     State(state): State<ExecutionApiState>,
@@ -30078,8 +31783,11 @@ pub async fn evomap_project_claim(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_progress(
     State(state): State<ExecutionApiState>,
@@ -30196,8 +31904,11 @@ pub async fn evomap_project_progress(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_review(
     State(state): State<ExecutionApiState>,
@@ -30306,8 +32017,11 @@ pub async fn evomap_project_review(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_merge(
     State(state): State<ExecutionApiState>,
@@ -30384,8 +32098,11 @@ pub async fn evomap_project_merge(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_list(
     State(state): State<ExecutionApiState>,
@@ -30509,8 +32226,11 @@ pub async fn evomap_project_list(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_suggestions(
     State(state): State<ExecutionApiState>,
@@ -30584,8 +32304,11 @@ pub async fn evomap_project_suggestions(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_create(
     State(state): State<ExecutionApiState>,
@@ -30706,8 +32429,11 @@ pub async fn evomap_project_create(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_get(
     State(state): State<ExecutionApiState>,
@@ -30729,8 +32455,11 @@ pub async fn evomap_project_get(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_state(
     State(state): State<ExecutionApiState>,
@@ -30824,8 +32553,11 @@ pub async fn evomap_project_state(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_list_get(
     State(state): State<ExecutionApiState>,
@@ -30934,8 +32666,11 @@ pub async fn evomap_project_list_get(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_project_id_suggestions(
     State(state): State<ExecutionApiState>,
@@ -30967,8 +32702,11 @@ pub async fn evomap_project_id_suggestions(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_governance_principles(
     headers: HeaderMap,
@@ -30988,8 +32726,11 @@ pub async fn evomap_governance_principles(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_council_id(value: &str, field: &str, rid: &str) -> Result<String, ApiError> {
     let value = value.trim();
@@ -31011,8 +32752,11 @@ fn evomap_normalize_council_id(value: &str, field: &str, rid: &str) -> Result<St
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_council_vote_value(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -31024,8 +32768,11 @@ fn evomap_council_vote_value(raw: &str) -> Option<&'static str> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_council_session_json(session: &EvomapCouncilSessionRecord) -> Value {
     serde_json::json!({
@@ -31040,8 +32787,11 @@ fn evomap_council_session_json(session: &EvomapCouncilSessionRecord) -> Value {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_council_proposal_json(proposal: &EvomapCouncilProposalRecord) -> Value {
     serde_json::json!({
@@ -31064,8 +32814,11 @@ fn evomap_council_proposal_json(proposal: &EvomapCouncilProposalRecord) -> Value
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn evomap_resolve_council_session_for_proposal(
     state: &ExecutionApiState,
@@ -31125,8 +32878,11 @@ async fn evomap_resolve_council_session_for_proposal(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_council_session(
     State(state): State<ExecutionApiState>,
@@ -31260,8 +33016,11 @@ pub async fn evomap_council_session(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_council_propose(
     State(state): State<ExecutionApiState>,
@@ -31353,8 +33112,11 @@ pub async fn evomap_council_propose(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_council_vote(
     State(state): State<ExecutionApiState>,
@@ -31477,8 +33239,11 @@ pub async fn evomap_council_vote(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_council_execute(
     State(state): State<ExecutionApiState>,
@@ -31617,8 +33382,11 @@ pub async fn evomap_council_execute(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_required_sender(
     sender_id: Option<String>,
@@ -31639,8 +33407,11 @@ fn evomap_required_sender(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_asset_id(asset_id: &str, rid: &str) -> Result<String, ApiError> {
     let asset_id = asset_id.trim();
@@ -31659,8 +33430,11 @@ fn evomap_normalize_asset_id(asset_id: &str, rid: &str) -> Result<String, ApiErr
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn evomap_fetch_assets_for_sender(
     state: &ExecutionApiState,
@@ -31691,8 +33465,11 @@ async fn evomap_fetch_assets_for_sender(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn evomap_fetch_asset_by_id(
     state: &ExecutionApiState,
@@ -31717,8 +33494,11 @@ async fn evomap_fetch_asset_by_id(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_asset_summary_json(asset: &crate::evolution_network::NetworkAsset) -> Value {
     let item = evomap_build_discovery_item(asset, &[], &[]);
@@ -31749,8 +33529,11 @@ fn evomap_asset_summary_json(asset: &crate::evolution_network::NetworkAsset) -> 
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_vote_value(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -31762,8 +33545,11 @@ fn evomap_vote_value(raw: &str) -> Option<&'static str> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_verify_status(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -31774,8 +33560,11 @@ fn evomap_verify_status(raw: &str) -> Option<&'static str> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 async fn evomap_asset_governance_records(
     state: &ExecutionApiState,
@@ -31802,8 +33591,11 @@ async fn evomap_asset_governance_records(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_asset_timeline_events(
     verifications: &[EvomapAssetVerificationRecord],
@@ -31855,8 +33647,11 @@ fn evomap_asset_timeline_events(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_detail(
     State(state): State<ExecutionApiState>,
@@ -31902,8 +33697,11 @@ pub async fn evomap_asset_detail(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_branches(
     State(state): State<ExecutionApiState>,
@@ -31952,8 +33750,11 @@ pub async fn evomap_asset_branches(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_timeline(
     State(state): State<ExecutionApiState>,
@@ -31988,8 +33789,11 @@ pub async fn evomap_asset_timeline(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_related(
     State(state): State<ExecutionApiState>,
@@ -32072,8 +33876,11 @@ pub async fn evomap_asset_related(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_verify(
     State(state): State<ExecutionApiState>,
@@ -32151,8 +33958,11 @@ pub async fn evomap_asset_verify(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_audit_trail(
     State(state): State<ExecutionApiState>,
@@ -32188,8 +33998,11 @@ pub async fn evomap_asset_audit_trail(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_my_usage(
     State(state): State<ExecutionApiState>,
@@ -32261,8 +34074,11 @@ pub async fn evomap_asset_my_usage(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_vote(
     State(state): State<ExecutionApiState>,
@@ -32343,8 +34159,11 @@ pub async fn evomap_asset_vote(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_asset_reviews(
     State(state): State<ExecutionApiState>,
@@ -32414,8 +34233,11 @@ pub async fn evomap_asset_reviews(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_market_id(raw: &str, field: &str, rid: &str) -> Result<String, ApiError> {
     let value = raw.trim();
@@ -32437,32 +34259,44 @@ fn evomap_normalize_market_id(raw: &str, field: &str, rid: &str) -> Result<Strin
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_service_id(raw: &str, rid: &str) -> Result<String, ApiError> {
     evomap_normalize_market_id(raw, "service_id", rid)
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_bid_id(raw: &str, rid: &str) -> Result<String, ApiError> {
     evomap_normalize_market_id(raw, "bid_id", rid)
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_normalize_dispute_id(raw: &str, rid: &str) -> Result<String, ApiError> {
     evomap_normalize_market_id(raw, "dispute_id", rid)
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_service_json(service: &EvomapServiceRecord) -> Value {
     serde_json::json!({
@@ -32481,8 +34315,11 @@ fn evomap_service_json(service: &EvomapServiceRecord) -> Value {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_bid_json(bid: &EvomapBidRecord) -> Value {
     serde_json::json!({
@@ -32502,8 +34339,11 @@ fn evomap_bid_json(bid: &EvomapBidRecord) -> Value {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_dispute_decision(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -32516,8 +34356,11 @@ fn evomap_dispute_decision(raw: &str) -> Option<&'static str> {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 fn evomap_dispute_rule_json(rule: &EvomapDisputeRuleRecord) -> Value {
     serde_json::json!({
@@ -32532,8 +34375,11 @@ fn evomap_dispute_rule_json(rule: &EvomapDisputeRuleRecord) -> Value {
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_service_publish(
     State(state): State<ExecutionApiState>,
@@ -32676,8 +34522,11 @@ pub async fn evomap_service_publish(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bid_create(
     State(state): State<ExecutionApiState>,
@@ -32827,8 +34676,11 @@ pub async fn evomap_bid_create(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bid_list(
     State(state): State<ExecutionApiState>,
@@ -32936,8 +34788,11 @@ pub async fn evomap_bid_list(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bid_accept(
     State(state): State<ExecutionApiState>,
@@ -33077,8 +34932,11 @@ pub async fn evomap_bid_accept(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_dispute_rule(
     State(state): State<ExecutionApiState>,
@@ -33203,8 +35061,11 @@ pub async fn evomap_dispute_rule(
 // ── Economic lifecycle: new endpoints (issue #334) ─────────────────────────
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_service_register(
     State(state): State<ExecutionApiState>,
@@ -33347,8 +35208,11 @@ pub async fn evomap_service_register(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_service_list(
     State(state): State<ExecutionApiState>,
@@ -33445,8 +35309,11 @@ pub async fn evomap_service_list(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_service_get(
     State(state): State<ExecutionApiState>,
@@ -33466,8 +35333,11 @@ pub async fn evomap_service_get(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bid_submit(
     State(state): State<ExecutionApiState>,
@@ -33603,8 +35473,11 @@ pub async fn evomap_bid_submit(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bid_get(
     State(state): State<ExecutionApiState>,
@@ -33624,8 +35497,11 @@ pub async fn evomap_bid_get(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_bid_evaluate(
     State(state): State<ExecutionApiState>,
@@ -33732,8 +35608,11 @@ pub async fn evomap_bid_evaluate(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_dispute_rule_get(
     State(state): State<ExecutionApiState>,
@@ -33795,8 +35674,11 @@ pub async fn evomap_dispute_rule_get(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_surface_get(
     headers: HeaderMap,
@@ -33814,8 +35696,11 @@ pub async fn evomap_surface_get(
 }
 
 #[cfg(all(
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 pub async fn evomap_surface_post(
     headers: HeaderMap,

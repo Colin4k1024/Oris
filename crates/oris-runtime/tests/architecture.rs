@@ -73,8 +73,11 @@ fn test_type_aliases() {
 
 #[cfg(all(
     feature = "execution-server",
-    feature = "agent-contract-experimental",
-    feature = "evolution-network-experimental"
+    any(feature = "agent-contract", feature = "agent-contract-experimental"),
+    any(
+        feature = "evolution-network",
+        feature = "evolution-network-experimental"
+    )
 ))]
 mod gep_interop_golden_tests {
     use std::collections::HashMap;
