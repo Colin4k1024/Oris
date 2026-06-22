@@ -86,7 +86,7 @@ Install the core crate and enable the framework surface:
 
 ```bash
 cargo add oris-runtime
-cargo add oris-runtime --features full-evolution-experimental
+cargo add oris-runtime --features evolution
 export OPENAI_API_KEY="your-key"
 ```
 
@@ -115,11 +115,11 @@ Maturity below reflects the current checked-in framework surface.
 
 | Component | Crate | Maturity | Gate |
 |---|---|---|---|
-| Evolution Core | `crates/oris-evolution` | Implemented baseline with extended lifecycle primitives | `evolution-experimental` |
-| Sandbox | `crates/oris-sandbox` | Implemented baseline | `evolution-experimental` |
-| EvoKernel | `crates/oris-evokernel` | Implemented baseline with governor-aware capture | `evolution-experimental` |
+| Evolution Core | `crates/oris-evolution` | Standard supervised baseline with extended lifecycle primitives | `evolution` |
+| Sandbox | `crates/oris-sandbox` | Standard supervised execution baseline | `evolution` |
+| EvoKernel | `crates/oris-evokernel` | Standard supervised baseline with governor-aware capture | `evolution` |
 | Intake | `crates/oris-intake` | Implemented baseline for issue intake/prioritization | `intake-experimental` |
-| Evolution Network | `crates/oris-evolution-network` | Experimental protocol scaffold | `evolution-network-experimental` |
+| Evolution Network | `crates/oris-evolution-network` | Standard feature entrypoint; `a2a-production` exposes only the stable A2A subset, while publish/fetch/revoke routes remain experimental | `evolution-network` |
 | Experience Repository | `crates/oris-experience-repo` | v0.3.0 — Ed25519 signature verification fully enabled, PKI key registry, rate limiting on all endpoints | standalone crate |
 | Full Framework Facade | `crates/oris-runtime` re-exports | Aggregate framework surface | `full-evolution-experimental` |
 

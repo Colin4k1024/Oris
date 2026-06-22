@@ -33,5 +33,8 @@ pub use oris_runtime::execution_runtime::{
     RuntimeStorageBackend, RuntimeStorageConfig, SqliteIdempotencyStore, SqliteRuntimeRepository,
 };
 
-#[cfg(feature = "evolution-network-experimental")]
+#[cfg(any(
+    feature = "evolution-network",
+    feature = "evolution-network-experimental"
+))]
 pub use oris_runtime::evolution_network::*;

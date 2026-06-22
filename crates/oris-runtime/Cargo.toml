@@ -247,10 +247,17 @@ mcp-experimental = ["execution-server"]
 # Stable /a2a compatibility boundary for production execution flows.
 a2a-production = [
     "execution-server",
-    "agent-contract-experimental",
-    "evolution-network-experimental",
+    "agent-contract",
+    "evolution-network",
 ]
 evokernel-facade = ["dep:oris-evokernel"]
+# Standard evolution capability entrypoints. The legacy `*-experimental`
+# feature names remain enabled underneath so existing cfg gates and downstream
+# users keep working during the migration window.
+evolution = ["evolution-experimental"]
+governor = ["governor-experimental"]
+evolution-network = ["evolution-network-experimental"]
+agent-contract = ["agent-contract-experimental"]
 evolution-experimental = ["evokernel-facade"]
 governor-experimental = ["evokernel-facade"]
 evolution-network-experimental = ["evokernel-facade", "evolution-experimental"]

@@ -6,6 +6,11 @@ execution-server evolution paths.
 ## Stable boundary
 
 Enable `a2a-production` when you need production compatibility A2A workflows.
+The stable feature pulls in the standard `agent-contract` and
+`evolution-network` feature entrypoints, but suppresses the broader evolution
+publish/fetch/revoke route group. Legacy `agent-contract-experimental` and
+`evolution-network-experimental` names remain supported as compatibility
+aliases during the migration window.
 
 Stable routes:
 
@@ -33,8 +38,10 @@ Runtime behavior in this mode:
 
 ## Experimental boundary
 
-Experimental routes remain behind `evolution-network-experimental`
-(or `full-evolution-experimental`):
+Experimental routes remain outside `a2a-production`. They are available only
+when the broader network facade is enabled directly through `evolution-network`,
+the legacy `evolution-network-experimental`, or the aggregate
+`full-evolution-experimental`:
 
 - `POST /v1/evolution/publish`
 - `POST /a2a/publish` (EvoMap compatibility alias for `/v1/evolution/publish`)
@@ -62,9 +69,11 @@ These routes are intentionally kept out of the stable production subset.
 If you previously enabled `full-evolution-experimental` only for compatibility `/a2a` traffic:
 
 1. Switch to `a2a-production` for production compatibility traffic.
-2. Keep `full-evolution-experimental` only where publish/fetch/revoke and evolution session
+2. Use `evolution`, `governor`, `agent-contract`, or `evolution-network` when you only need
+   the corresponding standard capability surface.
+3. Keep `full-evolution-experimental` only where publish/fetch/revoke and evolution session
    orchestration are explicitly required.
-3. Update runbooks and monitors to treat `/a2a/*` as the stable entrypoints.
+4. Update runbooks and monitors to treat `/a2a/*` as the stable entrypoints.
 
 ## Boundary Alignment Policy (v0.75+)
 

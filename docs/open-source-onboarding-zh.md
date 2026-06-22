@@ -90,7 +90,7 @@ cargo generate --git https://github.com/Colin4k1024/Oris.git --subfolder example
 启用方式：
 
 ```bash
-cargo add oris-runtime --features full-evolution-experimental
+cargo add oris-runtime --features evolution
 bash scripts/evo_first_run.sh
 cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
 ```
@@ -113,9 +113,10 @@ AgentTask
 需要明确两点：
 
 1. 如果你只需要生产级 `/a2a/*` 兼容面，请启用 `a2a-production`（不暴露 evolution-network 的 publish/fetch/revoke 路由）。
-2. 如果你只需要 `oris_runtime::evolution` 这一层 API，可只启用 `evolution-experimental`。
-3. 仓库内现成示例与联调烟测依赖的是 `full-evolution-experimental`，因为它还会暴露 governor、agent contract、economics、spec 和 network 的实验 facade。
-4. 如果你要让 replay 事件可直接关联到当前执行，优先使用 `replay_or_fallback_for_run`；旧的 `replay_or_fallback` 会自动生成 replay run id。
+2. 如果你只需要 `oris_runtime::evolution` 这一层 API，可只启用标准能力 `evolution`；旧的 `evolution-experimental` 仍作为兼容入口保留。
+3. 如果你需要策略能力，优先启用 `governor`；如果你需要外部 agent proposal contract，优先启用 `agent-contract`。
+4. 仓库内部分联调烟测仍依赖 `full-evolution-experimental`，因为它还会暴露 economics、spec 和 network 的实验路由 facade。
+5. 如果你要让 replay 事件可直接关联到当前执行，优先使用 `replay_or_fallback_for_run`；旧的 `replay_or_fallback` 会自动生成 replay run id。
 
 当前尚未形成可直接投产的自治闭环，仍缺少常驻调度、自动 issue intake、自动分支/发布编排等能力。
 
