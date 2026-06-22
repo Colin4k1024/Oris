@@ -3805,10 +3805,7 @@ fn with_a2a_routes(router: Router<ExecutionApiState>) -> Router<ExecutionApiStat
 }
 
 #[cfg(all(
-    any(
-        feature = "evolution-network",
-        feature = "evolution-network-experimental"
-    ),
+    feature = "evolution-network-routes",
     any(
         not(feature = "a2a-production"),
         feature = "full-evolution-experimental"
@@ -3873,10 +3870,7 @@ fn with_evolution_routes(router: Router<ExecutionApiState>) -> Router<ExecutionA
 }
 
 #[cfg(not(all(
-    any(
-        feature = "evolution-network",
-        feature = "evolution-network-experimental"
-    ),
+    feature = "evolution-network-routes",
     any(
         not(feature = "a2a-production"),
         feature = "full-evolution-experimental"
@@ -11256,10 +11250,35 @@ mod tests {
         assert_eq!(legacy_hello_resp.status(), StatusCode::NOT_FOUND);
     }
 
-    #[cfg(any(
+    #[cfg(all(
         feature = "evolution-network",
-        feature = "evolution-network-experimental"
+        not(feature = "evolution-network-routes"),
+        not(feature = "full-evolution-experimental")
     ))]
+    #[tokio::test]
+    async fn evolution_network_facade_hides_experimental_routes_without_route_gate() {
+        let router = build_router(ExecutionApiState::new(build_test_graph().await));
+
+        let publish_req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/evolution/publish")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let publish_resp = router.clone().oneshot(publish_req).await.unwrap();
+        assert_eq!(publish_resp.status(), StatusCode::NOT_FOUND);
+
+        let legacy_hello_req = Request::builder()
+            .method(Method::POST)
+            .uri("/evolution/a2a/hello")
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let legacy_hello_resp = router.clone().oneshot(legacy_hello_req).await.unwrap();
+        assert_eq!(legacy_hello_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[cfg(feature = "evolution-network-routes")]
     #[tokio::test]
     async fn evolution_publish_fetch_and_revoke_routes_work() {
         let store_root =

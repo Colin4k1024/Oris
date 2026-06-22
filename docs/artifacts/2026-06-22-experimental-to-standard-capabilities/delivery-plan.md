@@ -1,8 +1,8 @@
 # Delivery Plan — Standardize Experimental Capabilities
 
-**状态**: implemented-fifth-batch
+**状态**: implemented-sixth-batch
 **日期**: 2026-06-22
-**阶段**: story-5-complete
+**阶段**: story-6-complete
 **关联审查**: `audit.md`
 
 ---
@@ -51,17 +51,18 @@
 - `docs/evolution-boundary.md`
 - `docs/open-source-onboarding-zh.md`
 
-实际改法：
+当前 feature 关系：
 
 ```toml
 evolution = ["evolution-experimental"]
 governor = ["governor-experimental"]
-evolution-network = ["evolution-network-experimental"]
+evolution-network = ["evokernel-facade", "evolution"]
+evolution-network-routes = ["evolution-network"]
 agent-contract = ["agent-contract-experimental"]
 
 evolution-experimental = ["evokernel-facade"]
 governor-experimental = ["evokernel-facade"]
-evolution-network-experimental = ["evokernel-facade", "evolution-experimental"]
+evolution-network-experimental = ["evolution-network-routes"]
 agent-contract-experimental = ["evokernel-facade"]
 
 a2a-production = [
@@ -71,7 +72,7 @@ a2a-production = [
 ]
 ```
 
-说明：当前代码仍有大量内部 `cfg(feature = "...-experimental")`。第一批先建立标准外部入口并迁移 `a2a-production` 的直接依赖；内部 cfg 重命名留给后续独立 Story，避免大面积条件编译风险。
+说明：第一批先建立标准外部入口并迁移 `a2a-production` 的直接依赖；第五批迁移内部 `cfg` 识别方式；第六批再把 network facade 与宽路由门禁拆开。
 
 验收标准：
 
@@ -190,6 +191,43 @@ cargo test -p oris-execution-server --features evolution-network --no-run
 - `a2a-production` 稳定边界测试通过。
 - 旧 `full-evolution-experimental` wiring 测试通过。
 - `oris-execution-server/evolution-network` 标准入口可编译。
+
+---
+
+## 第六批处理范围
+
+目标：
+
+- 将 `evolution-network` 收窄为标准 protocol/facade 能力。
+- 新增显式实验门禁 `evolution-network-routes`，专门控制 `/v1/evolution/*`、`/evolution/a2a/*`、session replication/lifecycle 宽路由。
+- 保持 `evolution-network-experimental` 与 `full-evolution-experimental` 对宽路由的兼容启用行为。
+- 证明标准 `evolution-network` 不再隐式暴露宽路由。
+
+实现：
+
+```toml
+evolution-network = ["evokernel-facade", "evolution"]
+evolution-network-routes = ["evolution-network"]
+evolution-network-experimental = ["evolution-network-routes"]
+```
+
+验证：
+
+```bash
+cargo fmt --all -- --check
+cargo test -p oris-runtime --features "execution-server,evolution-network" evolution_network_facade_hides_experimental_routes_without_route_gate
+cargo test -p oris-runtime --features "execution-server,evolution-network-routes" evolution_publish_fetch_and_revoke_routes_work
+cargo test -p oris-runtime --features "execution-server,evolution-network-experimental" evolution_publish_fetch_and_revoke_routes_work
+cargo test -p oris-runtime --features "sqlite-persistence,execution-server,a2a-production" a2a_production_route_boundary_hides_evolution_network_routes
+cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolution-experimental
+cargo test -p oris-execution-server --features evolution-network-routes --no-run
+```
+
+结果：
+
+- 标准 `evolution-network` 只启用 facade，不暴露实验宽路由。
+- 显式 `evolution-network-routes` 可打开 publish/fetch/revoke 路由组。
+- 旧 `evolution-network-experimental` 与 `full-evolution-experimental` 兼容路径保持可用。
 
 ---
 
@@ -334,6 +372,7 @@ cargo test -p oris-runtime --test evolution_feature_wiring --features full-evolu
     any(feature = "agent-contract", feature = "agent-contract-experimental"),
     any(feature = "evolution-network", feature = "evolution-network-experimental"),
 ))]
+#[cfg(feature = "evolution-network-routes")] // only for wide HTTP routes
 ```
 
 验证：

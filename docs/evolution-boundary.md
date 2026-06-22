@@ -39,9 +39,9 @@ Runtime behavior in this mode:
 ## Experimental boundary
 
 Experimental routes remain outside `a2a-production`. They are available only
-when the broader network facade is enabled directly through `evolution-network`,
-the legacy `evolution-network-experimental`, or the aggregate
-`full-evolution-experimental`:
+when the explicit route gate `evolution-network-routes`, the legacy
+`evolution-network-experimental`, or the aggregate `full-evolution-experimental`
+is enabled:
 
 - `POST /v1/evolution/publish`
 - `POST /a2a/publish` (EvoMap compatibility alias for `/v1/evolution/publish`)
@@ -71,9 +71,11 @@ If you previously enabled `full-evolution-experimental` only for compatibility `
 1. Switch to `a2a-production` for production compatibility traffic.
 2. Use `evolution`, `governor`, `agent-contract`, `evolution-network`, `economics`, or
    `spec-contract` when you only need the corresponding standard capability surface.
-3. Keep `full-evolution-experimental` only where publish/fetch/revoke and evolution session
+3. Use `evolution-network-routes` only where publish/fetch/revoke and evolution session
    orchestration are explicitly required.
-4. Update runbooks and monitors to treat `/a2a/*` as the stable entrypoints.
+4. Keep `full-evolution-experimental` only for aggregate demo/test environments that need every
+   evolution capability at once.
+5. Update runbooks and monitors to treat `/a2a/*` as the stable entrypoints.
 
 ## Boundary Alignment Policy (v0.75+)
 

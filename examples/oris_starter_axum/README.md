@@ -91,7 +91,8 @@ This starter enables `a2a-production` by default. The stable compatibility surfa
 - `/a2a/heartbeat`
 
 Experimental evolution-network endpoints such as `/v1/evolution/publish` and `/evolution/a2a/*`
-remain hidden unless `evolution-network` or `full-evolution-experimental` is explicitly enabled.
+remain hidden unless `evolution-network-routes`, legacy `evolution-network-experimental`, or
+`full-evolution-experimental` is explicitly enabled.
 
 ## MCP capability discovery smoke test
 

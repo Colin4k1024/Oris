@@ -260,20 +260,21 @@ evokernel-facade = ["dep:oris-evokernel"]
 # users keep working during the migration window.
 evolution = ["evolution-experimental"]
 governor = ["governor-experimental"]
-evolution-network = ["evolution-network-experimental"]
+evolution-network = ["evokernel-facade", "evolution"]
+evolution-network-routes = ["evolution-network"]
 agent-contract = ["agent-contract-experimental"]
 economics = ["economics-experimental"]
 spec-contract = ["spec-experimental"]
 evolution-experimental = ["evokernel-facade"]
 governor-experimental = ["evokernel-facade"]
-evolution-network-experimental = ["evokernel-facade", "evolution-experimental"]
+evolution-network-experimental = ["evolution-network-routes"]
 economics-experimental = ["evokernel-facade"]
 spec-experimental = ["evokernel-facade"]
 agent-contract-experimental = ["evokernel-facade"]
 full-evolution-experimental = [
     "evolution",
     "governor",
-    "evolution-network",
+    "evolution-network-routes",
     "economics",
     "spec-contract",
     "agent-contract",

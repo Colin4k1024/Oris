@@ -119,7 +119,7 @@ Maturity below reflects the current checked-in framework surface.
 | Sandbox | `crates/oris-sandbox` | Standard supervised execution baseline | `evolution` |
 | EvoKernel | `crates/oris-evokernel` | Standard supervised baseline with governor-aware capture | `evolution` |
 | Intake | `crates/oris-intake` | Implemented baseline for issue intake/prioritization | standalone crate |
-| Evolution Network | `crates/oris-evolution-network` | Standard feature entrypoint; `a2a-production` exposes only the stable A2A subset, while publish/fetch/revoke routes remain experimental | `evolution-network` |
+| Evolution Network | `crates/oris-evolution-network` | Standard protocol facade; `a2a-production` exposes only the stable A2A subset, while publish/fetch/revoke routes require `evolution-network-routes` | `evolution-network` |
 | Economics | `crates/oris-economics` | Standard local EVU ledger and reputation accounting baseline; distributed settlement semantics remain outside the stable boundary | `economics` |
 | Spec Contract | `crates/oris-spec` | Standard OUSL YAML parsing and mutation-plan compiler baseline; migration workflows remain future work | `spec-contract` |
 | Experience Repository | `crates/oris-experience-repo` | v0.3.0 — Ed25519 signature verification fully enabled, PKI key registry, rate limiting on all endpoints | standalone crate |
