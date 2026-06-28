@@ -9,6 +9,9 @@ pub mod store;
 #[cfg(feature = "sqlite-persistence")]
 pub mod sqlite;
 
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
 #[cfg(test)]
 mod tests;
 
@@ -25,3 +28,6 @@ pub use store::*;
 
 #[cfg(feature = "sqlite-persistence")]
 pub use sqlite::*;
+
+#[cfg(feature = "postgres")]
+pub use postgres::*;

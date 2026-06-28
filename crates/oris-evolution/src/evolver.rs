@@ -176,25 +176,28 @@ impl EvolverAutomation {
     /// Add a signal extracted from feedback
     pub fn add_signal(&self, signal: EvolutionSignal) {
         if signal.confidence >= self.config.min_signal_confidence {
-            let mut signals = self.signals.write().unwrap();
+            let mut signals = self.signals.write().unwrap_or_else(|p| p.into_inner());
             signals.push(signal);
         }
     }
 
     /// Get all signals
     pub fn get_signals(&self) -> Vec<EvolutionSignal> {
-        self.signals.read().unwrap().clone()
+        self.signals
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Clear processed signals
     pub fn clear_signals(&self, signal_ids: &[String]) {
-        let mut signals = self.signals.write().unwrap();
+        let mut signals = self.signals.write().unwrap_or_else(|p| p.into_inner());
         signals.retain(|s| !signal_ids.contains(&s.signal_id));
     }
 
     /// Generate mutation proposals from signals
     pub fn generate_proposals(&self) -> Vec<MutationProposal> {
-        let signals = self.signals.read().unwrap();
+        let signals = self.signals.read().unwrap_or_else(|p| p.into_inner());
         let mut proposals = Vec::new();
 
         // Group signals by gene/target
@@ -238,7 +241,7 @@ impl EvolverAutomation {
         }
 
         // Store proposals
-        let mut stored = self.proposals.write().unwrap();
+        let mut stored = self.proposals.write().unwrap_or_else(|p| p.into_inner());
         stored.extend(proposals.clone());
 
         proposals
@@ -246,7 +249,7 @@ impl EvolverAutomation {
 
     /// Validate a proposal (simplified - real impl would use sandbox)
     pub fn validate_proposal(&self, proposal_id: &str) -> ValidationResult {
-        let proposals = self.proposals.read().unwrap();
+        let proposals = self.proposals.read().unwrap_or_else(|p| p.into_inner());
         let proposal = proposals.iter().find(|p| p.proposal_id == proposal_id);
 
         if let Some(p) = proposal {
@@ -290,7 +293,7 @@ impl EvolverAutomation {
 
     /// Approve a proposal
     pub fn approve_proposal(&self, proposal_id: &str) -> bool {
-        let mut proposals = self.proposals.write().unwrap();
+        let mut proposals = self.proposals.write().unwrap_or_else(|p| p.into_inner());
         if let Some(p) = proposals.iter_mut().find(|p| p.proposal_id == proposal_id) {
             // Check if governor is required
             if self.config.governor_required_for_high_risk
@@ -305,7 +308,7 @@ impl EvolverAutomation {
 
     /// Get proposals by status
     pub fn get_proposals(&self, _status: Option<ProposalStatus>) -> Vec<MutationProposal> {
-        let proposals = self.proposals.read().unwrap();
+        let proposals = self.proposals.read().unwrap_or_else(|p| p.into_inner());
         proposals.clone()
     }
 

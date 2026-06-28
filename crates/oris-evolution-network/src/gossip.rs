@@ -163,7 +163,7 @@ impl PeerRegistry {
     pub fn get_active_peers(&self) -> Vec<PeerEndpoint> {
         self.peers
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .values()
             .filter(|p| p.status == PeerStatus::Active)
             .map(|p| p.endpoint.clone())
@@ -172,7 +172,7 @@ impl PeerRegistry {
 
     /// Get a random sample of peers for gossip
     pub fn get_gossip_peers(&self, count: usize) -> Vec<PeerEndpoint> {
-        let peers = self.peers.read().unwrap();
+        let peers = self.peers.read().unwrap_or_else(|p| p.into_inner());
         let active: Vec<_> = peers
             .values()
             .filter(|p| p.status == PeerStatus::Active)
@@ -191,7 +191,7 @@ impl PeerRegistry {
 
     /// Update peer status based on heartbeat
     pub fn update_peer_status(&self, peer_id: &str, is_alive: bool) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write().unwrap_or_else(|p| p.into_inner());
         if let Some(peer) = peers.get_mut(peer_id) {
             if is_alive {
                 peer.mark_success();
@@ -204,7 +204,7 @@ impl PeerRegistry {
 
     /// Add a new peer discovered via gossip
     pub fn add_peer(&self, endpoint: PeerEndpoint) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write().unwrap_or_else(|p| p.into_inner());
         if !peers.contains_key(&endpoint.peer_id) {
             peers.insert(endpoint.peer_id.clone(), PeerInfo::new(endpoint));
         }
@@ -212,7 +212,7 @@ impl PeerRegistry {
 
     /// Remove a peer
     pub fn remove_peer(&self, peer_id: &str) {
-        let mut peers = self.peers.write().unwrap();
+        let mut peers = self.peers.write().unwrap_or_else(|p| p.into_inner());
         peers.remove(peer_id);
     }
 
@@ -388,11 +388,18 @@ impl GossipSyncEngine {
     }
 
     pub fn has_gene(&self, gene_id: &str) -> bool {
-        self.records.read().unwrap().contains_key(gene_id)
+        self.records
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(gene_id)
     }
 
     pub fn gene_version(&self, gene_id: &str) -> Option<u64> {
-        self.records.read().unwrap().get(gene_id).map(|r| r.version)
+        self.records
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(gene_id)
+            .map(|r| r.version)
     }
 
     pub fn register_envelope(&self, envelope: EvolutionEnvelope) -> usize {
@@ -405,8 +412,8 @@ impl GossipSyncEngine {
             })
             .collect();
 
-        let mut version_counter = self.next_version.lock().unwrap();
-        let mut records = self.records.write().unwrap();
+        let mut version_counter = self.next_version.lock().unwrap_or_else(|p| p.into_inner());
+        let mut records = self.records.write().unwrap_or_else(|p| p.into_inner());
         let mut inserted = 0;
         for gene in genes {
             *version_counter += 1;
@@ -428,7 +435,7 @@ impl GossipSyncEngine {
         let genes = self
             .records
             .read()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|(_, record)| record.confidence >= self.config.broadcast_threshold)
             .map(|(gene_id, record)| GossipDigestEntry {
@@ -445,7 +452,7 @@ impl GossipSyncEngine {
     }
 
     pub fn build_fetch_query_for_digest(&self, digest: &GossipDigest) -> FetchQuery {
-        let local = self.records.read().unwrap();
+        let local = self.records.read().unwrap_or_else(|p| p.into_inner());
         let requested_gene_ids = digest
             .genes
             .iter()
@@ -467,7 +474,7 @@ impl GossipSyncEngine {
     }
 
     pub fn respond_to_fetch(&self, query: &FetchQuery) -> FetchResponse {
-        let records = self.records.read().unwrap();
+        let records = self.records.read().unwrap_or_else(|p| p.into_inner());
         let mut assets = Vec::new();
         let mut applied = 0usize;
         for gene_id in &query.signals {

@@ -93,7 +93,7 @@ impl QuarantineStore {
         origin_peer: impl Into<String>,
     ) -> bool {
         let id = asset_id.into();
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if entries.contains_key(&id) {
             return false;
         }
@@ -115,7 +115,7 @@ impl QuarantineStore {
     ///
     /// Returns `true` on success, `false` if the asset was not found.
     pub fn validate_asset(&self, asset_id: &str) -> bool {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = entries.get_mut(asset_id) {
             entry.state = QuarantineState::Validated;
             entry.failure_reason = None;
@@ -129,7 +129,7 @@ impl QuarantineStore {
     ///
     /// Returns `true` on success, `false` if the asset was not found.
     pub fn fail_asset(&self, asset_id: &str, reason: impl Into<String>) -> bool {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = entries.get_mut(asset_id) {
             entry.state = QuarantineState::Failed;
             entry.failure_reason = Some(reason.into());
@@ -141,14 +141,18 @@ impl QuarantineStore {
 
     /// Retrieve an entry by asset id.
     pub fn get(&self, asset_id: &str) -> Option<QuarantineEntry> {
-        self.entries.lock().unwrap().get(asset_id).cloned()
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(asset_id)
+            .cloned()
     }
 
     /// Returns `true` if `asset_id` is present **and** its state is `Validated`.
     pub fn is_selectable(&self, asset_id: &str) -> bool {
         self.entries
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(asset_id)
             .map(|e| e.state == QuarantineState::Validated)
             .unwrap_or(false)
@@ -158,7 +162,7 @@ impl QuarantineStore {
     pub fn pending_entries(&self) -> Vec<QuarantineEntry> {
         self.entries
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .values()
             .filter(|e| e.state == QuarantineState::Pending)
             .cloned()
@@ -169,7 +173,7 @@ impl QuarantineStore {
     pub fn validated_entries(&self) -> Vec<QuarantineEntry> {
         self.entries
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .values()
             .filter(|e| e.state == QuarantineState::Validated)
             .cloned()
@@ -178,11 +182,14 @@ impl QuarantineStore {
 
     /// Total number of entries.
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.lock().unwrap().is_empty()
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty()
     }
 }
 
@@ -234,10 +241,16 @@ impl GossipSyncEngine {
     /// Publish a local asset, incrementing the sequence counter.
     /// Returns the sequence number assigned to this asset.
     pub fn publish_local(&self, asset: NetworkAsset) -> u64 {
-        let mut seq = self.local_sequence.lock().unwrap();
+        let mut seq = self
+            .local_sequence
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         *seq += 1;
         let s = *seq;
-        self.local_assets.lock().unwrap().push((s, asset));
+        self.local_assets
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((s, asset));
         s
     }
 
@@ -247,7 +260,7 @@ impl GossipSyncEngine {
         let assets: Vec<NetworkAsset> = self
             .local_assets
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .iter()
             .filter(|(seq, _)| *seq > since_cursor)
             .map(|(_, a)| a.clone())
@@ -290,7 +303,7 @@ impl GossipSyncEngine {
         // Update peer cursor to latest known sequence
         if let Some(cursor_str) = &request.since_cursor {
             if let Ok(seq) = cursor_str.parse::<u64>() {
-                let mut cursors = self.peer_cursors.lock().unwrap();
+                let mut cursors = self.peer_cursors.lock().unwrap_or_else(|p| p.into_inner());
                 let entry = cursors.entry(request.sender_id.clone()).or_insert(0);
                 if seq > *entry {
                     *entry = seq;
@@ -299,7 +312,7 @@ impl GossipSyncEngine {
         }
 
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
             stats.batches_processed += 1;
             stats.assets_received += request.assets.len() as u64;
             stats.assets_quarantined += applied as u64;
@@ -323,7 +336,7 @@ impl GossipSyncEngine {
         let cursor = self
             .peer_cursors
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(peer_id)
             .copied()
             .unwrap_or(0);
@@ -370,13 +383,13 @@ impl GossipSyncEngine {
         match validator(&entry.asset) {
             Ok(()) => {
                 self.quarantine.validate_asset(asset_id);
-                let mut stats = self.stats.lock().unwrap();
+                let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
                 stats.assets_promoted += 1;
                 true
             }
             Err(reason) => {
                 self.quarantine.fail_asset(asset_id, &reason);
-                let mut stats = self.stats.lock().unwrap();
+                let mut stats = self.stats.lock().unwrap_or_else(|p| p.into_inner());
                 stats.assets_failed_validation += 1;
                 false
             }
@@ -397,14 +410,14 @@ impl GossipSyncEngine {
 
     /// Current statistics snapshot.
     pub fn stats(&self) -> SyncStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Last seen sequence for `peer_id`.
     pub fn peer_cursor(&self, peer_id: &str) -> u64 {
         self.peer_cursors
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .get(peer_id)
             .copied()
             .unwrap_or(0)
@@ -662,7 +675,10 @@ impl RemoteCapsuleReceiver {
     }
 
     pub fn network_audit_trail(&self) -> Vec<NetworkAuditEntry> {
-        self.network_audit_trail.lock().unwrap().clone()
+        self.network_audit_trail
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     fn evaluate_capsule(
@@ -689,7 +705,7 @@ impl RemoteCapsuleReceiver {
         self.write_accept_audit_entry(peer_id, capsule, &disposition, score);
         self.audit_trail
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .push((capsule.id.clone(), disposition.clone()));
 
         disposition
@@ -697,12 +713,18 @@ impl RemoteCapsuleReceiver {
 
     /// All in-memory audit entries accumulated so far.
     pub fn audit_trail(&self) -> Vec<(String, CapsuleDisposition)> {
-        self.audit_trail.lock().unwrap().clone()
+        self.audit_trail
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// Number of audit entries recorded.
     pub fn audit_count(&self) -> usize {
-        self.audit_trail.lock().unwrap().len()
+        self.audit_trail
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
     }
 
     fn write_accept_audit_entry(
@@ -715,7 +737,7 @@ impl RemoteCapsuleReceiver {
         let Some(ref path) = self.audit_log_path else {
             self.network_audit_trail
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|p| p.into_inner())
                 .push(NetworkAuditEntry {
                     timestamp: Utc::now().to_rfc3339(),
                     peer_id: peer_id.to_string(),
@@ -744,7 +766,7 @@ impl RemoteCapsuleReceiver {
         };
         self.network_audit_trail
             .lock()
-            .unwrap()
+            .unwrap_or_else(|p| p.into_inner())
             .push(NetworkAuditEntry {
                 timestamp: entry.timestamp.clone(),
                 peer_id: entry.peer_id.to_string(),
@@ -783,7 +805,10 @@ impl RemoteCapsuleReceiver {
             reason: Some(reason.to_string()),
             score: Some(capsule.confidence as f64),
         };
-        self.network_audit_trail.lock().unwrap().push(entry.clone());
+        self.network_audit_trail
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(entry.clone());
 
         let Some(ref path) = self.audit_log_path else {
             return;

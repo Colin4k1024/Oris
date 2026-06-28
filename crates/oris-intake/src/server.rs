@@ -38,6 +38,7 @@ use sha2::Sha256;
 use tokio::sync::mpsc;
 
 use crate::{
+    hermesx::{HermesxIntakeSource, HermesxVerifier},
     source::{
         from_gitlab_pipeline, GithubIntakeSource, GitlabPipelineEvent, IntakeSource,
         PrometheusIntakeSource, SentryIntakeSource,
@@ -60,6 +61,9 @@ pub struct WebhookState {
     /// Optional shared token for GitLab webhook token verification.
     /// When `None`, token verification is **skipped** for the GitLab endpoint.
     pub gitlab_token: Option<String>,
+    /// Optional Ed25519 verifier for Hermesx execution events.
+    /// When `None`, signature verification is **skipped** for the Hermesx endpoint.
+    pub hermesx_verifier: Option<Arc<HermesxVerifier>>,
 }
 
 /// Builder for the webhook server.
@@ -79,6 +83,7 @@ impl WebhookServer {
                 tx,
                 github_secret: None,
                 gitlab_token: None,
+                hermesx_verifier: None,
             },
         }
     }
@@ -95,7 +100,13 @@ impl WebhookServer {
         self
     }
 
-    /// Build an Axum [`Router`] with all four webhook routes mounted.
+    /// Set the Ed25519 verifier for Hermesx execution event verification.
+    pub fn with_hermesx_verifier(mut self, verifier: HermesxVerifier) -> Self {
+        self.state.hermesx_verifier = Some(Arc::new(verifier));
+        self
+    }
+
+    /// Build an Axum [`Router`] with all webhook routes mounted.
     pub fn into_router(self) -> Router {
         let shared = Arc::new(self.state);
         Router::new()
@@ -103,6 +114,7 @@ impl WebhookServer {
             .route("/webhooks/gitlab", post(handle_gitlab))
             .route("/webhooks/prometheus", post(handle_prometheus))
             .route("/webhooks/sentry", post(handle_sentry))
+            .route("/v1/ingest/hermesx/execution-event", post(handle_hermesx))
             .with_state(shared)
     }
 }
@@ -195,6 +207,50 @@ async fn handle_sentry(State(state): State<Arc<WebhookState>>, body: Bytes) -> i
         Ok(events) => {
             emit_all(&state.tx, events).await;
             StatusCode::OK.into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, format!("parse error: {}", e)).into_response(),
+    }
+}
+
+/// `POST /v1/ingest/hermesx/execution-event`
+///
+/// Accepts Hermesx execution events. Success events are acknowledged with
+/// `204 No Content`. Failed events are ingested and forwarded to the channel.
+/// Ed25519 signature verification is performed when a verifier is configured.
+async fn handle_hermesx(
+    State(state): State<Arc<WebhookState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    // Ed25519 signature verification
+    if let Some(ref verifier) = state.hermesx_verifier {
+        let key_id = headers
+            .get("x-hermesx-key-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let signature = headers
+            .get("x-hermesx-signature")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if key_id.is_empty() || signature.is_empty() {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+
+        if verifier.verify(key_id, signature, &body).is_err() {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
+
+    let source = HermesxIntakeSource;
+    match source.process_event(&body) {
+        Ok(Some(event)) => {
+            let _ = state.tx.try_send(event);
+            StatusCode::OK.into_response()
+        }
+        Ok(None) => {
+            // Success event — acknowledged but not ingested
+            StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, format!("parse error: {}", e)).into_response(),
     }

@@ -595,3 +595,311 @@ async fn search_genes_includes_contributor_id() {
         .expect("gene should appear in results");
     assert_eq!(found.gene.contributor_id, Some("agent-abc".into()));
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// S6: Additional test density
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn get_gene_nonexistent_returns_none() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let result = store.get_gene(Uuid::new_v4()).await.unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn get_capsule_nonexistent_returns_none() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let result = store.get_capsule(Uuid::new_v4()).await.unwrap();
+    assert!(result.is_none());
+}
+
+#[tokio::test]
+async fn capsules_for_nonexistent_gene_returns_empty() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let capsules = store.capsules_for_gene(Uuid::new_v4()).await.unwrap();
+    assert!(capsules.is_empty());
+}
+
+#[tokio::test]
+async fn delete_nonexistent_gene_is_noop() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    store.delete_gene(Uuid::new_v4()).await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_genes_returns_low_confidence_only() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+
+    let high = Gene {
+        id: Uuid::new_v4(),
+        name: "high-conf".into(),
+        description: "high confidence gene".into(),
+        tags: vec!["rust".into()],
+        template: "fix".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.90,
+        use_count: 10,
+        success_count: 9,
+        quality_score: 0.9,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+    let stale = Gene {
+        id: Uuid::new_v4(),
+        name: "stale-gene".into(),
+        description: "below threshold".into(),
+        tags: vec!["rust".into()],
+        template: "fix".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.25,
+        use_count: 50,
+        success_count: 10,
+        quality_score: 0.2,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+
+    store.upsert_gene(&high).await.unwrap();
+    store.upsert_gene(&stale).await.unwrap();
+
+    let stales = store.stale_genes().await.unwrap();
+    assert_eq!(stales.len(), 1);
+    assert_eq!(stales[0].id, stale.id);
+}
+
+#[tokio::test]
+async fn record_gene_outcome_success_boosts_confidence() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let gene = Gene {
+        id: Uuid::new_v4(),
+        name: "boost-me".into(),
+        description: "test confidence boost".into(),
+        tags: vec![],
+        template: "".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.70,
+        use_count: 5,
+        success_count: 3,
+        quality_score: 0.5,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+    store.upsert_gene(&gene).await.unwrap();
+
+    store.record_gene_outcome(gene.id, true).await.unwrap();
+
+    let fetched = store.get_gene(gene.id).await.unwrap().unwrap();
+    assert!(fetched.confidence > gene.confidence);
+    assert_eq!(fetched.use_count, gene.use_count + 1);
+    assert_eq!(fetched.success_count, gene.success_count + 1);
+}
+
+#[tokio::test]
+async fn record_gene_outcome_failure_penalizes_confidence() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+    let gene = Gene {
+        id: Uuid::new_v4(),
+        name: "penalize-me".into(),
+        description: "test confidence penalty".into(),
+        tags: vec![],
+        template: "".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.70,
+        use_count: 5,
+        success_count: 3,
+        quality_score: 0.5,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+    store.upsert_gene(&gene).await.unwrap();
+
+    store.record_gene_outcome(gene.id, false).await.unwrap();
+
+    let fetched = store.get_gene(gene.id).await.unwrap().unwrap();
+    assert!(fetched.confidence < gene.confidence);
+    assert_eq!(fetched.use_count, gene.use_count + 1);
+    assert_eq!(fetched.success_count, gene.success_count);
+}
+
+#[tokio::test]
+async fn search_genes_respects_min_confidence() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+
+    let low = Gene {
+        id: Uuid::new_v4(),
+        name: "low".into(),
+        description: "below threshold".into(),
+        tags: vec!["search".into()],
+        template: "".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.40,
+        use_count: 0,
+        success_count: 0,
+        quality_score: 0.0,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+    let high = Gene {
+        id: Uuid::new_v4(),
+        name: "high".into(),
+        description: "above threshold".into(),
+        tags: vec!["search".into()],
+        template: "".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.80,
+        use_count: 0,
+        success_count: 0,
+        quality_score: 0.0,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+    store.upsert_gene(&low).await.unwrap();
+    store.upsert_gene(&high).await.unwrap();
+
+    let query = GeneQuery {
+        required_tags: vec!["search".into()],
+        min_confidence: 0.60,
+        limit: 10,
+        problem_description: "test".into(),
+    };
+    let results = store.search_genes(&query).await.unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].gene.id, high.id);
+}
+
+#[tokio::test]
+async fn search_genes_limit_respected() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+
+    for i in 0..5 {
+        let gene = Gene {
+            id: Uuid::new_v4(),
+            name: format!("gene-{i}"),
+            description: format!("gene {i}"),
+            tags: vec!["batch".into()],
+            template: "".into(),
+            preconditions: vec![],
+            validation_steps: vec![],
+            confidence: 0.80,
+            use_count: 0,
+            success_count: 0,
+            quality_score: 0.0,
+            created_at: Utc::now(),
+            last_used_at: None,
+            last_boosted_at: None,
+            contributor_id: None,
+        };
+        store.upsert_gene(&gene).await.unwrap();
+    }
+
+    let query = GeneQuery {
+        required_tags: vec!["batch".into()],
+        min_confidence: 0.0,
+        limit: 2,
+        problem_description: "test".into(),
+    };
+    let results = store.search_genes(&query).await.unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[tokio::test]
+async fn record_capsule_outcome_success_boosts_and_records_run_id() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+
+    let gene = Gene {
+        id: Uuid::new_v4(),
+        name: "parent".into(),
+        description: "p".into(),
+        tags: vec![],
+        template: "".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: 0.80,
+        use_count: 0,
+        success_count: 0,
+        quality_score: 0.0,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+    store.upsert_gene(&gene).await.unwrap();
+
+    let capsule = Capsule {
+        id: Uuid::new_v4(),
+        gene_id: gene.id,
+        content: "cap".into(),
+        env_fingerprint: "env".into(),
+        quality_score: 0.8,
+        confidence: 0.80,
+        use_count: 2,
+        success_count: 1,
+        last_replay_run_id: None,
+        created_at: Utc::now(),
+        last_used_at: None,
+    };
+    store.upsert_capsule(&capsule).await.unwrap();
+
+    let run_id = Uuid::new_v4();
+    store
+        .record_capsule_outcome(capsule.id, true, Some(run_id))
+        .await
+        .unwrap();
+
+    let fetched = store.get_capsule(capsule.id).await.unwrap().unwrap();
+    assert_eq!(fetched.use_count, 3);
+    assert_eq!(fetched.success_count, 2);
+    assert!(fetched.confidence > capsule.confidence);
+    assert_eq!(fetched.last_replay_run_id, Some(run_id));
+}
+
+#[tokio::test]
+async fn decay_all_floors_at_stale_threshold() {
+    let store = SqliteGeneStore::open(":memory:").unwrap();
+
+    let gene = Gene {
+        id: Uuid::new_v4(),
+        name: "almost-stale".into(),
+        description: "just above threshold".into(),
+        tags: vec![],
+        template: "".into(),
+        preconditions: vec![],
+        validation_steps: vec![],
+        confidence: Gene::STALE_THRESHOLD + 0.001,
+        use_count: 0,
+        success_count: 0,
+        quality_score: 0.0,
+        created_at: Utc::now(),
+        last_used_at: None,
+        last_boosted_at: None,
+        contributor_id: None,
+    };
+    store.upsert_gene(&gene).await.unwrap();
+
+    store.decay_all().await.unwrap();
+
+    let fetched = store.get_gene(gene.id).await.unwrap().unwrap();
+    assert!(
+        fetched.confidence >= Gene::STALE_THRESHOLD,
+        "confidence should not drop below STALE_THRESHOLD"
+    );
+}

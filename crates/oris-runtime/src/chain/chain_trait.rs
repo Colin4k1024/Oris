@@ -176,8 +176,9 @@ pub trait Chain: Sync + Send {
         _input_variables: PromptArgs,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamData, ChainError>> + Send>>, ChainError>
     {
-        log::warn!("stream not implemented for this chain");
-        unimplemented!()
+        Err(ChainError::NotImplemented(
+            "stream is not implemented for this chain".to_string(),
+        ))
     }
 
     // Get the input keys of the prompt

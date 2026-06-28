@@ -1,4 +1,15 @@
 //! Non-financial EVU accounting for local publish and validation incentives.
+//!
+//! # Example
+//!
+//! ```rust
+//! use oris_economics::{LedgerJournal, RoiPolicy};
+//!
+//! let mut journal = LedgerJournal::new("node-a");
+//! let policy = RoiPolicy::default();
+//! let entry = journal.record_replay_success("gene-1", 500, 1000, &policy);
+//! assert!(journal.balance() > 0);
+//! ```
 
 use std::collections::BTreeMap;
 

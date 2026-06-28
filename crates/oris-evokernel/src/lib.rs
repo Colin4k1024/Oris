@@ -3,6 +3,8 @@
 pub mod adapters;
 pub mod confidence_daemon;
 mod core;
+#[cfg(feature = "prometheus")]
+pub mod metrics;
 pub mod pipeline_integration;
 pub mod signal_extractor;
 

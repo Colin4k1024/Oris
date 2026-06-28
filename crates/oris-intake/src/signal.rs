@@ -85,66 +85,91 @@ impl SignalExtractor {
             compiler_patterns: vec![
                 (
                     "borrow checker",
-                    Regex::new(r"(?i)borrow.*(error|checker)").unwrap(),
+                    Regex::new(r"(?i)borrow.*(error|checker)").expect("valid regex literal"),
                 ),
-                ("type mismatch", Regex::new(r"(?i)type.*mismatch").unwrap()),
+                (
+                    "type mismatch",
+                    Regex::new(r"(?i)type.*mismatch").expect("valid regex literal"),
+                ),
                 (
                     "missing import",
-                    Regex::new(r"(?i)(cannot find|missing).*(import|struct|function)").unwrap(),
+                    Regex::new(r"(?i)(cannot find|missing).*(import|struct|function)")
+                        .expect("valid regex literal"),
                 ),
                 (
                     "unresolved import",
-                    Regex::new(r"(?i)unresolved.*import").unwrap(),
+                    Regex::new(r"(?i)unresolved.*import").expect("valid regex literal"),
                 ),
                 (
                     "unused",
-                    Regex::new(r"(?i)unused.*(import|variable|function)").unwrap(),
+                    Regex::new(r"(?i)unused.*(import|variable|function)")
+                        .expect("valid regex literal"),
                 ),
             ],
             runtime_patterns: vec![
-                ("timeout", Regex::new(r"(?i)timeout").unwrap()),
+                (
+                    "timeout",
+                    Regex::new(r"(?i)timeout").expect("valid regex literal"),
+                ),
                 (
                     "connection refused",
-                    Regex::new(r"(?i)(connection|connect).*(refused|failed)").unwrap(),
+                    Regex::new(r"(?i)(connection|connect).*(refused|failed)")
+                        .expect("valid regex literal"),
                 ),
                 (
                     "out of memory",
-                    Regex::new(r"(?i)(out of memory|oom)").unwrap(),
+                    Regex::new(r"(?i)(out of memory|oom)").expect("valid regex literal"),
                 ),
-                ("panic", Regex::new(r"(?i)panic").unwrap()),
+                (
+                    "panic",
+                    Regex::new(r"(?i)panic").expect("valid regex literal"),
+                ),
                 (
                     "null pointer",
-                    Regex::new(r"(?i)(null|nil).*pointer").unwrap(),
+                    Regex::new(r"(?i)(null|nil).*pointer").expect("valid regex literal"),
                 ),
             ],
             test_patterns: vec![
-                ("test failed", Regex::new(r"(?i)test.*failed").unwrap()),
+                (
+                    "test failed",
+                    Regex::new(r"(?i)test.*failed").expect("valid regex literal"),
+                ),
                 (
                     "assertion failed",
-                    Regex::new(r"(?i)assertion.*failed").unwrap(),
+                    Regex::new(r"(?i)assertion.*failed").expect("valid regex literal"),
                 ),
                 (
                     "expected.*actual",
-                    Regex::new(r"(?i)expected.*actual").unwrap(),
+                    Regex::new(r"(?i)expected.*actual").expect("valid regex literal"),
                 ),
             ],
             performance_patterns: vec![
                 (
                     "slow",
-                    Regex::new(r"(?i)(slow|latency).*(than|exceed)").unwrap(),
+                    Regex::new(r"(?i)(slow|latency).*(than|exceed)").expect("valid regex literal"),
                 ),
-                ("memory leak", Regex::new(r"(?i)memory.*leak").unwrap()),
+                (
+                    "memory leak",
+                    Regex::new(r"(?i)memory.*leak").expect("valid regex literal"),
+                ),
                 (
                     "high cpu",
-                    Regex::new(r"(?i)(high|cpu).*(usage|load)").unwrap(),
+                    Regex::new(r"(?i)(high|cpu).*(usage|load)").expect("valid regex literal"),
                 ),
             ],
             security_patterns: vec![
-                ("vulnerability", Regex::new(r"(?i)vulnerability").unwrap()),
-                ("injection", Regex::new(r"(?i)(sql|xss|injection)").unwrap()),
+                (
+                    "vulnerability",
+                    Regex::new(r"(?i)vulnerability").expect("valid regex literal"),
+                ),
+                (
+                    "injection",
+                    Regex::new(r"(?i)(sql|xss|injection)").expect("valid regex literal"),
+                ),
                 (
                     "auth failed",
-                    Regex::new(r"(?i)(auth|permission).*(failed|denied)").unwrap(),
+                    Regex::new(r"(?i)(auth|permission).*(failed|denied)")
+                        .expect("valid regex literal"),
                 ),
             ],
         }

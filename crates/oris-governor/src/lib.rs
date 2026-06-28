@@ -1,4 +1,17 @@
 //! Policy-only governor contracts for Oris EvoKernel.
+//!
+//! Defines promotion, cooldown, and revocation policies that control
+//! when genes advance through lifecycle states.
+//!
+//! # Example
+//!
+//! ```rust
+//! use oris_governor::GovernorConfig;
+//!
+//! let config = GovernorConfig::default();
+//! assert!(config.promote_after_successes > 0);
+//! assert!(config.cooldown_secs > 0);
+//! ```
 
 use serde::{Deserialize, Serialize};
 

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tracing::info_span;
 
 use crate::core::{GeneCandidate, PreparedMutation, Selector, SelectorInput};
 use crate::evolver::{EvolutionSignal, MutationProposal, MutationRiskLevel, ValidationResult};
@@ -384,6 +385,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
 
         // Detect phase
         if self.config.enable_detect {
+            let _span = info_span!("evolution.detect").entered();
             let mut stage = StageState::new(PipelineStage::Detect.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
@@ -417,7 +419,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                 .stage_timings
                 .insert(PipelineStage::Detect.as_str().to_string(), elapsed);
             let d_ms = elapsed.as_millis() as u64;
-            let last = stage_states.last_mut().unwrap();
+            let last = stage_states.last_mut().expect("stage just pushed");
             last.state = PipelineStageState::Completed;
             last.duration_ms = Some(d_ms);
         } else {
@@ -430,6 +432,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
 
         // Select phase
         if self.config.enable_select {
+            let _span = info_span!("evolution.select").entered();
             let mut stage = StageState::new(PipelineStage::Select.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
@@ -456,7 +459,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             context
                 .stage_timings
                 .insert(PipelineStage::Select.as_str().to_string(), elapsed);
-            let last = stage_states.last_mut().unwrap();
+            let last = stage_states.last_mut().expect("stage just pushed");
             last.state = PipelineStageState::Completed;
             last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
@@ -469,6 +472,8 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
 
         // Mutate phase - prepare proposals from candidates
         if self.config.enable_mutate {
+            let _span =
+                info_span!("evolution.mutate", candidates = context.candidates.len()).entered();
             let mut stage = StageState::new(PipelineStage::Mutate.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
@@ -492,7 +497,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             context
                 .stage_timings
                 .insert(PipelineStage::Mutate.as_str().to_string(), elapsed);
-            let last = stage_states.last_mut().unwrap();
+            let last = stage_states.last_mut().expect("stage just pushed");
             last.state = PipelineStageState::Completed;
             last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
@@ -505,6 +510,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
 
         // Execute phase
         if self.config.enable_execute {
+            let _span = info_span!("evolution.execute").entered();
             let mut stage = StageState::new(PipelineStage::Execute.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
@@ -516,7 +522,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                 let mutation = build_prepared_mutation(proposal);
                 let result = sb.execute(&mutation);
                 context.execution_result = Some(result.to_json());
-                let last = stage_states.last_mut().unwrap();
+                let last = stage_states.last_mut().expect("stage just pushed");
                 last.state = if result.success {
                     PipelineStageState::Completed
                 } else {
@@ -531,13 +537,17 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
                     "duration_ms": 0,
                     "message": "Mutation executed successfully (stub)"
                 }));
-                stage_states.last_mut().unwrap().state = PipelineStageState::Completed;
+                stage_states.last_mut().expect("stage just pushed").state =
+                    PipelineStageState::Completed;
             }
             let elapsed = t0.elapsed();
             context
                 .stage_timings
                 .insert(PipelineStage::Execute.as_str().to_string(), elapsed);
-            stage_states.last_mut().unwrap().duration_ms = Some(elapsed.as_millis() as u64);
+            stage_states
+                .last_mut()
+                .expect("stage just pushed")
+                .duration_ms = Some(elapsed.as_millis() as u64);
         } else {
             stage_states.push(StageState {
                 stage_name: PipelineStage::Execute.as_str().to_string(),
@@ -548,6 +558,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
 
         // Validate phase
         if self.config.enable_validate {
+            let _span = info_span!("evolution.validate").entered();
             let mut stage = StageState::new(PipelineStage::Validate.as_str());
             stage.state = PipelineStageState::Running;
             stage_states.push(stage);
@@ -594,7 +605,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             context
                 .stage_timings
                 .insert(PipelineStage::Validate.as_str().to_string(), elapsed);
-            let last = stage_states.last_mut().unwrap();
+            let last = stage_states.last_mut().expect("stage just pushed");
             // Mark stage Failed when validation did not pass so callers can detect it.
             last.state = match &context.validation_result {
                 Some(r) if !r.passed => PipelineStageState::Failed("validation failed".to_string()),
@@ -646,7 +657,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             context
                 .stage_timings
                 .insert(PipelineStage::Evaluate.as_str().to_string(), elapsed);
-            let last = stage_states.last_mut().unwrap();
+            let last = stage_states.last_mut().expect("stage just pushed");
             last.state = PipelineStageState::Completed;
             last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
@@ -678,7 +689,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             context
                 .stage_timings
                 .insert(PipelineStage::Solidify.as_str().to_string(), elapsed);
-            let last = stage_states.last_mut().unwrap();
+            let last = stage_states.last_mut().expect("stage just pushed");
             last.state = PipelineStageState::Completed;
             last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {
@@ -710,7 +721,7 @@ impl EvolutionPipeline for StandardEvolutionPipeline {
             context
                 .stage_timings
                 .insert(PipelineStage::Reuse.as_str().to_string(), elapsed);
-            let last = stage_states.last_mut().unwrap();
+            let last = stage_states.last_mut().expect("stage just pushed");
             last.state = PipelineStageState::Completed;
             last.duration_ms = Some(elapsed.as_millis() as u64);
         } else {

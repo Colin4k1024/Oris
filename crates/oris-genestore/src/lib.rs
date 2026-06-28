@@ -8,6 +8,15 @@
 //! - Concurrent readers: multiple Oris worker processes can read simultaneously
 //! - Schema migrations: ALTER TABLE is far safer than rewriting JSONL files
 //! - Aggregate queries: confidence stats, success-rate histograms — free with SQL
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use oris_genestore::{SqliteGeneStore, GeneQuery};
+//!
+//! let store = SqliteGeneStore::open(":memory:").unwrap();
+//! let query = GeneQuery { required_tags: vec!["test_failure".into()], ..Default::default() };
+//! ```
 
 pub mod migrate;
 pub mod replay_hook;

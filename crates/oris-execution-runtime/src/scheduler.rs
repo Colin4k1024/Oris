@@ -241,7 +241,10 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
         tenant_id: Option<&str>,
     ) -> Option<(RejectionReason, usize)> {
         if let Some(tenant) = tenant_id {
-            let counts = self.tenant_run_counts.lock().unwrap();
+            let counts = self
+                .tenant_run_counts
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             if let Some(&count) = counts.get(tenant) {
                 if count >= self.throttle_limits.max_concurrent_runs_per_tenant {
                     return Some((
@@ -259,7 +262,10 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
 
     /// Check per-worker backpressure (K5-d).
     fn check_worker_backpressure(&self, worker_id: &str) -> Option<(RejectionReason, usize)> {
-        let counts = self.worker_lease_counts.lock().unwrap();
+        let counts = self
+            .worker_lease_counts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if let Some(&count) = counts.get(worker_id) {
             if count >= self.throttle_limits.max_concurrent_leases_per_worker {
                 return Some((
@@ -277,20 +283,29 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
     /// Increment tenant run count after successful dispatch (K5-d).
     fn increment_tenant_count(&self, tenant_id: Option<&str>) {
         if let Some(tenant) = tenant_id {
-            let mut counts = self.tenant_run_counts.lock().unwrap();
+            let mut counts = self
+                .tenant_run_counts
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             *counts.entry(tenant.to_string()).or_insert(0) += 1;
         }
     }
 
     /// Increment worker lease count after successful dispatch (K5-d).
     fn increment_worker_count(&self, worker_id: &str) {
-        let mut counts = self.worker_lease_counts.lock().unwrap();
+        let mut counts = self
+            .worker_lease_counts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         *counts.entry(worker_id.to_string()).or_insert(0) += 1;
     }
 
     /// Decrement worker lease count when lease is released (K5-d).
     pub fn decrement_worker_count(&self, worker_id: &str) {
-        let mut counts = self.worker_lease_counts.lock().unwrap();
+        let mut counts = self
+            .worker_lease_counts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         if let Some(count) = counts.get_mut(worker_id) {
             if *count > 0 {
                 *count -= 1;
@@ -300,8 +315,14 @@ impl<R: RuntimeRepository> SkeletonScheduler<R> {
 
     /// Get current scheduler metrics for observability (K5-d).
     pub fn get_metrics(&self) -> SchedulerMetrics {
-        let tenant_counts = self.tenant_run_counts.lock().unwrap();
-        let worker_counts = self.worker_lease_counts.lock().unwrap();
+        let tenant_counts = self
+            .tenant_run_counts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let worker_counts = self
+            .worker_lease_counts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
 
         SchedulerMetrics {
             tenant_run_counts: tenant_counts.clone(),

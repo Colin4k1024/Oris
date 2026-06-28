@@ -82,30 +82,27 @@ See [EvoMap alignment details](docs/evomap-vs-oris-comparison.md).
 
 ## Quick Start
 
-Install the core crate and enable the framework surface:
-
 ```bash
-cargo add oris-runtime
-cargo add oris-runtime --features evolution
-export OPENAI_API_KEY="your-key"
+git clone https://github.com/oris-project/oris.git && cd oris
+cargo build --release
+cargo run -p evo_oris_repo
 ```
 
-Run the canonical evolution scenario:
+Or add to your project:
 
-```bash
-cargo run -p evo_oris_repo
+```toml
+[dependencies]
+oris-runtime = { version = "0.61", features = ["sqlite-persistence", "evolution-experimental"] }
 ```
 
 Run the first-run script with observable artifacts:
 
 ```bash
 bash scripts/evo_first_run.sh
+# Produces: target/evo_first_run/summary.json + run.log
 ```
 
-Expected outputs:
-
-- `target/evo_first_run/summary.json`
-- `target/evo_first_run/run.log`
+See **[docs/quickstart.md](docs/quickstart.md)** for the full guide covering feature flags, observability, the execution server, and CI intake webhook setup.
 
 ---
 

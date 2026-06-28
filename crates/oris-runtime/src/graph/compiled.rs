@@ -542,7 +542,8 @@ impl<S: State + 'static> CompiledGraph<S> {
 
                 let update = if is_subgraph {
                     // This is a subgraph node - stream its execution
-                    let subgraph = node.get_subgraph().unwrap();
+                    // SAFETY: `is_subgraph` is true only when `node.get_subgraph().is_some()` (line 536)
+                    let subgraph = node.get_subgraph().expect("subgraph verified present above");
                     let subgraph_path = vec![current_node.clone()]; // Path prefix for subgraph events
 
                     // Create stream options for subgraph

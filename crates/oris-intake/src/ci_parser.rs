@@ -8,6 +8,8 @@
 //! - `cargo test` failure lines: `test <name> ... FAILED`
 //! - `cargo build` errors: `error[E...]: <message> --> <file>:<line>`
 //! - thread panics: `thread '<name>' panicked at '<msg>', <file>:<line>`
+//! - `cargo clippy` warnings/errors: `warning: <msg>` with `#[warn(...)]` lint names
+//! - GitHub Actions annotations: `::error file={f},line={l}::{msg}`
 //! - Test result summary: `FAILED. 3 passed; 1 failed`
 //!
 //! ## Example
@@ -52,6 +54,10 @@ pub enum CiFailureKind {
     CompilerError,
     /// Thread panic (`panicked at`).
     Panic,
+    /// `cargo clippy` lint warning or error.
+    ClippyWarning,
+    /// GitHub Actions `::error` / `::warning` annotation.
+    GithubActionsAnnotation,
     /// Generic build or run failure not matched above.
     GenericFailure,
 }
@@ -62,6 +68,8 @@ impl std::fmt::Display for CiFailureKind {
             CiFailureKind::TestFailure => write!(f, "test_failure"),
             CiFailureKind::CompilerError => write!(f, "compiler_error"),
             CiFailureKind::Panic => write!(f, "panic"),
+            CiFailureKind::ClippyWarning => write!(f, "clippy_warning"),
+            CiFailureKind::GithubActionsAnnotation => write!(f, "gha_annotation"),
             CiFailureKind::GenericFailure => write!(f, "generic_failure"),
         }
     }
@@ -77,6 +85,10 @@ pub struct CiParser {
     location_re: Regex,
     /// Regex for `thread '<name>' panicked at`
     panic_re: Regex,
+    /// Regex for clippy: `warning: <msg>` or `warning[lint_name]: <msg>`
+    clippy_re: Regex,
+    /// Regex for GitHub Actions annotations: `::error file=...,line=...::msg`
+    gha_annotation_re: Regex,
 }
 
 impl CiParser {
@@ -87,6 +99,11 @@ impl CiParser {
             compiler_error_re: Regex::new(r"^error(?:\[([A-Z]\d+)\])?:\s+(.+)$").unwrap(),
             location_re: Regex::new(r"^\s+-->\s+(.+:\d+(?::\d+)?)").unwrap(),
             panic_re: Regex::new(r"thread '([^']+)' panicked at '?([^,']+)'?").unwrap(),
+            clippy_re: Regex::new(r"^warning(?:\[([a-z_][a-z0-9_:]*)\])?:\s+(.+)$").unwrap(),
+            gha_annotation_re: Regex::new(
+                r"^::(error|warning)\s+file=([^,]+)(?:,line=(\d+))?(?:,col=(\d+))?(?:,endLine=\d+)?(?:,endColumn=\d+)?(?:,title=([^:]*?))?::(.+)$",
+            )
+            .unwrap(),
         }
     }
 
@@ -161,6 +178,62 @@ impl CiParser {
                 continue;
             }
 
+            // Pattern: warning[lint_name]: <msg> (clippy)
+            if let Some(caps) = self.clippy_re.captures(line) {
+                let lint = caps.get(1).map(|m| m.as_str().to_string());
+                let msg = caps.get(2).map(|m| m.as_str()).unwrap_or("").to_string();
+
+                let location = lines
+                    .get(i + 1)
+                    .and_then(|l| self.location_re.captures(l))
+                    .and_then(|c| c.get(1))
+                    .map(|m| m.as_str().to_string());
+
+                let context = self.collect_context(&lines, i, 6);
+                let message = if let Some(ref l) = lint {
+                    format!("clippy[{}]: {}", l, msg)
+                } else {
+                    format!("clippy: {}", msg)
+                };
+
+                failures.push(CiFailure {
+                    kind: CiFailureKind::ClippyWarning,
+                    name: lint,
+                    message,
+                    location,
+                    context,
+                });
+                i += 1;
+                continue;
+            }
+
+            // Pattern: ::error file=<f>,line=<l>::<msg> (GitHub Actions)
+            if let Some(caps) = self.gha_annotation_re.captures(line) {
+                let level = caps.get(1).map(|m| m.as_str()).unwrap_or("error");
+                let file = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+                let line_num = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+                let title = caps.get(5).map(|m| m.as_str().to_string());
+                let msg = caps.get(6).map(|m| m.as_str()).unwrap_or("").to_string();
+
+                let location = if line_num.is_empty() {
+                    Some(file.to_string())
+                } else {
+                    Some(format!("{}:{}", file, line_num))
+                };
+
+                let message = format!("gha::{} {}", level, msg);
+
+                failures.push(CiFailure {
+                    kind: CiFailureKind::GithubActionsAnnotation,
+                    name: title,
+                    message,
+                    location,
+                    context: String::new(),
+                });
+                i += 1;
+                continue;
+            }
+
             i += 1;
         }
 
@@ -183,6 +256,8 @@ impl CiParser {
             CiFailureKind::CompilerError => IssueSeverity::High,
             CiFailureKind::Panic => IssueSeverity::Critical,
             CiFailureKind::TestFailure => IssueSeverity::Medium,
+            CiFailureKind::ClippyWarning => IssueSeverity::Low,
+            CiFailureKind::GithubActionsAnnotation => IssueSeverity::Medium,
             CiFailureKind::GenericFailure => IssueSeverity::Low,
         };
 
@@ -433,5 +508,139 @@ error[E0425]: cannot find value `missing_var` in this scope
         let invalid = vec![0xFF, 0xFE, 0x00];
         assert!(source.validate(&invalid).is_err());
         assert!(source.process(&invalid).is_err());
+    }
+
+    const SAMPLE_CLIPPY_OUTPUT: &str = r#"warning[clippy::unused_variable]: unused variable: `x`
+ --> crates/oris-kernel/src/kernel/driver.rs:42:9
+  |
+42|     let x = compute_value();
+  |         ^ help: if this is intentional, prefix it with an underscore: `_x`
+
+warning[clippy::needless_return]: unneeded `return` statement
+ --> crates/oris-evolution/src/pipeline.rs:100:5
+  |
+100|     return Ok(result);
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> crates/oris-intake/src/lib.rs:5:5"#;
+
+    const SAMPLE_GHA_OUTPUT: &str = r#"::error file=src/main.rs,line=42,col=5::cannot find value `foo` in this scope
+::warning file=src/lib.rs,line=10::unused import
+::error file=tests/integration.rs,line=100,col=1,title=Test Failure::assertion failed: expected 42, got 0"#;
+
+    #[test]
+    fn test_parse_clippy_warnings() {
+        let parser = CiParser::new();
+        let failures = parser.parse(SAMPLE_CLIPPY_OUTPUT);
+
+        let clippy: Vec<_> = failures
+            .iter()
+            .filter(|f| f.kind == CiFailureKind::ClippyWarning)
+            .collect();
+
+        assert_eq!(clippy.len(), 3, "should detect 3 clippy warnings");
+        assert_eq!(clippy[0].name.as_deref(), Some("clippy::unused_variable"));
+        assert!(clippy[0].message.contains("unused variable"));
+        assert!(clippy[0].location.is_some());
+        assert_eq!(clippy[1].name.as_deref(), Some("clippy::needless_return"));
+        // third warning has no lint code bracket
+        assert!(clippy[2].name.is_none());
+    }
+
+    #[test]
+    fn test_parse_clippy_location_extraction() {
+        let parser = CiParser::new();
+        let failures = parser.parse(SAMPLE_CLIPPY_OUTPUT);
+
+        let first = failures
+            .iter()
+            .find(|f| f.kind == CiFailureKind::ClippyWarning)
+            .unwrap();
+        assert_eq!(
+            first.location.as_deref(),
+            Some("crates/oris-kernel/src/kernel/driver.rs:42:9")
+        );
+    }
+
+    #[test]
+    fn test_clippy_events_have_low_severity() {
+        let parser = CiParser::new();
+        let failures = parser.parse(SAMPLE_CLIPPY_OUTPUT);
+        let events = parser.to_intake_events(&failures);
+
+        let clippy_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.title.contains("clippy_warning"))
+            .collect();
+        assert!(!clippy_events.is_empty());
+        for event in clippy_events {
+            assert_eq!(event.severity, IssueSeverity::Low);
+        }
+    }
+
+    #[test]
+    fn test_parse_gha_annotations() {
+        let parser = CiParser::new();
+        let failures = parser.parse(SAMPLE_GHA_OUTPUT);
+
+        let gha: Vec<_> = failures
+            .iter()
+            .filter(|f| f.kind == CiFailureKind::GithubActionsAnnotation)
+            .collect();
+
+        assert_eq!(gha.len(), 3, "should detect 3 GHA annotations");
+        assert!(gha[0].message.contains("gha::error"));
+        assert!(gha[0].message.contains("cannot find value"));
+        assert_eq!(gha[0].location.as_deref(), Some("src/main.rs:42"));
+        assert!(gha[1].message.contains("gha::warning"));
+        assert_eq!(gha[1].location.as_deref(), Some("src/lib.rs:10"));
+    }
+
+    #[test]
+    fn test_gha_annotation_with_title() {
+        let parser = CiParser::new();
+        let failures = parser.parse(SAMPLE_GHA_OUTPUT);
+
+        let titled: Vec<_> = failures
+            .iter()
+            .filter(|f| f.kind == CiFailureKind::GithubActionsAnnotation && f.name.is_some())
+            .collect();
+
+        assert_eq!(titled.len(), 1);
+        assert_eq!(titled[0].name.as_deref(), Some("Test Failure"));
+        assert!(titled[0].message.contains("assertion failed"));
+    }
+
+    #[test]
+    fn test_gha_events_have_medium_severity() {
+        let parser = CiParser::new();
+        let failures = parser.parse(SAMPLE_GHA_OUTPUT);
+        let events = parser.to_intake_events(&failures);
+
+        let gha_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.title.contains("gha_annotation"))
+            .collect();
+        assert!(!gha_events.is_empty());
+        for event in gha_events {
+            assert_eq!(event.severity, IssueSeverity::Medium);
+        }
+    }
+
+    #[test]
+    fn test_mixed_output_all_kinds() {
+        let mixed = format!(
+            "{}\n{}\n{}",
+            SAMPLE_TEST_OUTPUT, SAMPLE_CLIPPY_OUTPUT, SAMPLE_GHA_OUTPUT
+        );
+        let parser = CiParser::new();
+        let failures = parser.parse(&mixed);
+
+        let kinds: Vec<_> = failures.iter().map(|f| f.kind.clone()).collect();
+        assert!(kinds.contains(&CiFailureKind::TestFailure));
+        assert!(kinds.contains(&CiFailureKind::Panic));
+        assert!(kinds.contains(&CiFailureKind::ClippyWarning));
+        assert!(kinds.contains(&CiFailureKind::GithubActionsAnnotation));
     }
 }

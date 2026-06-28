@@ -67,7 +67,7 @@ impl SqliteGeneStore {
     }
 
     fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS genes (
@@ -134,7 +134,7 @@ impl SqliteGeneStore {
 #[async_trait]
 impl GeneStore for SqliteGeneStore {
     async fn upsert_gene(&self, gene: &Gene) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute(
             r#"INSERT INTO genes
                (id, name, description, tags_json, template,
@@ -187,7 +187,7 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn get_gene(&self, id: Uuid) -> Result<Option<Gene>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id,name,description,tags_json,template,
                     preconditions_json,validation_steps_json,
@@ -204,13 +204,13 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn delete_gene(&self, id: Uuid) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute("DELETE FROM genes WHERE id=?1", params![id.to_string()])?;
         Ok(())
     }
 
     async fn search_genes(&self, query: &GeneQuery) -> Result<Vec<GeneMatch>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
 
         // Step 1: tag-filter — fetch candidates that have at least one required tag,
         // or all genes if no required tags specified.
@@ -284,7 +284,7 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn decay_all(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute(
             "UPDATE genes SET confidence = MAX(?1, confidence - ?2)",
             params![Gene::STALE_THRESHOLD, Gene::DECAY_PER_QUERY],
@@ -297,7 +297,7 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn record_gene_outcome(&self, id: Uuid, success: bool) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         if success {
             conn.execute(
                 "UPDATE genes SET
@@ -332,7 +332,7 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn stale_genes(&self) -> Result<Vec<Gene>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id,name,description,tags_json,template,
                     preconditions_json,validation_steps_json,
@@ -348,7 +348,7 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn upsert_capsule(&self, capsule: &Capsule) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute(
             r#"INSERT INTO capsules
                (id,gene_id,content,env_fingerprint,quality_score,confidence,
@@ -381,7 +381,7 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn get_capsule(&self, id: Uuid) -> Result<Option<Capsule>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id,gene_id,content,env_fingerprint,quality_score,confidence,
                     use_count,success_count,last_replay_run_id,created_at,last_used_at
@@ -396,7 +396,7 @@ impl GeneStore for SqliteGeneStore {
     }
 
     async fn capsules_for_gene(&self, gene_id: Uuid) -> Result<Vec<Capsule>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id,gene_id,content,env_fingerprint,quality_score,confidence,
                     use_count,success_count,last_replay_run_id,created_at,last_used_at
@@ -415,7 +415,7 @@ impl GeneStore for SqliteGeneStore {
         success: bool,
         replay_run_id: Option<Uuid>,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().unwrap_or_else(|p| p.into_inner());
         let now = Utc::now().to_rfc3339();
         if success {
             conn.execute(

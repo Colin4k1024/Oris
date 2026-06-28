@@ -4,6 +4,8 @@
 //! - CI/CD webhook listener (GitHub Actions, GitLab CI)
 //! - Monitoring alert integration (Prometheus, Sentry)
 //! - Error log signal extraction
+//! - Clippy warning and GitHub Actions annotation parsing
+//! - Hermesx execution event ingestion with Ed25519 verification
 //! - Automatic mutation/task creation
 //!
 //! ## Architecture
@@ -20,11 +22,24 @@
 //!     v
 //! MutationBuilder -> Evolution Store
 //! ```
+//!
+//! ## Example: Parse CI output into intake events
+//!
+//! ```rust
+//! use oris_intake::CiParser;
+//!
+//! let output = "test core::test_replay ... FAILED\ntest result: FAILED. 0 passed; 1 failed";
+//! let parser = CiParser::new();
+//! let events = parser.parse_to_events(output);
+//! assert_eq!(events.len(), 1);
+//! assert!(events[0].title.contains("test_failure"));
+//! ```
 
 pub mod admission;
 pub mod ci_parser;
 mod continuous;
 pub mod evidence;
+pub mod hermesx;
 mod mutation;
 pub mod planning;
 mod prioritize;
@@ -44,6 +59,7 @@ pub use evidence::{
     is_bundle_deliverable, validate_bundle, BundleValidationResult, EvidenceBundle,
     EvidenceBundleBuilder, EvidenceCompleteness,
 };
+pub use hermesx::{HermesxExecutionEvent, HermesxIntakeSource, HermesxVerifier, VerifyError};
 pub use mutation::*;
 pub use planning::{
     builtin_planning_contracts, EvidenceType, PlanValidationResult, PlanViolation,

@@ -20,6 +20,8 @@ pub enum IntakeSourceType {
     Http,
     /// Log file monitoring
     LogFile,
+    /// Hermesx execution events
+    Hermesx,
 }
 
 impl Default for IntakeSourceType {
@@ -37,6 +39,7 @@ impl std::fmt::Display for IntakeSourceType {
             IntakeSourceType::Sentry => write!(f, "sentry"),
             IntakeSourceType::Http => write!(f, "http"),
             IntakeSourceType::LogFile => write!(f, "logfile"),
+            IntakeSourceType::Hermesx => write!(f, "hermesx"),
         }
     }
 }

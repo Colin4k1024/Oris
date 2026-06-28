@@ -31,7 +31,7 @@ impl Deduplicator {
         let key = self.compute_event_key(event);
         let now = Instant::now();
 
-        let mut seen = self.seen_events.write().unwrap();
+        let mut seen = self.seen_events.write().unwrap_or_else(|p| p.into_inner());
 
         // Check if key exists and is within window
         if let Some(ts) = seen.get(&key) {
@@ -64,7 +64,7 @@ impl Deduplicator {
 
     /// Get statistics
     pub fn stats(&self) -> DeduplicatorStats {
-        let seen = self.seen_events.read().unwrap();
+        let seen = self.seen_events.read().unwrap_or_else(|p| p.into_inner());
         DeduplicatorStats {
             tracked_events: seen.len(),
             window_hours: self.window.as_secs() / 3600,
@@ -173,6 +173,7 @@ impl PriorityEvaluator {
             crate::source::IntakeSourceType::Gitlab => 90.0,
             crate::source::IntakeSourceType::Prometheus => 85.0,
             crate::source::IntakeSourceType::Sentry => 80.0,
+            crate::source::IntakeSourceType::Hermesx => 85.0,
             crate::source::IntakeSourceType::LogFile => 60.0,
             crate::source::IntakeSourceType::Http => 50.0,
         }
@@ -218,7 +219,7 @@ impl RateLimiter {
 
         // Check concurrent limit
         {
-            let active = self.active.read().unwrap();
+            let active = self.active.read().unwrap_or_else(|p| p.into_inner());
             if *active >= self.max_concurrent {
                 return Err(self.backoff_seconds);
             }
@@ -226,7 +227,7 @@ impl RateLimiter {
 
         // Check rate limit
         {
-            let mut requests = self.requests.write().unwrap();
+            let mut requests = self.requests.write().unwrap_or_else(|p| p.into_inner());
 
             // Remove old requests (older than 1 minute)
             let one_minute_ago = now - Duration::from_secs(60);
@@ -241,7 +242,7 @@ impl RateLimiter {
 
         // Increment active count
         {
-            let mut active = self.active.write().unwrap();
+            let mut active = self.active.write().unwrap_or_else(|p| p.into_inner());
             *active += 1;
         }
 
@@ -250,7 +251,7 @@ impl RateLimiter {
 
     /// Release the permission
     pub fn release(&self) {
-        let mut active = self.active.write().unwrap();
+        let mut active = self.active.write().unwrap_or_else(|p| p.into_inner());
         if *active > 0 {
             *active -= 1;
         }
@@ -258,8 +259,8 @@ impl RateLimiter {
 
     /// Get current stats
     pub fn stats(&self) -> RateLimiterStats {
-        let active = *self.active.read().unwrap();
-        let requests = self.requests.read().unwrap();
+        let active = *self.active.read().unwrap_or_else(|p| p.into_inner());
+        let requests = self.requests.read().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         let one_minute_ago = now - Duration::from_secs(60);
         let recent_count = requests.iter().filter(|ts| **ts > one_minute_ago).count();
