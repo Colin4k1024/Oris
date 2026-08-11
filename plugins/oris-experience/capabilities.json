@@ -1,0 +1,30 @@
+{
+  "schema_version": "oris.agent-capabilities/v1",
+  "server": "oris-experience",
+  "protocol_versions": ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"],
+  "operations": [
+    {"tool": "oris_experience_search", "scope": "experience:read", "access": "read", "rest": "GET /v1/experience-assets"},
+    {"tool": "oris_experience_get", "scope": "experience:read", "access": "read", "rest": "GET /v1/experience-assets/{id}"},
+    {"tool": "oris_experience_project_skill", "scope": "experience:read", "access": "read", "rest": "GET /v1/experience-assets/{id}/skill"},
+    {"tool": "oris_experience_propose", "scope": "experience:write", "access": "write", "rest": "POST /v1/experience-assets"},
+    {"tool": "oris_experience_begin_use", "scope": "experience:write", "access": "write", "rest": "POST /v1/experience-assets/{id}/use"},
+    {"tool": "oris_experience_record_outcome", "scope": "experience:write", "access": "write", "rest": "POST /v1/experience-assets/{id}/outcomes"},
+    {"tool": "oris_experience_register_public_key", "scope": "experience:write", "access": "write", "rest": "POST /public-keys"},
+    {"tool": "oris_experience_revoke_public_key", "scope": "experience:write", "access": "write", "rest": "DELETE /public-keys/{sender_id}"},
+    {"tool": "oris_experience_promote", "scope": "experience:govern", "access": "govern", "rest": "POST /v1/experience-assets/{id}/promote"},
+    {"tool": "oris_experience_revoke", "scope": "experience:govern", "access": "govern", "rest": "POST /v1/experience-assets/{id}/revoke"},
+    {"tool": "oris_experience_list_api_keys", "scope": "experience:admin", "access": "admin", "rest": "GET /keys"},
+    {"tool": "oris_experience_create_api_key", "scope": "experience:admin", "access": "admin", "rest": "POST /keys"},
+    {"tool": "oris_experience_rotate_api_key", "scope": "experience:admin", "access": "admin", "rest": "POST /keys/{key_id}/rotate"},
+    {"tool": "oris_experience_revoke_api_key", "scope": "experience:admin", "access": "admin", "rest": "DELETE /keys/{key_id}"},
+    {"tool": "oris_experience_list_public_keys", "scope": "experience:admin", "access": "admin", "rest": "GET /public-keys"}
+  ],
+  "resources": [
+    "oris://capabilities",
+    "oris://instructions",
+    "oris://genes/{id}",
+    "oris://capsules/{id}"
+  ],
+  "prompts": ["oris_experience_reuse", "oris_experience_contribute", "oris_experience_govern"],
+  "hosts": ["claude-code", "codex", "opencode", "grok-build"]
+}

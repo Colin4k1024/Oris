@@ -11,7 +11,7 @@ Oris is a control plane for procedural memory. Treat every Gene as a suggestion 
 
 1. Classify the task and gather project/tenant, available tools, permissions, environment versions, and non-negotiable constraints.
 2. Call `oris_experience_search` with structured filters and a concise problem statement. Never execute a result rejected by the hard filters.
-3. Inspect match reasons, applicability boundaries, `do_not_use_when`, safety constraints, tool requirements, and validation contract. Use `oris_experience_get` when full evidence is needed.
+3. Inspect match reasons, applicability boundaries, `do_not_use_when`, safety constraints, tool requirements, and validation contract. Use `oris_experience_get` when full evidence is needed and `oris_experience_project_skill` when a portable reviewable Skill projection is needed. Projection never installs the Skill.
 4. If adopting a Gene, call `oris_experience_begin_use` before applying it. Keep the returned session/run context.
 5. Apply only relevant steps. Preserve native permissions and obtain every required approval.
 6. Run the Gene's validation checks plus the task's normal tests or acceptance criteria.

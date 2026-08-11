@@ -1,5 +1,6 @@
 use oris_experience_repo::{
     control_plane::ExperienceControlPlane,
+    key_service::KeyStore,
     mcp::{ExperienceMcpServer, JsonRpcRequest, McpAuth},
 };
 use std::sync::Arc;
@@ -18,17 +19,28 @@ async fn main() -> anyhow::Result<()> {
     if let Some(parent) = parent {
         std::fs::create_dir_all(parent)?;
     }
+    let key_database = std::env::var("ORIS_EXPERIENCE_KEY_DB")
+        .unwrap_or_else(|_| ".oris/experience_keys.db".into());
+    if let Some(parent) = std::path::Path::new(&key_database)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     let server = ExperienceMcpServer::new(Arc::new(Mutex::new(ExperienceControlPlane::open(
         database,
-    )?)));
+    )?)))
+    .with_key_store(Arc::new(Mutex::new(KeyStore::open(key_database)?)));
     let scopes = std::env::var("ORIS_MCP_SCOPES")
         .unwrap_or_else(|_| "experience:read,experience:write".into());
     let scopes: std::collections::HashSet<_> = scopes.split(',').map(str::trim).collect();
+    let all_scopes = scopes.contains("*");
     let auth = McpAuth {
         agent_id: std::env::var("ORIS_AGENT_ID").unwrap_or_else(|_| "local-agent".into()),
-        can_read: scopes.contains("experience:read"),
-        can_write: scopes.contains("experience:write"),
-        can_govern: scopes.contains("experience:govern"),
+        can_read: all_scopes || scopes.contains("experience:read"),
+        can_write: all_scopes || scopes.contains("experience:write"),
+        can_govern: all_scopes || scopes.contains("experience:govern"),
+        can_admin: all_scopes || scopes.contains("experience:admin"),
     };
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();

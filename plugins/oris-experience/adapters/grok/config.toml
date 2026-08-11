@@ -1,0 +1,14 @@
+[mcp_servers.oris-experience]
+command = "./plugins/oris-experience/scripts/start-oris-experience-mcp"
+args = []
+env = { ORIS_AGENT_ID = "grok-build", ORIS_MCP_SCOPES = "experience:read,experience:write" }
+enabled = true
+startup_timeout_sec = 120
+tool_timeout_sec = 600
+
+[permission]
+rules = [
+  { action = "allow", tool = "MCPTool", pattern = "oris-experience__oris_experience_search" },
+  { action = "allow", tool = "MCPTool", pattern = "oris-experience__oris_experience_get" },
+  { action = "allow", tool = "MCPTool", pattern = "oris-experience__oris_experience_project_skill" }
+]

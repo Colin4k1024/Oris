@@ -3,7 +3,10 @@
     "oris-experience": {
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/start-oris-experience-mcp",
       "args": [],
-      "env": {"ORIS_AGENT_ID": "claude-code"}
+      "env": {
+        "ORIS_AGENT_ID": "claude-code",
+        "ORIS_MCP_SCOPES": "experience:read,experience:write"
+      }
     }
   }
 }

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "oris-experience": {
+      "type": "local",
+      "command": ["./plugins/oris-experience/scripts/start-oris-experience-mcp"],
+      "enabled": true,
+      "environment": {
+        "ORIS_AGENT_ID": "opencode",
+        "ORIS_MCP_SCOPES": "experience:read,experience:write"
+      },
+      "timeout": 600000
+    }
+  },
+  "plugin": ["./plugins/oris-experience/adapters/opencode/oris-experience.js"],
+  "permission": {
+    "oris-experience_*": "ask",
+    "oris-experience_oris_experience_search": "allow",
+    "oris-experience_oris_experience_get": "allow",
+    "oris-experience_oris_experience_project_skill": "allow"
+  }
+}

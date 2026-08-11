@@ -597,8 +597,10 @@ async fn mcp_http(
         can_read: caller.has_scope("experience:read"),
         can_write: caller.has_scope("experience:write"),
         can_govern: caller.has_scope("experience:govern"),
+        can_admin: caller.has_scope("experience:admin"),
     };
-    let server = ExperienceMcpServer::new(state.experience_store.clone());
+    let server = ExperienceMcpServer::new(state.experience_store.clone())
+        .with_key_store(state.key_store.clone());
     Ok(match server.handle(request, &auth).await {
         Some(response) => Json(response).into_response(),
         None => StatusCode::ACCEPTED.into_response(),

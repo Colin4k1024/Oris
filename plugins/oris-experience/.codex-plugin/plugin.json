@@ -7,7 +7,10 @@
   "mcpServers": {
     "oris-experience": {
       "command": "./scripts/start-oris-experience-mcp",
-      "env": {"ORIS_AGENT_ID": "codex"}
+      "env": {
+        "ORIS_AGENT_ID": "codex",
+        "ORIS_MCP_SCOPES": "experience:read,experience:write"
+      }
     }
   },
   "interface": {
@@ -16,7 +19,7 @@
     "longDescription": "Searches governed Genes, preserves Capsule evidence, records usage outcomes, and promotes only repeatedly verified local skills.",
     "developerName": "Oris Runtime",
     "category": "Productivity",
-    "capabilities": ["Interactive", "Read", "Write"],
+    "capabilities": ["Interactive", "Read", "Write", "Governance"],
     "defaultPrompt": [
       "Find a verified Oris experience for this task.",
       "Record the validated outcome of this Oris Gene.",

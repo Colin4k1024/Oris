@@ -35,11 +35,13 @@ Run STDIO with:
 cargo run -p oris-experience-repo --bin oris-experience-mcp
 ```
 
-The HTTP server exposes the same JSON-RPC handler at `POST /mcp`. Implemented methods include `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, and `resources/read`. Ordinary callers see search/get/propose/begin-use/record-outcome; governance callers additionally see promote/revoke.
+The HTTP server exposes the same JSON-RPC handler at `POST /mcp`. Implemented methods include `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`, `prompts/list`, and `prompts/get`. Tool discovery is scope-trimmed: read callers see search/get/Skill projection; write callers see propose/begin-use/record-outcome and may manage only their own public key; governance callers additionally see promote/revoke; explicitly authorized administrators see API-key lifecycle and public-key registry operations.
 
-Advertised tool names use the portable underscore form (`oris_experience_search`, `oris_experience_get`, `oris_experience_propose`, `oris_experience_begin_use`, `oris_experience_record_outcome`, `oris_experience_promote`, and `oris_experience_revoke`). Direct calls using the original dotted names remain accepted for one compatibility cycle. The portable form is required because strict Agent clients reject dots in MCP tool names.
+Advertised tool names use the portable underscore form; the complete ordered list is published in [`plugins/oris-experience/capabilities.json`](../plugins/oris-experience/capabilities.json) and verified against the server constants by tests. Direct calls using the original dotted names remain accepted for one compatibility cycle. The portable form is required because strict Agent clients reject dots in MCP tool names. `experience:admin` is separate from `experience:govern` and is never granted by a packaged host default.
 
-Resources use `oris://genes/{id}` and `oris://capsules/{id}`.
+Resources use `oris://genes/{id}` and `oris://capsules/{id}`. Static resources `oris://capabilities` and `oris://instructions` let a host inspect its granted surface and the safe lifecycle at runtime. User-controlled prompts cover reuse, contribution, and governance; the governance prompt is hidden without `experience:govern`.
+
+The historical `/experience` endpoint and `/health` probe remain HTTP-only compatibility and operational surfaces. Every current governed repository operation is available through MCP; a transport health probe is deliberately not a model-callable tool.
 
 ## Agent packages
 
@@ -47,4 +49,8 @@ Resources use `oris://genes/{id}` and `oris://capsules/{id}`.
 
 - Codex loads its `.codex-plugin` manifest, Skill, and MCP server.
 - Claude Code loads the same Skill and `.mcp.json`; hooks persist begun/recorded use state and mark an unclosed task inconclusive without fabricating success.
+- OpenCode uses the native MCP configuration and tool/session hook in `adapters/opencode`.
+- Grok Build can load the Claude-compatible plugin directly or use the explicit native config in `adapters/grok`.
 - OpenClaw loads the compatible bundle Skill. Projected skills must move through Skill Workshop: Oris candidate → pending, quarantined → quarantined, stable → eligible for operator-approved apply.
+
+The authoritative cross-host operation list is [`plugins/oris-experience/capabilities.json`](../plugins/oris-experience/capabilities.json). Tests compare it to the server's Rust tool constants so an adapter cannot silently omit an Oris operation.

@@ -1,0 +1,3 @@
+[mcp_servers.oris-experience]
+command = "./plugins/oris-experience/scripts/start-oris-experience-mcp"
+env = { ORIS_AGENT_ID = "codex", ORIS_MCP_SCOPES = "experience:read,experience:write" }
