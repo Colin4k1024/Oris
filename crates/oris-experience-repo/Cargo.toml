@@ -12,7 +12,7 @@ keywords = ["oris", "experience-repo", "gene", "capsule", "evolution"]
 [dependencies]
 # HTTP server
 axum = { version = "0.8", features = ["macros"] }
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
@@ -47,6 +47,7 @@ ed25519-dalek = "2"
 
 # Gene store (SQLite-based) — local workspace path so local changes take effect
 oris-genestore = { path = "../oris-genestore" }
+oris-experience-contract = { path = "../oris-experience-contract" }
 
 # Evolution types — local workspace path
 oris-evolution = { path = "../oris-evolution" }

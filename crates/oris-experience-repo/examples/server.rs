@@ -17,8 +17,16 @@ async fn main() -> anyhow::Result<()> {
     // Create an initial API key
     {
         let key_store = KeyStore::open(".oris/key_store.db")?;
-        let (raw_key, key_info) =
-            key_store.create_key("admin", Some("Initial admin key".to_string()), None)?;
+        let (raw_key, key_info) = key_store.create_key_with_scopes(
+            "admin",
+            Some("Initial admin key".to_string()),
+            None,
+            vec![
+                "experience:read".into(),
+                "experience:write".into(),
+                "experience:govern".into(),
+            ],
+        )?;
         println!("Created initial API key:");
         println!("  Key ID: {}", key_info.key_id);
         println!("  API Key: {}", raw_key);

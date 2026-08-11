@@ -45,3 +45,4 @@ export type {
 } from "./gene.js";
 export type { OrisConfig } from "./client.js";
 export type { SyncConfig } from "./sync.js";
+export * from "./experience-v1.js";

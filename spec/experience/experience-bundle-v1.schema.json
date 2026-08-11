@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oris.dev/schema/experience-bundle-v1.schema.json",
+  "title": "ExperienceBundleV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "gene", "capsules", "usage_receipts"],
+  "properties": {
+    "schema_version": {"const": "oris.experience.bundle/v1"},
+    "gene": {"$ref": "#/$defs/gene"},
+    "capsules": {"type": "array", "items": {"$ref": "#/$defs/capsule"}},
+    "usage_receipts": {"type": "array", "items": {"$ref": "#/$defs/receipt"}}
+  },
+  "$defs": {
+    "stringArray": {"type": "array", "items": {"type": "string"}},
+    "environmentConstraint": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key", "operator", "value"],
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "operator": {"enum": ["equals", "not_equals", "contains", "semver", "exists"]},
+        "value": {}
+      }
+    },
+    "applicability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["required_signals", "excluded_signals", "environments", "project_ids", "tenant_ids", "do_not_use_when"],
+      "properties": {
+        "required_signals": {"$ref": "#/$defs/stringArray"},
+        "excluded_signals": {"$ref": "#/$defs/stringArray"},
+        "environments": {"type": "array", "items": {"$ref": "#/$defs/environmentConstraint"}},
+        "project_ids": {"$ref": "#/$defs/stringArray"},
+        "tenant_ids": {"$ref": "#/$defs/stringArray"},
+        "do_not_use_when": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "procedureStep": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "instruction", "tool", "requires_approval", "expected_output"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "instruction": {"type": "string", "minLength": 1},
+        "tool": {"type": ["string", "null"]}, "requires_approval": {"type": "boolean"},
+        "expected_output": {"type": ["string", "null"]}
+      }
+    },
+    "toolRequirement": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "minimum_version", "required_permissions"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1}, "minimum_version": {"type": ["string", "null"]},
+        "required_permissions": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["suggestion_only", "forbidden_operations", "required_approvals", "secret_handling"],
+      "properties": {
+        "suggestion_only": {"const": true}, "forbidden_operations": {"$ref": "#/$defs/stringArray"},
+        "required_approvals": {"$ref": "#/$defs/stringArray"},
+        "secret_handling": {"enum": ["redact", "reject", "allow_references_only"]}
+      }
+    },
+    "validationCheck": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "command_or_assertion", "evidence_kind", "timeout_seconds"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "command_or_assertion": {"type": "string", "minLength": 1},
+        "evidence_kind": {"enum": ["test", "command", "diff", "artifact", "human_approval"]},
+        "timeout_seconds": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "validationContract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["checks", "success_condition"],
+      "properties": {
+        "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/validationCheck"}},
+        "success_condition": {"enum": ["all", "any", "human_approved"]}
+      }
+    },
+    "provenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_agent", "source_run_id", "trace_refs", "extractor_version", "verified_successes", "verified_failures", "distinct_task_contexts"],
+      "properties": {
+        "source_agent": {"type": "string", "minLength": 1}, "source_run_id": {"type": "string", "minLength": 1},
+        "trace_refs": {"$ref": "#/$defs/stringArray"}, "extractor_version": {"type": ["string", "null"]},
+        "verified_successes": {"type": "integer", "minimum": 0}, "verified_failures": {"type": "integer", "minimum": 0},
+        "distinct_task_contexts": {"type": "integer", "minimum": 0}
+      }
+    },
+    "gene": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "name", "description", "scope", "task_category", "applicability", "steps", "tool_requirements", "safety", "validation", "provenance", "lifecycle", "created_at", "updated_at", "metadata"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "version": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1}, "description": {"type": "string"},
+        "scope": {"enum": ["local", "project", "tenant", "team", "network"]},
+        "task_category": {"type": "string", "minLength": 1}, "applicability": {"$ref": "#/$defs/applicability"},
+        "steps": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/procedureStep"}},
+        "tool_requirements": {"type": "array", "items": {"$ref": "#/$defs/toolRequirement"}},
+        "safety": {"$ref": "#/$defs/safety"}, "validation": {"$ref": "#/$defs/validationContract"},
+        "provenance": {"$ref": "#/$defs/provenance"},
+        "lifecycle": {"enum": ["candidate", "stable", "deprecated", "quarantined", "revoked"]},
+        "created_at": {"type": "string", "format": "date-time"}, "updated_at": {"type": "string", "format": "date-time"},
+        "metadata": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "checkResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["check_id", "passed", "evidence_ref"],
+      "properties": {"check_id": {"type": "string"}, "passed": {"type": "boolean"}, "evidence_ref": {"type": ["string", "null"]}}
+    },
+    "validationResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "checks", "summary"],
+      "properties": {
+        "status": {"enum": ["succeeded", "failed", "safety_failed", "inconclusive"]},
+        "checks": {"type": "array", "items": {"$ref": "#/$defs/checkResult"}}, "summary": {"type": ["string", "null"]}
+      }
+    },
+    "capsule": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "gene_id", "gene_version", "environment_fingerprint", "task_context_hash", "execution_evidence_hash", "validation", "artifact_refs", "redaction", "created_at"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "gene_id": {"type": "string", "minLength": 1},
+        "gene_version": {"type": "integer", "minimum": 1}, "environment_fingerprint": {"type": "string", "minLength": 1},
+        "task_context_hash": {"type": "string", "minLength": 1}, "execution_evidence_hash": {"type": "string", "minLength": 1},
+        "validation": {"$ref": "#/$defs/validationResult"}, "artifact_refs": {"$ref": "#/$defs/stringArray"},
+        "redaction": {"enum": ["redacted", "verified_clean", "contains_references_only", "rejected"]},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "cost": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_tokens", "output_tokens", "latency_ms", "monetary_cost", "currency"],
+      "properties": {
+        "input_tokens": {"type": ["integer", "null"], "minimum": 0}, "output_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "latency_ms": {"type": ["integer", "null"], "minimum": 0}, "monetary_cost": {"type": ["number", "null"], "minimum": 0},
+        "currency": {"type": ["string", "null"]}
+      }
+    },
+    "receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "gene_id", "gene_version", "agent_id", "run_id", "task_context_hash", "adoption", "applied_step_ids", "outcome", "failure_reason", "test_evidence_refs", "cost", "created_at"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "gene_id": {"type": "string", "minLength": 1}, "gene_version": {"type": "integer", "minimum": 1},
+        "agent_id": {"type": "string", "minLength": 1}, "run_id": {"type": "string", "minLength": 1}, "task_context_hash": {"type": "string", "minLength": 1},
+        "adoption": {"enum": ["adopted", "partially_adopted", "rejected", "not_applicable"]},
+        "applied_step_ids": {"$ref": "#/$defs/stringArray"}, "outcome": {"enum": ["succeeded", "failed", "safety_failed", "inconclusive"]},
+        "failure_reason": {"type": ["string", "null"]}, "test_evidence_refs": {"$ref": "#/$defs/stringArray"},
+        "cost": {"oneOf": [{"$ref": "#/$defs/cost"}, {"type": "null"}]}, "created_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

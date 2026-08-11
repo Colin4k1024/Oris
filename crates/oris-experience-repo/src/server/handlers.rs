@@ -5,12 +5,15 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Html,
+    response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use chrono::Utc;
+use oris_experience_contract::{CapsuleV1, ExperienceBundleV1, ExperienceScope, UsageReceiptV1};
 use oris_genestore::{Gene, GeneQuery, GeneStore};
+use serde::Deserialize;
+use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::api::request::{
@@ -21,8 +24,10 @@ use crate::api::response::{
     NetworkAsset, PublicKeyInfo, RegisterPublicKeyResponse, RotateKeyResponse, ShareResponse,
     SyncAudit,
 };
+use crate::control_plane::{ControlPlaneError, ExperienceControlPlane, ExperienceSearchQuery};
 use crate::error::ExperienceRepoError;
 use crate::key_service::{KeyId, KeyStore};
+use crate::mcp::{ExperienceMcpServer, JsonRpcRequest, McpAuth};
 use crate::oen::OenVerifier;
 use crate::server::middleware::rate_limit::{RateLimitConfig, RateLimiterRegistry};
 use crate::server::ServerConfig;
@@ -65,6 +70,7 @@ fn check_rate_limit(
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<Mutex<dyn GeneStore>>,
+    pub experience_store: Arc<Mutex<ExperienceControlPlane>>,
     pub key_store: Arc<Mutex<KeyStore>>,
     pub oen_verifier: OenVerifier,
     pub rate_limiter: RateLimiterRegistry,
@@ -83,6 +89,10 @@ pub fn create_routes(config: ServerConfig) -> Router {
 
     let state = AppState {
         store,
+        experience_store: Arc::new(Mutex::new(
+            ExperienceControlPlane::open(&config.store_path)
+                .expect("failed to open experience control plane"),
+        )),
         key_store: Arc::new(Mutex::new(key_store)),
         oen_verifier: OenVerifier::new(),
         rate_limiter: RateLimiterRegistry::new(&RateLimitConfig::default()),
@@ -94,15 +104,38 @@ pub fn create_routes(config: ServerConfig) -> Router {
         // Experience endpoints
         .route("/experience", get(fetch_experiences))
         .route("/experience", post(share_experience))
+        // Canonical v1 experience contract and lifecycle API
+        .route("/v1/experience-assets", get(search_experience_assets))
+        .route("/v1/experience-assets", post(propose_experience_asset))
+        .route("/v1/experience-assets/{id}", get(get_experience_asset))
+        .route(
+            "/v1/experience-assets/{id}/skill",
+            get(get_experience_skill),
+        )
+        .route("/v1/experience-assets/{id}/use", post(begin_experience_use))
+        .route(
+            "/v1/experience-assets/{id}/outcomes",
+            post(record_experience_outcome),
+        )
+        .route(
+            "/v1/experience-assets/{id}/promote",
+            post(promote_experience_asset),
+        )
+        .route(
+            "/v1/experience-assets/{id}/revoke",
+            post(revoke_experience_asset),
+        )
+        // Stateless Streamable HTTP mode (JSON response branch).
+        .route("/mcp", post(mcp_http))
         // Key management endpoints
         .route("/keys", get(list_keys))
         .route("/keys", post(create_key))
-        .route("/keys/:key_id", delete(revoke_key))
-        .route("/keys/:key_id/rotate", post(rotate_key))
+        .route("/keys/{key_id}", delete(revoke_key))
+        .route("/keys/{key_id}/rotate", post(rotate_key))
         // Public key management endpoints (PKI)
         .route("/public-keys", get(list_public_keys))
         .route("/public-keys", post(register_public_key))
-        .route("/public-keys/:sender_id", delete(revoke_public_key))
+        .route("/public-keys/{sender_id}", delete(revoke_public_key))
         // Health
         .route("/health", get(health))
         .with_state(state)
@@ -227,10 +260,10 @@ async fn share_experience(
         return Err(ExperienceRepoError::SenderMismatch);
     }
 
-    // Extract gene from envelope payload
-    let payload = request.envelope.payload;
-    let gene: Gene =
-        serde_json::from_value(payload).map_err(|_| ExperienceRepoError::InvalidEnvelope)?;
+    // One compatibility cycle: accept the historic direct Gene OR exactly one
+    // evolution-network Gene asset. Mixed/multi-asset envelopes are rejected
+    // explicitly because the legacy endpoint cannot preserve them losslessly.
+    let gene = decode_legacy_gene(request.envelope.payload, &key_info.agent_id)?;
 
     // Store the gene
     let store = state.store.lock().await;
@@ -246,6 +279,330 @@ async fn share_experience(
         status: "published".to_string(),
         published_at: now,
     }))
+}
+
+fn decode_legacy_gene(payload: Value, contributor_id: &str) -> Result<Gene, ExperienceRepoError> {
+    if let Ok(gene) = serde_json::from_value(payload.clone()) {
+        return Ok(gene);
+    }
+    let assets: Vec<oris_evolution_network::NetworkAsset> =
+        serde_json::from_value(payload).map_err(|_| ExperienceRepoError::InvalidEnvelope)?;
+    if assets.len() != 1 {
+        return Err(ExperienceRepoError::InvalidContract(
+            "legacy /experience accepts exactly one Gene asset; use /v1/experience-assets for lossless bundles".into(),
+        ));
+    }
+    match assets.into_iter().next().unwrap() {
+        oris_evolution_network::NetworkAsset::Gene { gene } => Ok(Gene {
+            id: uuid::Uuid::parse_str(&gene.id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+            name: gene
+                .task_class_id
+                .clone()
+                .unwrap_or_else(|| format!("Imported gene {}", gene.id)),
+            description: format!("Legacy OEN import for {}", gene.id),
+            tags: gene.signals,
+            template: gene.strategy.join("\n"),
+            preconditions: Vec::new(),
+            validation_steps: gene.validation,
+            confidence: 0.5,
+            use_count: 0,
+            success_count: 0,
+            quality_score: 0.5,
+            created_at: Utc::now(),
+            last_used_at: None,
+            last_boosted_at: None,
+            contributor_id: Some(contributor_id.into()),
+        }),
+        _ => Err(ExperienceRepoError::InvalidContract(
+            "legacy /experience cannot represent Capsule or EvolutionEvent without field loss"
+                .into(),
+        )),
+    }
+}
+
+// ============================================================================
+// Canonical ExperienceBundleV1 API
+// ============================================================================
+
+fn map_control_error(error: ControlPlaneError) -> ExperienceRepoError {
+    match error {
+        ControlPlaneError::NotFound(id) => ExperienceRepoError::AssetNotFound(id),
+        ControlPlaneError::GovernanceRequired => {
+            ExperienceRepoError::Forbidden("governance permission required".into())
+        }
+        ControlPlaneError::Contract(message) | ControlPlaneError::InvalidTransition(message) => {
+            ExperienceRepoError::InvalidContract(message)
+        }
+        other => ExperienceRepoError::InternalError(other.to_string()),
+    }
+}
+
+async fn authenticate(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    scope: &str,
+) -> Result<crate::key_service::ApiKeyInfo, ExperienceRepoError> {
+    let api_key = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ExperienceRepoError::ApiKeyMissing)?;
+    let info = state.key_store.lock().await.verify_key(api_key)?;
+    if !info.has_scope(scope) {
+        return Err(ExperienceRepoError::Forbidden(format!(
+            "missing scope {scope}"
+        )));
+    }
+    Ok(info)
+}
+
+async fn search_experience_assets(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<ExperienceSearchHttpQuery>,
+) -> Result<Json<Value>, ExperienceRepoError> {
+    authenticate(&state, &headers, "experience:read").await?;
+    let query = query.into_search_query()?;
+    let results = state
+        .experience_store
+        .lock()
+        .await
+        .search(&query)
+        .map_err(map_control_error)?;
+    let next_cursor = results.first().and_then(|v| v.next_cursor.clone());
+    Ok(Json(json!({"items":results,"next_cursor":next_cursor})))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExperienceSearchHttpQuery {
+    #[serde(default)]
+    text: String,
+    task_category: Option<String>,
+    project_id: Option<String>,
+    tenant_id: Option<String>,
+    available_tools: Option<String>,
+    environment: Option<String>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+impl ExperienceSearchHttpQuery {
+    fn into_search_query(self) -> Result<ExperienceSearchQuery, ExperienceRepoError> {
+        let environment = self
+            .environment
+            .map(|raw| {
+                serde_json::from_str(&raw).map_err(|e| {
+                    ExperienceRepoError::QueryParseError(format!(
+                        "environment must be a JSON object: {e}"
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or_default();
+        Ok(ExperienceSearchQuery {
+            text: self.text,
+            task_category: self.task_category,
+            project_id: self.project_id,
+            tenant_id: self.tenant_id,
+            available_tools: self
+                .available_tools
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            environment,
+            limit: self.limit.unwrap_or(10),
+            cursor: self.cursor,
+        })
+    }
+}
+
+async fn propose_experience_asset(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(bundle): Json<ExperienceBundleV1>,
+) -> Result<(StatusCode, Json<Value>), ExperienceRepoError> {
+    let caller = authenticate(&state, &headers, "experience:write").await?;
+    if bundle.gene.provenance.source_agent != caller.agent_id {
+        return Err(ExperienceRepoError::Forbidden(
+            "provenance.source_agent must match the API key agent".into(),
+        ));
+    }
+    let gene = state
+        .experience_store
+        .lock()
+        .await
+        .propose(&bundle)
+        .map_err(map_control_error)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"gene":gene,"status":"candidate"})),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct AssetVersionQuery {
+    version: Option<u32>,
+}
+async fn get_experience_asset(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<AssetVersionQuery>,
+) -> Result<Json<ExperienceBundleV1>, ExperienceRepoError> {
+    authenticate(&state, &headers, "experience:read").await?;
+    Ok(Json(
+        state
+            .experience_store
+            .lock()
+            .await
+            .bundle(&id, query.version)
+            .map_err(map_control_error)?,
+    ))
+}
+
+async fn get_experience_skill(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<AssetVersionQuery>,
+) -> Result<Json<Value>, ExperienceRepoError> {
+    authenticate(&state, &headers, "experience:read").await?;
+    let projection = state
+        .experience_store
+        .lock()
+        .await
+        .skill_projection(&id, query.version)
+        .map_err(map_control_error)?;
+    Ok(Json(serde_json::to_value(projection).map_err(|e| {
+        ExperienceRepoError::InternalError(e.to_string())
+    })?))
+}
+
+#[derive(Debug, Deserialize)]
+struct BeginUseRequest {
+    gene_version: u32,
+    run_id: String,
+    task_context_hash: String,
+}
+async fn begin_experience_use(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<BeginUseRequest>,
+) -> Result<Json<Value>, ExperienceRepoError> {
+    let caller = authenticate(&state, &headers, "experience:write").await?;
+    let session = state
+        .experience_store
+        .lock()
+        .await
+        .begin_use(
+            &id,
+            request.gene_version,
+            &caller.agent_id,
+            &request.run_id,
+            &request.task_context_hash,
+        )
+        .map_err(map_control_error)?;
+    Ok(Json(serde_json::to_value(session).map_err(|e| {
+        ExperienceRepoError::InternalError(e.to_string())
+    })?))
+}
+
+#[derive(Debug, Deserialize)]
+struct OutcomeRequest {
+    receipt: UsageReceiptV1,
+    capsule: Option<CapsuleV1>,
+}
+async fn record_experience_outcome(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<OutcomeRequest>,
+) -> Result<Json<Value>, ExperienceRepoError> {
+    let caller = authenticate(&state, &headers, "experience:write").await?;
+    if request.receipt.gene_id != id || request.receipt.agent_id != caller.agent_id {
+        return Err(ExperienceRepoError::Forbidden(
+            "outcome identity does not match caller or route".into(),
+        ));
+    }
+    let gene = state
+        .experience_store
+        .lock()
+        .await
+        .record_outcome(&request.receipt, request.capsule.as_ref())
+        .map_err(map_control_error)?;
+    Ok(Json(json!({"gene":gene,"lifecycle":gene.lifecycle})))
+}
+
+#[derive(Debug, Deserialize)]
+struct PromoteRequest {
+    gene_version: u32,
+    scope: ExperienceScope,
+}
+async fn promote_experience_asset(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<PromoteRequest>,
+) -> Result<Json<Value>, ExperienceRepoError> {
+    authenticate(&state, &headers, "experience:govern").await?;
+    let gene = state
+        .experience_store
+        .lock()
+        .await
+        .promote(&id, request.gene_version, request.scope, true)
+        .map_err(map_control_error)?;
+    Ok(Json(json!({"gene":gene})))
+}
+
+#[derive(Debug, Deserialize)]
+struct RevokeRequest {
+    gene_version: u32,
+    #[serde(default)]
+    quarantine: bool,
+}
+async fn revoke_experience_asset(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<RevokeRequest>,
+) -> Result<Json<Value>, ExperienceRepoError> {
+    authenticate(&state, &headers, "experience:govern").await?;
+    let gene = state
+        .experience_store
+        .lock()
+        .await
+        .revoke(&id, request.gene_version, request.quarantine, true)
+        .map_err(map_control_error)?;
+    Ok(Json(json!({"gene":gene})))
+}
+
+async fn mcp_http(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> Result<Response, ExperienceRepoError> {
+    let api_key = headers
+        .get("X-Api-Key")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(ExperienceRepoError::ApiKeyMissing)?;
+    let caller = state.key_store.lock().await.verify_key(api_key)?;
+    let auth = McpAuth {
+        agent_id: caller.agent_id.clone(),
+        can_read: caller.has_scope("experience:read"),
+        can_write: caller.has_scope("experience:write"),
+        can_govern: caller.has_scope("experience:govern"),
+    };
+    let server = ExperienceMcpServer::new(state.experience_store.clone());
+    Ok(match server.handle(request, &auth).await {
+        Some(response) => Json(response).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    })
 }
 
 // ============================================================================
@@ -295,13 +652,31 @@ async fn create_key(
         .get("X-Api-Key")
         .and_then(|v| v.to_str().ok())
         .ok_or(ExperienceRepoError::ApiKeyMissing)?;
-    state.key_store.lock().await.verify_key(api_key)?;
-
-    let (raw_key, key_info) = state.key_store.lock().await.create_key(
-        &request.agent_id,
-        request.description,
-        request.ttl_days,
-    )?;
+    let caller = state.key_store.lock().await.verify_key(api_key)?;
+    if request
+        .scopes
+        .iter()
+        .any(|scope| scope == "experience:govern")
+        && !caller.has_scope("experience:govern")
+    {
+        return Err(ExperienceRepoError::Forbidden(
+            "only governance keys can delegate governance".into(),
+        ));
+    }
+    let (raw_key, key_info) = if request.scopes.is_empty() {
+        state.key_store.lock().await.create_key(
+            &request.agent_id,
+            request.description,
+            request.ttl_days,
+        )?
+    } else {
+        state.key_store.lock().await.create_key_with_scopes(
+            &request.agent_id,
+            request.description,
+            request.ttl_days,
+            request.scopes,
+        )?
+    };
 
     Ok(Json(CreateKeyResponse {
         key_id: key_info.key_id.0,
@@ -555,6 +930,7 @@ mod tests {
 
         AppState {
             store: Arc::new(Mutex::new(store)),
+            experience_store: Arc::new(Mutex::new(ExperienceControlPlane::memory().unwrap())),
             key_store: Arc::new(Mutex::new(key_store)),
             oen_verifier: OenVerifier::new(),
             rate_limiter: RateLimiterRegistry::new(&RateLimitConfig::default()),
@@ -616,6 +992,52 @@ mod tests {
         assert!(body.contains("/health"));
     }
 
+    #[test]
+    fn router_uses_axum_v08_path_syntax() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ServerConfig::default()
+            .with_store_path(dir.path().join("experience.db").to_string_lossy())
+            .with_key_store_path(dir.path().join("keys.db").to_string_lossy());
+        let _router = create_routes(config);
+    }
+
+    #[test]
+    fn legacy_network_asset_array_converts_exactly_one_gene() {
+        let payload = json!([{"kind":"gene","gene":{
+            "id":"0fdb5a82-a582-4eb9-ad4d-ab7ae2b49c11",
+            "signals":["timeout"],"strategy":["retry once"],"validation":["cargo test"],
+            "task_class_id":"software.http.timeout"
+        }}]);
+        let gene = decode_legacy_gene(payload, "agent-a").unwrap();
+        assert_eq!(gene.tags, vec!["timeout"]);
+        assert_eq!(gene.contributor_id.as_deref(), Some("agent-a"));
+    }
+
+    #[test]
+    fn legacy_endpoint_rejects_multi_asset_payload_without_field_loss() {
+        let asset = json!({"kind":"gene","gene":{"id":"legacy","signals":[],"strategy":["step"],"validation":["test"]}});
+        let error = decode_legacy_gene(json!([asset.clone(), asset]), "agent-a").unwrap_err();
+        assert!(matches!(error, ExperienceRepoError::InvalidContract(_)));
+    }
+
+    #[test]
+    fn v1_http_search_decodes_structured_environment_and_tools() {
+        let query = ExperienceSearchHttpQuery {
+            text: "timeout".into(),
+            task_category: None,
+            project_id: Some("oris".into()),
+            tenant_id: None,
+            available_tools: Some("cargo,git".into()),
+            environment: Some(r#"{"language":"rust"}"#.into()),
+            limit: Some(5),
+            cursor: None,
+        }
+        .into_search_query()
+        .unwrap();
+        assert_eq!(query.available_tools, vec!["cargo", "git"]);
+        assert_eq!(query.environment["language"], json!("rust"));
+    }
+
     #[tokio::test]
     async fn test_create_and_list_key() {
         let (state, admin_key) = create_test_state_with_key();
@@ -626,6 +1048,7 @@ mod tests {
             agent_id: "agent-123".to_string(),
             ttl_days: Some(30),
             description: Some("test key".to_string()),
+            scopes: Vec::new(),
         };
 
         let create_response =
@@ -651,6 +1074,7 @@ mod tests {
             agent_id: "agent-123".to_string(),
             ttl_days: None,
             description: None,
+            scopes: Vec::new(),
         };
 
         let create_response =

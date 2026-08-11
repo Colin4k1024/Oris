@@ -1,0 +1,12 @@
+{
+  "description": "Preserve Oris use sessions and close unreported sessions without manufacturing success evidence.",
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "mcp__oris-experience__oris_experience_begin_use|mcp__oris-experience__oris_experience_record_outcome",
+      "hooks": [{"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/claude_receipt_hook.py"]}]
+    }],
+    "Stop": [{
+      "hooks": [{"type": "command", "command": "python3", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/claude_receipt_hook.py"]}]
+    }]
+  }
+}

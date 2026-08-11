@@ -87,6 +87,9 @@ pub struct ApiKeyInfo {
     pub expires_at: Option<DateTime<Utc>>,
     /// When the key was last used.
     pub last_used_at: Option<DateTime<Utc>>,
+    /// Capability scopes attached to this key.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 impl From<&ApiKey> for ApiKeyInfo {
@@ -99,7 +102,16 @@ impl From<&ApiKey> for ApiKeyInfo {
             created_at: key.created_at,
             expires_at: key.expires_at,
             last_used_at: key.last_used_at,
+            scopes: vec!["experience:read".into(), "experience:write".into()],
         }
+    }
+}
+
+impl ApiKeyInfo {
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes
+            .iter()
+            .any(|candidate| candidate == scope || candidate == "*")
     }
 }
 

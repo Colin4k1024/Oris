@@ -12,7 +12,9 @@ use url::Url;
 
 use crate::api::request::ShareRequest;
 pub use crate::api::response::{FetchResponse, NetworkAsset, ShareResponse};
+use crate::control_plane::{ExperienceSearchQuery, ExperienceSearchResult, UseSession};
 use crate::oen::{MessageType, OenEnvelope};
+use oris_experience_contract::{CapsuleV1, ExperienceBundleV1, GeneV1, UsageReceiptV1};
 
 /// Configuration for the Experience Repository client.
 #[derive(Clone)]
@@ -130,6 +132,124 @@ impl ExperienceRepoClient {
             .map_err(|e| ClientError::ParseError(e.to_string()))?;
 
         Ok(response)
+    }
+
+    /// Search canonical v1 experiences using structural filters and hybrid ranking.
+    pub async fn search_v1(
+        &self,
+        query: &ExperienceSearchQuery,
+    ) -> Result<Vec<ExperienceSearchResult>, ClientError> {
+        let mut url = Url::parse(&self.config.base_url)?.join("/v1/experience-assets")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            if !query.text.is_empty() {
+                pairs.append_pair("text", &query.text);
+            }
+            if let Some(value) = &query.task_category {
+                pairs.append_pair("task_category", value);
+            }
+            if let Some(value) = &query.project_id {
+                pairs.append_pair("project_id", value);
+            }
+            if let Some(value) = &query.tenant_id {
+                pairs.append_pair("tenant_id", value);
+            }
+            if !query.available_tools.is_empty() {
+                pairs.append_pair("available_tools", &query.available_tools.join(","));
+            }
+            if !query.environment.is_empty() {
+                pairs.append_pair(
+                    "environment",
+                    &serde_json::to_string(&query.environment)
+                        .map_err(|e| ClientError::ParseError(e.to_string()))?,
+                );
+            }
+            pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(value) = &query.cursor {
+                pairs.append_pair("cursor", value);
+            }
+        }
+        let value = self
+            .client
+            .get(url)
+            .header("X-Api-Key", &self.config.api_key)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|e| ClientError::HttpError(e.to_string()))?
+            .json::<serde_json::Value>()
+            .await?;
+        serde_json::from_value(
+            value
+                .get("items")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([])),
+        )
+        .map_err(|e| ClientError::ParseError(e.to_string()))
+    }
+
+    /// Propose a lossless candidate bundle. Elevated scope/lifecycle is stripped by the server.
+    pub async fn propose_v1(&self, bundle: &ExperienceBundleV1) -> Result<GeneV1, ClientError> {
+        let url = Url::parse(&self.config.base_url)?.join("/v1/experience-assets")?;
+        let value = self
+            .client
+            .post(url)
+            .header("X-Api-Key", &self.config.api_key)
+            .json(bundle)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|e| ClientError::HttpError(e.to_string()))?
+            .json::<serde_json::Value>()
+            .await?;
+        serde_json::from_value(
+            value
+                .get("gene")
+                .cloned()
+                .ok_or_else(|| ClientError::ParseError("missing gene".into()))?,
+        )
+        .map_err(|e| ClientError::ParseError(e.to_string()))
+    }
+
+    pub async fn begin_use_v1(
+        &self,
+        gene_id: &str,
+        gene_version: u32,
+        run_id: &str,
+        task_context_hash: &str,
+    ) -> Result<UseSession, ClientError> {
+        let url = Url::parse(&self.config.base_url)?
+            .join(&format!("/v1/experience-assets/{gene_id}/use"))?;
+        self.client.post(url).header("X-Api-Key",&self.config.api_key).json(&serde_json::json!({"gene_version":gene_version,"run_id":run_id,"task_context_hash":task_context_hash})).send().await?.error_for_status().map_err(|e|ClientError::HttpError(e.to_string()))?.json().await.map_err(ClientError::NetworkError)
+    }
+
+    pub async fn record_outcome_v1(
+        &self,
+        receipt: &UsageReceiptV1,
+        capsule: Option<&CapsuleV1>,
+    ) -> Result<GeneV1, ClientError> {
+        let url = Url::parse(&self.config.base_url)?.join(&format!(
+            "/v1/experience-assets/{}/outcomes",
+            receipt.gene_id
+        ))?;
+        let value = self
+            .client
+            .post(url)
+            .header("X-Api-Key", &self.config.api_key)
+            .json(&serde_json::json!({"receipt":receipt,"capsule":capsule}))
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|e| ClientError::HttpError(e.to_string()))?
+            .json::<serde_json::Value>()
+            .await?;
+        serde_json::from_value(
+            value
+                .get("gene")
+                .cloned()
+                .ok_or_else(|| ClientError::ParseError("missing gene".into()))?,
+        )
+        .map_err(|e| ClientError::ParseError(e.to_string()))
     }
 
     /// Check if the server is healthy.

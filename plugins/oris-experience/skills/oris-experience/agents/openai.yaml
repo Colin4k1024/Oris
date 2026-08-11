@@ -1,0 +1,4 @@
+interface:
+  display_name: "Oris Experience"
+  short_description: "Reuse verified engineering experience across agents"
+  default_prompt: "Use Oris to find a relevant verified experience, apply it only as a suggestion, validate the result, and record the outcome."

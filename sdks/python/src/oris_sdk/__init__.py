@@ -8,6 +8,7 @@ from oris_sdk.mysql_store import MySQLStore, MySQLConfig
 from oris_sdk.store_protocol import StoreProtocol
 from oris_sdk.sync_manager import SyncManager
 from oris_sdk.client import OrisClient, OrisConfig
+from oris_sdk.experience_v1 import CapsuleV1, ExperienceBundleV1, GeneV1, UsageReceiptV1
 from oris_sdk.evolution import (
     OrisEvolutionAdapter,
     EvolutionSignal,
@@ -53,4 +54,8 @@ __all__ = [
     "Status",
     "ValidationResult",
     "detect_signal",
+    "CapsuleV1",
+    "ExperienceBundleV1",
+    "GeneV1",
+    "UsageReceiptV1",
 ]

@@ -59,6 +59,15 @@ impl KeyStore {
         )?;
 
         self.conn.execute(
+            r#"CREATE TABLE IF NOT EXISTS api_key_scopes (
+                key_id TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                PRIMARY KEY (key_id, scope)
+            )"#,
+            [],
+        )?;
+
+        self.conn.execute(
             r#"
             CREATE INDEX IF NOT EXISTS idx_api_keys_agent_id ON api_keys(agent_id)
             "#,
@@ -148,7 +157,36 @@ impl KeyStore {
             last_used_at: None,
         };
 
-        Ok((raw_key, ApiKeyInfo::from(&api_key)))
+        for scope in ["experience:read", "experience:write"] {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO api_key_scopes (key_id, scope) VALUES (?1, ?2)",
+                params![key_id.0, scope],
+            )?;
+        }
+        Ok((raw_key, self.with_scopes(ApiKeyInfo::from(&api_key))?))
+    }
+
+    /// Create a key with explicit scopes. Callers must enforce governance authorization.
+    pub fn create_key_with_scopes(
+        &self,
+        agent_id: impl Into<String>,
+        description: Option<String>,
+        ttl_days: Option<i64>,
+        scopes: Vec<String>,
+    ) -> Result<(String, ApiKeyInfo), KeyServiceError> {
+        let (raw, mut info) = self.create_key(agent_id, description, ttl_days)?;
+        self.conn.execute(
+            "DELETE FROM api_key_scopes WHERE key_id=?1",
+            params![info.key_id.0],
+        )?;
+        for scope in scopes {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO api_key_scopes (key_id, scope) VALUES (?1,?2)",
+                params![info.key_id.0, scope],
+            )?;
+        }
+        info = self.with_scopes(info)?;
+        Ok((raw, info))
     }
 
     /// Verify an API key and return the associated key info.
@@ -229,7 +267,7 @@ impl KeyStore {
             params![now, key.key_id.0],
         )?;
 
-        Ok(ApiKeyInfo::from(&key))
+        self.with_scopes(ApiKeyInfo::from(&key))
     }
 
     /// List all API keys (without the actual key values).
@@ -275,11 +313,13 @@ impl KeyStore {
                         .ok()
                         .map(|dt| dt.with_timezone(&Utc))
                 }),
+                scopes: Vec::new(),
             })
         })?;
-
-        keys.collect::<Result<Vec<_>, _>>()
-            .map_err(KeyServiceError::from)
+        keys.collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|key| self.with_scopes(key))
+            .collect()
     }
 
     /// Revoke an API key.
@@ -314,12 +354,13 @@ impl KeyStore {
                 |row| row.get(0),
             )
             .map_err(|_| KeyServiceError::KeyNotFound)?;
+        let scopes = self.get_key_info(key_id)?.scopes;
 
         // Revoke the old key
         self.revoke_key(key_id)?;
 
         // Create a new key
-        self.create_key(agent_id, None, ttl_days)
+        self.create_key_with_scopes(agent_id, None, ttl_days, scopes)
     }
 
     /// Get key info by key_id.
@@ -365,9 +406,25 @@ impl KeyStore {
                         .ok()
                         .map(|dt| dt.with_timezone(&Utc))
                 }),
+                scopes: Vec::new(),
             })
         })
         .map_err(|_| KeyServiceError::KeyNotFound)
+        .and_then(|key| self.with_scopes(key))
+    }
+
+    fn with_scopes(&self, mut info: ApiKeyInfo) -> Result<ApiKeyInfo, KeyServiceError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT scope FROM api_key_scopes WHERE key_id=?1 ORDER BY scope")?;
+        info.scopes = stmt
+            .query_map(params![info.key_id.0], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        // Existing databases get least-privilege agent scopes on first use.
+        if info.scopes.is_empty() {
+            info.scopes = vec!["experience:read".into(), "experience:write".into()];
+        }
+        Ok(info)
     }
 
     // -------------------------------------------------------------------------

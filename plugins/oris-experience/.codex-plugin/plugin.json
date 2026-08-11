@@ -1,0 +1,26 @@
+{
+  "name": "oris-experience",
+  "version": "0.1.0",
+  "description": "Retrieve, validate, and improve governed engineering experience across agents",
+  "author": {"name": "Oris Runtime"},
+  "skills": "./skills/",
+  "mcpServers": {
+    "oris-experience": {
+      "command": "./scripts/start-oris-experience-mcp",
+      "env": {"ORIS_AGENT_ID": "codex"}
+    }
+  },
+  "interface": {
+    "displayName": "Oris Experience",
+    "shortDescription": "Reuse verified engineering experience safely.",
+    "longDescription": "Searches governed Genes, preserves Capsule evidence, records usage outcomes, and promotes only repeatedly verified local skills.",
+    "developerName": "Oris Runtime",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": [
+      "Find a verified Oris experience for this task.",
+      "Record the validated outcome of this Oris Gene.",
+      "Propose this verified workflow as an Oris Gene."
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "oris-experience": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/start-oris-experience-mcp",
+      "args": [],
+      "env": {"ORIS_AGENT_ID": "claude-code"}
+    }
+  }
+}

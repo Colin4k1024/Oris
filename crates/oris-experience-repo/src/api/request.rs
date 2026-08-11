@@ -63,6 +63,9 @@ pub struct CreateKeyRequest {
     pub ttl_days: Option<i64>,
     /// Human-readable description.
     pub description: Option<String>,
+    /// Optional capabilities. Only a governance key may delegate governance.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// Request body for rotating an API key.

@@ -1,0 +1,55 @@
+{
+  "schema_version": "oris.experience.bundle/v1",
+  "gene": {
+    "id": "gene-rust-timeout-retry",
+    "version": 1,
+    "name": "Bounded retry for transient Rust HTTP timeouts",
+    "description": "Adds an idempotent bounded retry only for transient timeout failures.",
+    "scope": "local",
+    "task_category": "software.http.timeout",
+    "applicability": {
+      "required_signals": ["rust", "http", "timeout"],
+      "excluded_signals": ["non_idempotent_request"],
+      "environments": [{"key": "language", "operator": "equals", "value": "rust"}],
+      "project_ids": ["oris"],
+      "tenant_ids": [],
+      "do_not_use_when": ["The request is not idempotent", "The failure is a TLS or authentication error"]
+    },
+    "steps": [
+      {"id": "inspect", "instruction": "Confirm the failure is a transient timeout and the operation is idempotent.", "tool": null, "requires_approval": false, "expected_output": "Classified transient timeout"},
+      {"id": "patch", "instruction": "Add a capped exponential retry with jitter and preserve the original error.", "tool": "apply_patch", "requires_approval": false, "expected_output": "Minimal retry patch"}
+    ],
+    "tool_requirements": [{"name": "cargo", "minimum_version": "1.75", "required_permissions": ["read_project", "run_tests"]}],
+    "safety": {"suggestion_only": true, "forbidden_operations": ["disable_tls_verification"], "required_approvals": [], "secret_handling": "redact"},
+    "validation": {
+      "checks": [{"id": "retry-tests", "command_or_assertion": "cargo test retry", "evidence_kind": "test", "timeout_seconds": 120}],
+      "success_condition": "all"
+    },
+    "provenance": {
+      "source_agent": "codex",
+      "source_run_id": "run-example-001",
+      "trace_refs": ["oris://traces/run-example-001"],
+      "extractor_version": "oris-extractor/1",
+      "verified_successes": 0,
+      "verified_failures": 0,
+      "distinct_task_contexts": 0
+    },
+    "lifecycle": "candidate",
+    "created_at": "2026-08-11T08:00:00Z",
+    "updated_at": "2026-08-11T08:00:00Z",
+    "metadata": {"legacy_import": false}
+  },
+  "capsules": [{
+    "id": "capsule-example-001",
+    "gene_id": "gene-rust-timeout-retry",
+    "gene_version": 1,
+    "environment_fingerprint": "sha256:env-example",
+    "task_context_hash": "sha256:task-example",
+    "execution_evidence_hash": "sha256:evidence-example",
+    "validation": {"status": "succeeded", "checks": [{"check_id": "retry-tests", "passed": true, "evidence_ref": "artifact://test/retry-tests"}], "summary": "Retry test passed"},
+    "artifact_refs": ["artifact://diff/retry-patch"],
+    "redaction": "verified_clean",
+    "created_at": "2026-08-11T08:01:00Z"
+  }],
+  "usage_receipts": []
+}

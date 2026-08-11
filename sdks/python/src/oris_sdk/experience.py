@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from oris_sdk.signing import public_key_hex, sign_payload
+from oris_sdk.experience_v1 import ExperienceBundleV1, UsageReceiptV1, CapsuleV1
 
 
 @dataclass
@@ -22,6 +23,10 @@ class ExperienceClient:
     def __init__(self, config: ExperienceConfig, *, client: httpx.Client | None = None):
         self._cfg = config
         self._http = client or httpx.Client()
+
+    @property
+    def agent_id(self) -> str:
+        return self._cfg.sender_id
 
     def share(self, payload: Any) -> dict[str, Any]:
         sig = sign_payload(self._cfg.seed, payload)
@@ -65,6 +70,52 @@ class ExperienceClient:
         resp = self._http.get(
             f"{self._cfg.base_url}/experience",
             params=params or None,
+            headers={"X-Api-Key": self._cfg.api_key},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def search_v1(self, **query: Any) -> dict[str, Any]:
+        params = {key: value for key, value in query.items() if value is not None}
+        if isinstance(params.get("available_tools"), (list, tuple)):
+            params["available_tools"] = ",".join(params["available_tools"])
+        if isinstance(params.get("environment"), dict):
+            params["environment"] = json.dumps(params["environment"], separators=(",", ":"))
+        resp = self._http.get(
+            f"{self._cfg.base_url}/v1/experience-assets",
+            params=params,
+            headers={"X-Api-Key": self._cfg.api_key},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def propose_v1(self, bundle: ExperienceBundleV1) -> dict[str, Any]:
+        bundle.validate()
+        resp = self._http.post(
+            f"{self._cfg.base_url}/v1/experience-assets",
+            json=bundle.to_dict(),
+            headers={"X-Api-Key": self._cfg.api_key},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def begin_use(self, gene_id: str, gene_version: int, run_id: str, task_context_hash: str) -> dict[str, Any]:
+        resp = self._http.post(
+            f"{self._cfg.base_url}/v1/experience-assets/{gene_id}/use",
+            json={"gene_version": gene_version, "run_id": run_id, "task_context_hash": task_context_hash},
+            headers={"X-Api-Key": self._cfg.api_key},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def record_outcome(self, receipt: UsageReceiptV1, capsule: CapsuleV1 | None = None) -> dict[str, Any]:
+        body: dict[str, Any] = {"receipt": vars(receipt)}
+        if capsule is not None:
+            body["capsule"] = vars(capsule)
+        resp = self._http.post(
+            f"{self._cfg.base_url}/v1/experience-assets/{receipt.gene_id}/outcomes",
+            json=body,
+            headers={"X-Api-Key": self._cfg.api_key},
         )
         resp.raise_for_status()
         return resp.json()

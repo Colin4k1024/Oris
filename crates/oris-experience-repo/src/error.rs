@@ -57,6 +57,15 @@ pub enum ExperienceRepoError {
     #[error("duplicate gene")]
     DuplicateGene,
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
+    #[error("experience asset not found: {0}")]
+    AssetNotFound(String),
+
+    #[error("invalid experience contract: {0}")]
+    InvalidContract(String),
+
     #[error("internal error: {0}")]
     InternalError(String),
 }
@@ -162,6 +171,17 @@ impl IntoResponse for ExperienceRepoError {
             ExperienceRepoError::DuplicateGene => {
                 (StatusCode::CONFLICT, "DUPLICATE_GENE", self.to_string())
             }
+            ExperienceRepoError::Forbidden(_) => {
+                (StatusCode::FORBIDDEN, "FORBIDDEN", self.to_string())
+            }
+            ExperienceRepoError::AssetNotFound(_) => {
+                (StatusCode::NOT_FOUND, "ASSET_NOT_FOUND", self.to_string())
+            }
+            ExperienceRepoError::InvalidContract(_) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "INVALID_EXPERIENCE_CONTRACT",
+                self.to_string(),
+            ),
             ExperienceRepoError::GeneStoreError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "GENE_STORE_ERROR",

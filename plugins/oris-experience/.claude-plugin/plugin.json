@@ -1,0 +1,7 @@
+{
+  "name": "oris-experience",
+  "version": "0.1.0",
+  "description": "Governed cross-agent procedural experience with MCP, Skills, and evidence hooks",
+  "author": {"name": "Oris Runtime"},
+  "homepage": "https://github.com/Colin4k1024/Oris"
+}

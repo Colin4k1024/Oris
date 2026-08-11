@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${ORIS_EXPERIENCE_MCP_BIN:-}" ]; then
+  exec "${ORIS_EXPERIENCE_MCP_BIN}"
+fi
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
+if [ -f "$repo_root/Cargo.toml" ]; then
+  exec cargo run --quiet --manifest-path "$repo_root/Cargo.toml" -p oris-experience-repo --bin oris-experience-mcp
+fi
+
+exec oris-experience-mcp
