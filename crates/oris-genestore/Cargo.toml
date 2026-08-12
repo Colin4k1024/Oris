@@ -1,9 +1,12 @@
 [package]
 name = "oris-genestore"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "SQLite-based Gene and Capsule storage for Oris Evolution"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Colin4k1024/Oris"
+documentation = "https://docs.rs/oris-genestore"
+homepage = "https://github.com/Colin4k1024/Oris"
 
 [dependencies]
 anyhow = "1.0"
