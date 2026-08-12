@@ -2,6 +2,8 @@
 
 This document defines the MCP bootstrap integration slice shipped for Oris runtime.
 
+> **Scope clarification:** this page describes only the feature-gated capability-discovery slice in `oris-runtime`. It does not describe the Experience Control Plane MCP Server. The experience server implements the full JSON-RPC tool/resource path used by coding agents; see [Oris experience control plane](experience-control-plane.md) and [Coding Agent onboarding](coding-agent-onboarding.md).
+
 ## Scope in this slice
 
 - Compile-time gate: `mcp-bootstrap` feature.

@@ -27,6 +27,24 @@ Current checked-in boundary:
 
 See [the current project status note](docs/evokernel/current-project-status.md) for a concise external-facing statement of the shipped boundary.
 
+## Use Oris with Your Coding Agent
+
+Oris is not another coding agent. It is an evidence-backed procedural memory layer that lets Claude Code, Codex, OpenCode, Grok, and in-house agents reuse verified engineering experience without treating raw chat history as truth.
+
+When connected, an agent can search before a recurring task, preserve applicability and safety boundaries, validate the procedure in its native sandbox, and record the real outcome. Three evidence-backed successes across at least two independent task contexts, with no failures, promote a local candidate to a stable portable Skill.
+
+![Oris verified cross-agent experience demo](docs/assets/oris-experience-onboarding.gif)
+
+Run the repeatable local MCP scenario:
+
+```bash
+python3 scripts/demo_experience_onboarding.py
+```
+
+This deterministic demo uses the real Oris MCP server and SQLite control plane with Claude Code, Grok, and OpenCode caller identities; it does not invoke language models. See the [demo report](docs/experience-onboarding-demo-2026-08-12.md) for its assertions and evidence boundary, and the [real Claude Code/Grok E2E report](docs/agent-experience-e2e-2026-08-11.md) for model-level interoperability.
+
+Start with the [Coding Agent onboarding guide](docs/coding-agent-onboarding.md). The accepted product direction—one-command detection, connection, diagnostics, and value reporting—is recorded in [ADR-0001](docs/architecture-decisions/0001-upstream-agent-experience-onboarding.md).
+
 ---
 
 ## Capability Boundary
