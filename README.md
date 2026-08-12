@@ -128,6 +128,8 @@ See **[docs/quickstart.md](docs/quickstart.md)** for the full guide covering fea
 
 Maturity below reflects the current checked-in framework surface.
 
+For the complete inventory of all 24 publishable Cargo packages—including primary entry points, low-level evolution components, compatibility tools, registry status, dependency order, and publication gaps—see the **[public crate catalog](docs/public-crates.md)**.
+
 | Component | Crate | Maturity | Gate |
 |---|---|---|---|
 | Evolution Core | `crates/oris-evolution` | Standard supervised baseline with extended lifecycle primitives | `evolution` |
