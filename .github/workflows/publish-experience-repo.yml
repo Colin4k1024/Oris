@@ -19,7 +19,30 @@ jobs:
         with:
           profile: minimal
 
+      - name: Resolve crate version
+        id: crate
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' crates/oris-experience-repo/Cargo.toml | head -1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check crates.io
+        id: registry
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://crates.io/api/v1/crates/oris-experience-repo/${{ steps.crate.outputs.version }}"
+          status=$(curl --silent --show-error --retry 3 --user-agent "Oris release workflow" --output /dev/null --write-out '%{http_code}' "$url")
+          case "$status" in
+            200) echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unexpected crates.io status: $status" >&2; exit 1 ;;
+          esac
+
       - name: Dry-run publish
+        if: steps.registry.outputs.exists != 'true'
         uses: actions-rs/cargo@v1
         with:
           command: publish
@@ -28,10 +51,14 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
 
       - name: Publish to crates.io
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && steps.registry.outputs.exists != 'true'
         uses: actions-rs/cargo@v1
         with:
           command: publish
           args: -p oris-experience-repo --registry crates-io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_TOKEN }}
+
+      - name: Confirm existing release
+        if: steps.registry.outputs.exists == 'true'
+        run: echo "oris-experience-repo ${{ steps.crate.outputs.version }} is already published; skipping upload."

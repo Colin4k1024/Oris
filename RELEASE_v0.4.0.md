@@ -21,6 +21,10 @@ This release exposes the complete governed Oris Experience Repository capability
 - `cargo publish -p oris-genestore --dry-run --registry crates-io`
 - `cargo publish -p oris-evolution-network --dry-run --registry crates-io`
 - `cargo publish -p oris-experience-repo --dry-run --registry crates-io`
+- `cargo publish -p oris-experience-contract --registry crates-io`
+- `cargo publish -p oris-genestore --registry crates-io`
+- `cargo publish -p oris-evolution-network --registry crates-io`
+- `cargo publish -p oris-experience-repo --registry crates-io`
 
 ## Links
 
